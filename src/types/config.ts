@@ -154,8 +154,8 @@ export const defaultConfig: ServerConfig = {
     },
     filesystem: {
       enabled: true,
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-filesystem'],
+      command: 'node',
+      args: ['./dist/servers/filesystem/index.js'],
       autoStart: true,
       restartOnFailure: true,
       maxRestarts: 3,

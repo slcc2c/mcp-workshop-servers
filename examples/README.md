@@ -53,6 +53,24 @@ export GITHUB_TOKEN="your-token-here"
 node examples/basic/github-demo.js
 ```
 
+### Filesystem Demo (`basic/filesystem-demo.js`)
+
+Complete filesystem operations demonstration using the Filesystem MCP server.
+
+**What it demonstrates:**
+- Secure file read/write operations
+- Directory creation and management
+- File copying and moving
+- Real-time file watching
+- Content and filename search
+- Path sandboxing and security
+- Operation tracking
+
+**Usage:**
+```bash
+node examples/basic/filesystem-demo.js
+```
+
 ## Workshop Scenarios
 
 ### Rapid Prototyping Workflow

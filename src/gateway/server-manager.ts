@@ -176,7 +176,7 @@ export class ServerManager extends EventEmitter {
 
   private isBuiltInServer(name: string): boolean {
     // These servers are implemented in this codebase
-    const builtInServers = ['memory', 'docker'];
+    const builtInServers = ['memory', 'docker', 'filesystem'];
     return builtInServers.includes(name);
   }
 
@@ -192,6 +192,11 @@ export class ServerManager extends EventEmitter {
       case 'docker':
         const { DockerServer } = await import('../servers/docker');
         instance = new DockerServer();
+        break;
+        
+      case 'filesystem':
+        const { FilesystemServer } = await import('../../servers/filesystem');
+        instance = new FilesystemServer();
         break;
         
       default:
