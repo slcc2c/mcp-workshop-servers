@@ -1,0 +1,13 @@
+{
+  "name": "@mcp-workshop/github-server",
+  "version": "1.0.0",
+  "description": "GitHub MCP Server for repository management",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@octokit/rest": "^20.0.2"
+  }
+}
