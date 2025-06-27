@@ -71,6 +71,27 @@ Complete filesystem operations demonstration using the Filesystem MCP server.
 node examples/basic/filesystem-demo.js
 ```
 
+### Docker Demo (`basic/docker-demo.js`)
+
+Comprehensive Docker container management using the Docker MCP server.
+
+**What it demonstrates:**
+- Container lifecycle management (create, start, stop, remove)
+- Custom image building from Dockerfile
+- Resource limits and monitoring (memory, CPU)
+- Volume and network management
+- Command execution in running containers
+- Security controls and image allowlists
+- Operation tracking and cleanup
+
+**Prerequisites:**
+- Docker Desktop installed and running
+
+**Usage:**
+```bash
+node examples/basic/docker-demo.js
+```
+
 ## Workshop Scenarios
 
 ### Rapid Prototyping Workflow

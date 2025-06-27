@@ -190,7 +190,7 @@ export class ServerManager extends EventEmitter {
         break;
         
       case 'docker':
-        const { DockerServer } = await import('../servers/docker');
+        const { DockerServer } = await import('../../servers/docker');
         instance = new DockerServer();
         break;
         
