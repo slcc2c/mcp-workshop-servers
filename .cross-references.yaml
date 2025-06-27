@@ -1,0 +1,206 @@
+# Component Relationship Database for AI Context
+# This file maps relationships between system components for AI understanding
+
+components:
+  # Core Infrastructure
+  mcp-gateway:
+    file: "docs/api/gateway.md"
+    type: "service"
+    dependencies: ["mcp-protocol"]
+    consumers: ["claude-desktop", "vs-code", "api-clients"]
+    integration_points:
+      - endpoint: "/api/v1/servers"
+        consumers: ["all-clients"]
+      - events: ["server:connected", "server:disconnected"]
+        listeners: ["monitoring-service", "audit-logger"]
+    criticality: "critical"
+    
+  # Tier 1: Essential Servers
+  github-server:
+    file: "docs/api/servers/github.md"
+    type: "mcp-server"
+    dependencies: ["github-api", "octokit"]
+    consumers: ["workshop-cli", "ai-assistants"]
+    capabilities:
+      - "repository-management"
+      - "issue-tracking"
+      - "pull-request-automation"
+      - "code-security-scanning"
+    setup_time: "2 minutes"
+    
+  filesystem-server:
+    file: "docs/api/servers/filesystem.md"
+    type: "mcp-server"
+    dependencies: ["node-fs", "chokidar"]
+    consumers: ["all-mcp-clients"]
+    capabilities:
+      - "file-crud-operations"
+      - "directory-management"
+      - "file-watching"
+      - "pattern-matching"
+    security_features:
+      - "path-sandboxing"
+      - "permission-validation"
+      
+  docker-server:
+    file: "docs/api/servers/docker.md"
+    type: "mcp-server"
+    dependencies: ["docker-api", "dockerode"]
+    consumers: ["development-environments", "ci-cd-pipelines"]
+    capabilities:
+      - "container-management"
+      - "image-operations"
+      - "volume-management"
+      - "network-configuration"
+    resource_limits:
+      memory: "2GB"
+      cpu: "2 cores"
+      
+  memory-server:
+    file: "docs/api/servers/memory.md"
+    type: "mcp-server"
+    dependencies: ["graph-database", "vector-store"]
+    consumers: ["all-ai-assistants"]
+    capabilities:
+      - "knowledge-persistence"
+      - "context-retrieval"
+      - "semantic-search"
+      - "relationship-mapping"
+      
+  # Tier 2: Database Servers
+  postgresql-server:
+    file: "docs/api/servers/postgresql.md"
+    type: "mcp-server"
+    dependencies: ["pg-client", "supabase-sdk"]
+    consumers: ["data-applications"]
+    capabilities:
+      - "schema-management"
+      - "query-execution"
+      - "real-time-subscriptions"
+      - "performance-analysis"
+      
+  redis-server:
+    file: "docs/api/servers/redis.md"
+    type: "mcp-server"
+    dependencies: ["redis-client", "ioredis"]
+    consumers: ["caching-layer", "session-management"]
+    capabilities:
+      - "key-value-operations"
+      - "pub-sub-messaging"
+      - "data-structures"
+      - "vector-search"
+      
+  # Infrastructure
+  github-runner:
+    file: "docs/setup/github-runner-setup.md"
+    type: "ci-cd"
+    dependencies: ["github-actions", "local-environment"]
+    consumers: ["ci-workflows"]
+    platform: "mac-studio-m3-ultra"
+    capabilities:
+      - "parallel-job-execution"
+      - "local-caching"
+      - "gpu-acceleration"
+      
+relationships:
+  # Service Dependencies
+  - source: "mcp-gateway"
+    target: "github-server"
+    type: "routes-requests"
+    protocol: "mcp"
+    description: "Gateway routes GitHub-related requests to GitHub server"
+    
+  - source: "mcp-gateway"
+    target: "filesystem-server"
+    type: "routes-requests"
+    protocol: "mcp"
+    description: "Gateway routes file operations to filesystem server"
+    
+  - source: "claude-desktop"
+    target: "mcp-gateway"
+    type: "connects-to"
+    protocol: "mcp"
+    description: "Claude Desktop connects to MCP servers via gateway"
+    
+  - source: "memory-server"
+    target: "filesystem-server"
+    type: "observes"
+    description: "Memory server tracks file changes for context"
+    
+  - source: "docker-server"
+    target: "filesystem-server"
+    type: "mounts-volumes"
+    description: "Docker server mounts local directories as volumes"
+    
+  - source: "github-runner"
+    target: "all-servers"
+    type: "tests"
+    description: "CI/CD runner executes tests for all servers"
+    
+  # Data Flow
+  - source: "postgresql-server"
+    target: "memory-server"
+    type: "stores-metadata"
+    description: "Memory server persists metadata in PostgreSQL"
+    
+  - source: "redis-server"
+    target: "memory-server"
+    type: "caches"
+    description: "Redis provides fast cache for memory server"
+    
+modification_patterns:
+  add_new_server:
+    description: "Steps to add a new MCP server"
+    impact_components:
+      - "mcp-gateway": "Update routing configuration"
+      - "documentation": "Add server guide"
+      - "ci-workflows": "Add test suite"
+      - "claude-config": "Add server configuration"
+    files_to_modify:
+      - "src/gateway/routes.ts"
+      - "docs/api/servers/{new-server}.md"
+      - ".github/workflows/ci.yml"
+      - "docs/setup/quickstart.md"
+      
+  update_protocol_version:
+    description: "Steps to update MCP protocol version"
+    impact_components:
+      - "all-mcp-servers": "Update SDK dependency"
+      - "gateway": "Update protocol handlers"
+      - "tests": "Update test expectations"
+    critical: true
+    rollback_required: true
+    
+  add_database_support:
+    description: "Steps to add new database server"
+    impact_components:
+      - "database-orchestrator": "Register new database"
+      - "connection-pool": "Configure connections"
+      - "backup-service": "Add backup strategy"
+    files_to_modify:
+      - "src/databases/registry.ts"
+      - "config/databases.yaml"
+      - "scripts/backup-databases.sh"
+      
+common_tasks:
+  debug_server_connection:
+    description: "Debug MCP server connection issues"
+    check_components:
+      - "mcp-gateway": "Check if running and accessible"
+      - "target-server": "Verify server process is running"
+      - "claude-config": "Validate configuration syntax"
+    commands:
+      - "npm run mcp:status"
+      - "lsof -i :3001-3010"
+      - "tail -f logs/mcp-gateway.log"
+      
+  optimize_performance:
+    description: "Optimize MCP server performance"
+    tune_components:
+      - "memory-server": "Adjust cache size and TTL"
+      - "postgresql-server": "Create indexes, optimize queries"
+      - "docker-server": "Increase resource limits"
+    metrics_to_monitor:
+      - "response_time"
+      - "memory_usage"
+      - "connection_pool_utilization"

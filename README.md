@@ -19,11 +19,14 @@ This project implements a comprehensive Model Context Protocol (MCP) server ecos
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mcp-workshop-servers.git
+git clone https://github.com/slcc2c/mcp-workshop-servers.git
 cd mcp-workshop-servers
 
 # Install dependencies
 npm install
+
+# (Optional) Set up self-hosted GitHub runner for Mac Studio
+./scripts/setup-runner.sh
 
 # Start all MCP servers
 npm run mcp:start

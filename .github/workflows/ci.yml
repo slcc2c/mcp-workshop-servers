@@ -1,0 +1,93 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: self-hosted
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Type check
+        run: npm run typecheck
+        
+      - name: Lint
+        run: npm run lint
+        
+      - name: Run tests
+        run: npm test
+        
+      - name: Build
+        run: npm run build
+        
+      - name: Cache build artifacts
+        uses: actions/cache@v3
+        with:
+          path: |
+            dist/
+            node_modules/
+          key: ${{ runner.os }}-build-${{ github.sha }}
+          
+  mcp-server-tests:
+    runs-on: self-hosted
+    needs: build-and-test
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Restore build cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            dist/
+            node_modules/
+          key: ${{ runner.os }}-build-${{ github.sha }}
+          
+      - name: Test GitHub MCP Server
+        run: npm run test:integration -- servers/github
+        
+      - name: Test Filesystem MCP Server
+        run: npm run test:integration -- servers/filesystem
+        
+      - name: Test Docker MCP Server
+        run: npm run test:integration -- servers/docker
+        
+      - name: Test Memory MCP Server
+        run: npm run test:integration -- servers/memory
+        
+  docker-build:
+    runs-on: self-hosted
+    needs: build-and-test
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Build Docker images
+        run: |
+          docker build -t mcp-workshop:latest .
+          docker build -t mcp-github-server:latest ./servers/github
+          docker build -t mcp-filesystem-server:latest ./servers/filesystem
+          docker build -t mcp-docker-server:latest ./servers/docker
+          docker build -t mcp-memory-server:latest ./servers/memory
+          
+      - name: Run Docker security scan
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy image mcp-workshop:latest

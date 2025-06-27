@@ -1,0 +1,52 @@
+name: Documentation Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'README.md'
+      - 'ARCHITECTURE.md'
+
+jobs:
+  generate-docs:
+    runs-on: self-hosted
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          
+      - name: Install documentation tools
+        run: |
+          npm install -g typedoc
+          npm install -g @mermaid-js/mermaid-cli
+          brew install vale
+          
+      - name: Generate API documentation
+        run: |
+          typedoc --out docs/api src
+          
+      - name: Generate architecture diagrams
+        run: |
+          mmdc -i docs/diagrams/architecture.mmd -o docs/assets/architecture.png
+          mmdc -i docs/diagrams/data-flow.mmd -o docs/assets/data-flow.png
+          
+      - name: Validate documentation quality
+        run: |
+          vale docs/
+          
+      - name: Build documentation site
+        run: |
+          npm run docs:build
+          
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs/_site
