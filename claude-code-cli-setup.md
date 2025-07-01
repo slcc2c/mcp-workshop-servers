@@ -105,7 +105,7 @@ Search GitHub for "model context protocol" repositories
 Your environment is already configured with:
 ```fish
 set -gx MCP_AUTH_TOKEN "sK0pHxZ-UyaRTakFZ8MxVS80i1zd3DFfP6CO6hGav20"
-set -gx GITHUB_PERSONAL_ACCESS_TOKEN "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"
+set -gx GITHUB_PERSONAL_ACCESS_TOKEN "<GITHUB_TOKEN>"
 ```
 
 ## Troubleshooting

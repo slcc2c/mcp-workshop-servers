@@ -40,7 +40,7 @@ Add to your shell profile (`~/.zshrc` or `~/.bashrc`):
 export MCP_AUTH_TOKEN="sK0pHxZ-UyaRTakFZ8MxVS80i1zd3DFfP6CO6hGav20"
 
 # GitHub Access (optional - replace with your token)
-export GITHUB_PERSONAL_ACCESS_TOKEN="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"
+export GITHUB_PERSONAL_ACCESS_TOKEN="<GITHUB_TOKEN>"
 ```
 
 Then reload: `source ~/.zshrc`
@@ -53,7 +53,7 @@ Add to `~/.config/fish/config.fish`:
 set -gx MCP_AUTH_TOKEN "sK0pHxZ-UyaRTakFZ8MxVS80i1zd3DFfP6CO6hGav20"
 
 # GitHub Authentication
-set -gx GITHUB_PERSONAL_ACCESS_TOKEN "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"
+set -gx GITHUB_PERSONAL_ACCESS_TOKEN "<GITHUB_TOKEN>"
 ```
 
 ## Step 3: Verify Servers Running (30 seconds)

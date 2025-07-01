@@ -13,7 +13,7 @@ echo "🔧 Setting up MCP servers for Claude Code..."
 
 # GitHub server with token
 echo "Adding GitHub server..."
-GITHUB_PERSONAL_ACCESS_TOKEN="GITHUB_TOKEN_REMOVED" \
+GITHUB_PERSONAL_ACCESS_TOKEN="${GITHUB_TOKEN:-}" \
 claude mcp add github -s user npx -- -y @modelcontextprotocol/server-github
 
 # Memory server with environment variables

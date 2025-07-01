@@ -17,7 +17,7 @@ claude mcp add-json github -s user '{
   "command": "npx",
   "args": ["-y", "@modelcontextprotocol/server-github"],
   "env": {
-    "GITHUB_PERSONAL_ACCESS_TOKEN": "GITHUB_TOKEN_REMOVED"
+    "GITHUB_PERSONAL_ACCESS_TOKEN": "'${GITHUB_TOKEN:-}'"
   }
 }'
 
