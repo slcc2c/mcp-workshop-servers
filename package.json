@@ -18,7 +18,10 @@
     "mcp:stop": "node scripts/stop-servers.js",
     "mcp:status": "node scripts/server-status.js",
     "mcp:install": "node scripts/install-server.js",
-    "mcp:logs": "node scripts/logs.js"
+    "mcp:logs": "node scripts/logs.js",
+    "autostart:setup": "./scripts/setup-autostart.sh",
+    "autostart:remove": "./scripts/remove-autostart.sh",
+    "autostart:status": "./scripts/check-autostart.sh"
   },
   "keywords": [
     "mcp",
@@ -58,8 +61,14 @@
     "chokidar": "^3.5.3",
     "ioredis": "^5.3.2",
     "pg": "^8.11.3",
+    "mongodb": "^6.3.0",
+    "@kubernetes/client-node": "^0.20.0",
+    "neo4j-driver": "^5.15.0",
+    "axios": "^1.6.2",
+    "ws": "^8.15.0",
     "minimatch": "^9.0.3",
-    "tar-stream": "^3.1.6"
+    "tar-stream": "^3.1.6",
+    "openai": "^4.24.0"
   },
   "engines": {
     "node": ">=18.0.0"

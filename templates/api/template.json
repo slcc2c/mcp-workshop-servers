@@ -1,0 +1,85 @@
+{
+  "name": "REST API Template",
+  "description": "RESTful API with authentication, database, and documentation",
+  "mcp_config": {
+    "filesystem": {
+      "paths": ["./"],
+      "exclude": ["node_modules", ".git", "dist", "coverage"]
+    },
+    "memory": {
+      "tags": ["api", "rest", "backend"],
+      "initial_context": {
+        "framework": "Express.js with TypeScript",
+        "database": "PostgreSQL with TypeORM",
+        "authentication": "JWT with refresh tokens",
+        "documentation": "OpenAPI 3.0 (Swagger)",
+        "testing": "Jest + Supertest",
+        "validation": "Joi or Zod schemas"
+      }
+    },
+    "database": {
+      "postgresql": {
+        "migrations": true,
+        "seeds": true
+      }
+    }
+  },
+  "claude_prompts": {
+    "setup": [
+      "Create the initial Express.js API structure with TypeScript",
+      "Set up database connection and TypeORM configuration",
+      "Implement JWT authentication with refresh tokens",
+      "Create OpenAPI documentation setup"
+    ],
+    "common_tasks": [
+      "Create a new REST endpoint",
+      "Add input validation for the endpoint",
+      "Write tests for the endpoint",
+      "Add rate limiting to an endpoint",
+      "Create a new database migration"
+    ]
+  },
+  "project_structure": {
+    "src/": {
+      "controllers/": "Request handlers",
+      "services/": "Business logic layer",
+      "models/": "Database entities",
+      "routes/": "API route definitions",
+      "middleware/": {
+        "auth.ts": "Authentication middleware",
+        "validation.ts": "Request validation",
+        "error.ts": "Error handling",
+        "logger.ts": "Request logging"
+      },
+      "utils/": "Utility functions",
+      "types/": "TypeScript definitions",
+      "config/": "Configuration files"
+    },
+    "tests/": {
+      "unit/": "Unit tests",
+      "integration/": "Integration tests",
+      "fixtures/": "Test data"
+    },
+    "docs/": "API documentation",
+    "scripts/": "Utility scripts",
+    ".env.example": "Environment variables template"
+  },
+  "endpoints": {
+    "auth": {
+      "POST /auth/register": "User registration",
+      "POST /auth/login": "User login",
+      "POST /auth/refresh": "Refresh access token",
+      "POST /auth/logout": "User logout"
+    },
+    "users": {
+      "GET /users": "List users (admin)",
+      "GET /users/:id": "Get user details",
+      "PUT /users/:id": "Update user",
+      "DELETE /users/:id": "Delete user"
+    },
+    "health": {
+      "GET /health": "Health check",
+      "GET /health/ready": "Readiness check"
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "mcp-filesystem-myapp": {
+      "command": "npx",
+      "args": [
+        "-y", 
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/developer/projects/my-app"
+      ]
+    },
+    "mcp-memory-myapp": {
+      "command": "node",
+      "args": ["/path/to/mcp-server/dist/servers/memory/index.js"],
+      "env": {
+        "MEMORY_PROJECT": "my-app",
+        "MEMORY_STORAGE_PATH": "/Users/developer/.mcp/memory/my-app"
+      }
+    },
+    "mcp-github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "env:GITHUB_TOKEN"
+      }
+    }
+  }
+}

@@ -4,9 +4,13 @@
  * Check status of all MCP servers
  */
 
-const fs = require('fs');
-const path = require('path');
-const http = require('http');
+import fs from 'fs';
+import path from 'path';
+import http from 'http';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const PID_DIR = path.join(__dirname, '..', 'tmp', 'pids');
 
@@ -248,7 +252,8 @@ async function main() {
   console.log('   npm run mcp:logs      - View server logs');
 }
 
-if (require.main === module) {
+// Run if this is the main module
+if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch(error => {
     console.error('❌ Status check failed:', error.message);
     process.exit(1);

@@ -1,0 +1,96 @@
+{
+  "name": "Data Science Project Template",
+  "description": "Python-based data science project with Jupyter notebooks and ML pipelines",
+  "mcp_config": {
+    "filesystem": {
+      "paths": ["./"],
+      "exclude": [".git", "__pycache__", ".ipynb_checkpoints", "venv", "data/raw"]
+    },
+    "memory": {
+      "tags": ["data-science", "ml", "python", "jupyter"],
+      "initial_context": {
+        "language": "Python 3.10+",
+        "notebooks": "Jupyter Lab",
+        "ml_framework": "scikit-learn, XGBoost, PyTorch",
+        "data_processing": "pandas, numpy",
+        "visualization": "matplotlib, seaborn, plotly",
+        "experiment_tracking": "MLflow or Weights & Biases"
+      }
+    },
+    "jupyter": {
+      "enabled": true,
+      "kernel": "python3"
+    }
+  },
+  "claude_prompts": {
+    "setup": [
+      "Create the initial data science project structure",
+      "Set up a Jupyter notebook for exploratory data analysis",
+      "Create a data preprocessing pipeline",
+      "Set up experiment tracking with MLflow"
+    ],
+    "common_tasks": [
+      "Load and explore the dataset",
+      "Create visualizations for the data",
+      "Build a baseline machine learning model",
+      "Perform feature engineering",
+      "Evaluate model performance",
+      "Create a prediction pipeline"
+    ]
+  },
+  "project_structure": {
+    "data/": {
+      "raw/": "Original immutable data",
+      "processed/": "Cleaned data",
+      "interim/": "Intermediate transformations",
+      "external/": "External data sources"
+    },
+    "notebooks/": {
+      "01_data_exploration.ipynb": "Initial EDA",
+      "02_data_cleaning.ipynb": "Data preprocessing",
+      "03_feature_engineering.ipynb": "Feature creation",
+      "04_model_training.ipynb": "Model development",
+      "05_model_evaluation.ipynb": "Performance analysis"
+    },
+    "src/": {
+      "data/": "Data loading and processing",
+      "features/": "Feature engineering code",
+      "models/": "Model training and prediction",
+      "visualization/": "Plotting functions",
+      "utils/": "Utility functions"
+    },
+    "models/": "Trained model files",
+    "reports/": {
+      "figures/": "Generated graphics",
+      "results/": "Model metrics and results"
+    },
+    "tests/": "Unit tests",
+    "requirements.txt": "Python dependencies",
+    "setup.py": "Package setup"
+  },
+  "dependencies": {
+    "data_manipulation": [
+      "pandas>=2.0.0",
+      "numpy>=1.24.0",
+      "scipy>=1.10.0"
+    ],
+    "visualization": [
+      "matplotlib>=3.7.0",
+      "seaborn>=0.12.0",
+      "plotly>=5.14.0"
+    ],
+    "machine_learning": [
+      "scikit-learn>=1.3.0",
+      "xgboost>=1.7.0",
+      "lightgbm>=4.0.0"
+    ],
+    "deep_learning": [
+      "torch>=2.0.0",
+      "tensorflow>=2.13.0"
+    ],
+    "experiment_tracking": [
+      "mlflow>=2.7.0",
+      "wandb>=0.15.0"
+    ]
+  }
+}

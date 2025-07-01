@@ -3,6 +3,12 @@
 ## Project Overview
 This project implements a comprehensive Model Context Protocol (MCP) server ecosystem for rapid CS experimentation. The goal is to achieve "5-minute magic" - enabling developers to go from concept to working experiment in under 5 minutes using AI-collaborative development.
 
+## Quick Start: Connect AI Clients
+- **Claude Desktop**: Copy `claude-desktop-config.json` to Claude's config directory
+- **Cursor IDE**: Use `cursor-mcp-config.json` with your `MCP_CURSOR_AUTH_TOKEN`
+- **OpenAI**: Use `openai-functions.json` for function calling
+- See [Quick Setup Guide](docs/quick-setup-clients.md) or [Full Documentation](docs/client-connections.md)
+
 ## Architecture
 - **Tier 1**: Essential foundation servers (GitHub, filesystem, Docker, memory)
 - **Tier 2**: Database and service management (PostgreSQL, Redis, MongoDB, Neo4j, Kubernetes)
@@ -27,7 +33,7 @@ npm run lint
 # Type check
 npm run typecheck
 
-# Build project
+# Build project (TypeScript compilation - now clean!)
 npm run build
 ```
 
@@ -97,3 +103,9 @@ mcp-server/
 - Container isolation (2GB RAM limits)
 - Configurable access controls
 - Comprehensive audit logging
+
+## Recent Improvements (2025-06-29)
+- Fixed all TypeScript compilation errors (400+ → 0)
+- Improved type safety across all servers
+- Enhanced build reliability
+- See [TypeScript Patterns](docs/typescript-patterns.md) for development guidelines

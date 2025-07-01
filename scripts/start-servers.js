@@ -4,9 +4,14 @@
  * Start all MCP servers
  */
 
-const { spawn } = require('child_process');
-const path = require('path');
-const fs = require('fs');
+import { spawn } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import http from 'http';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const CONFIG_FILE = path.join(__dirname, '..', 'config', 'servers.json');
 const PID_DIR = path.join(__dirname, '..', 'tmp', 'pids');
@@ -137,7 +142,6 @@ async function checkHealth(config) {
   // Simple health check for gateway
   if (config.gateway && config.gateway.enabled) {
     try {
-      const http = require('http');
       const port = config.gateway.port || 3000;
       
       await new Promise((resolve, reject) => {
@@ -205,12 +209,22 @@ async function main() {
       process.exit(0);
     });
 
+    // Handle SIGTERM for graceful shutdown (from launchd)
+    process.on('SIGTERM', () => {
+      console.log('\n🛑 Received SIGTERM, stopping all servers...');
+      servers.forEach(({ process }) => {
+        if (process && !process.killed) {
+          process.kill('SIGTERM');
+        }
+      });
+      process.exit(0);
+    });
+
   } catch (error) {
     console.error('❌ Failed to start servers:', error.message);
     process.exit(1);
   }
 }
 
-if (require.main === module) {
-  main();
-}
+// Run if called directly
+main();

@@ -1,0 +1,348 @@
+{
+  "name": "MCP Workshop Functions",
+  "description": "OpenAI function calling interface for MCP servers",
+  "version": "1.0.0",
+  "api": {
+    "baseUrl": "http://localhost:3000/api/v1",
+    "authHeader": "Bearer ${MCP_OPENAI_AUTH_TOKEN}",
+    "timeout": 30000
+  },
+  "functions": [
+    {
+      "name": "github_search_repositories",
+      "description": "Search GitHub repositories",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query"
+          },
+          "sort": {
+            "type": "string",
+            "enum": ["stars", "forks", "updated"],
+            "description": "Sort order"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum results to return",
+            "default": 10
+          }
+        },
+        "required": ["query"]
+      },
+      "endpoint": "/servers/github/execute",
+      "method": "tools/call",
+      "tool": "search_repositories"
+    },
+    {
+      "name": "filesystem_read_file",
+      "description": "Read contents of a file",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "File path to read"
+          },
+          "encoding": {
+            "type": "string",
+            "enum": ["utf8", "base64", "binary"],
+            "default": "utf8"
+          }
+        },
+        "required": ["path"]
+      },
+      "endpoint": "/servers/filesystem/execute",
+      "method": "tools/call",
+      "tool": "read_file"
+    },
+    {
+      "name": "filesystem_write_file",
+      "description": "Write content to a file",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "File path to write"
+          },
+          "content": {
+            "type": "string",
+            "description": "Content to write"
+          },
+          "encoding": {
+            "type": "string",
+            "enum": ["utf8", "base64", "binary"],
+            "default": "utf8"
+          }
+        },
+        "required": ["path", "content"]
+      },
+      "endpoint": "/servers/filesystem/execute",
+      "method": "tools/call",
+      "tool": "write_file"
+    },
+    {
+      "name": "memory_store",
+      "description": "Store information in memory with tags",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Unique key for the memory"
+          },
+          "value": {
+            "type": "object",
+            "description": "Value to store"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags for categorization"
+          },
+          "project": {
+            "type": "string",
+            "description": "Project identifier"
+          }
+        },
+        "required": ["key", "value"]
+      },
+      "endpoint": "/servers/memory/execute",
+      "method": "tools/call",
+      "tool": "store"
+    },
+    {
+      "name": "memory_retrieve",
+      "description": "Retrieve information from memory",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Key to retrieve"
+          },
+          "project": {
+            "type": "string",
+            "description": "Project identifier"
+          }
+        },
+        "required": ["key"]
+      },
+      "endpoint": "/servers/memory/execute",
+      "method": "tools/call",
+      "tool": "retrieve"
+    },
+    {
+      "name": "memory_search",
+      "description": "Search memories by tags or content",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags to filter by"
+          },
+          "query": {
+            "type": "string",
+            "description": "Text to search for"
+          },
+          "project": {
+            "type": "string",
+            "description": "Project identifier"
+          }
+        }
+      },
+      "endpoint": "/servers/memory/execute",
+      "method": "tools/call",
+      "tool": "search"
+    },
+    {
+      "name": "xcode_build_project",
+      "description": "Build an Xcode project or workspace",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "projectPath": {
+            "type": "string",
+            "description": "Path to .xcodeproj or .xcworkspace"
+          },
+          "scheme": {
+            "type": "string",
+            "description": "Build scheme name"
+          },
+          "configuration": {
+            "type": "string",
+            "enum": ["Debug", "Release"],
+            "default": "Debug",
+            "description": "Build configuration"
+          },
+          "clean": {
+            "type": "boolean",
+            "default": false,
+            "description": "Clean before building"
+          }
+        },
+        "required": ["projectPath", "scheme"]
+      },
+      "endpoint": "/servers/xcodebuild/execute",
+      "method": "tools/call",
+      "tool": "xcode_build_project"
+    },
+    {
+      "name": "xcode_list_schemes",
+      "description": "List available schemes in an Xcode project",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "projectPath": {
+            "type": "string",
+            "description": "Path to .xcodeproj or .xcworkspace"
+          }
+        },
+        "required": ["projectPath"]
+      },
+      "endpoint": "/servers/xcodebuild/execute",
+      "method": "tools/call",
+      "tool": "xcode_list_schemes"
+    },
+    {
+      "name": "simulator_list",
+      "description": "List available iOS simulators",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "runtime": {
+            "type": "string",
+            "description": "Filter by runtime (e.g., 'iOS 17.0')"
+          },
+          "deviceType": {
+            "type": "string",
+            "description": "Filter by device type (e.g., 'iPhone 15')"
+          },
+          "available": {
+            "type": "boolean",
+            "default": true,
+            "description": "Only show available simulators"
+          }
+        }
+      },
+      "endpoint": "/servers/xcodebuild/execute",
+      "method": "tools/call",
+      "tool": "simulator_list"
+    },
+    {
+      "name": "simulator_boot",
+      "description": "Boot an iOS simulator",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "simulatorId": {
+            "type": "string",
+            "description": "Simulator UUID or name"
+          }
+        },
+        "required": ["simulatorId"]
+      },
+      "endpoint": "/servers/xcodebuild/execute",
+      "method": "tools/call",
+      "tool": "simulator_boot"
+    },
+    {
+      "name": "swift_build_package",
+      "description": "Build a Swift package",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "packagePath": {
+            "type": "string",
+            "description": "Path to Swift package directory"
+          },
+          "configuration": {
+            "type": "string",
+            "enum": ["debug", "release"],
+            "default": "debug",
+            "description": "Build configuration"
+          },
+          "product": {
+            "type": "string",
+            "description": "Specific product to build"
+          }
+        },
+        "required": ["packagePath"]
+      },
+      "endpoint": "/servers/xcodebuild/execute",
+      "method": "tools/call",
+      "tool": "swift_build_package"
+    }
+  ],
+  "examples": {
+    "search_code": {
+      "description": "Search for Python files in a repository",
+      "function": "github_search_repositories",
+      "parameters": {
+        "query": "language:python machine learning",
+        "sort": "stars",
+        "limit": 5
+      }
+    },
+    "save_context": {
+      "description": "Save conversation context",
+      "function": "memory_store",
+      "parameters": {
+        "key": "conversation_context_001",
+        "value": {
+          "topic": "MCP server setup",
+          "summary": "Configured authentication for multiple clients",
+          "timestamp": "2024-01-15T10:30:00Z"
+        },
+        "tags": ["conversation", "setup", "authentication"]
+      }
+    },
+    "read_config": {
+      "description": "Read a configuration file",
+      "function": "filesystem_read_file",
+      "parameters": {
+        "path": "/Users/spencer/repos/mcp-server/config/gateway.json"
+      }
+    },
+    "build_ios_app": {
+      "description": "Build an iOS application",
+      "function": "xcode_build_project",
+      "parameters": {
+        "projectPath": "/path/to/MyApp.xcworkspace",
+        "scheme": "MyApp",
+        "configuration": "Debug",
+        "clean": true
+      }
+    },
+    "list_simulators": {
+      "description": "List available iPhone simulators",
+      "function": "simulator_list",
+      "parameters": {
+        "deviceType": "iPhone",
+        "runtime": "iOS 17",
+        "available": true
+      }
+    }
+  },
+  "integration": {
+    "openai_config": {
+      "model": "gpt-4-turbo-preview",
+      "temperature": 0.7,
+      "max_tokens": 4096,
+      "tools": "auto"
+    },
+    "error_handling": {
+      "retry_count": 3,
+      "retry_delay": 1000,
+      "fallback_behavior": "return_error"
+    }
+  }
+}

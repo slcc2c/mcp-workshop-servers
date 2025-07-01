@@ -3,6 +3,7 @@
  */
 
 import { z } from 'zod';
+import { SecretProvider, SecretsConfigSchema } from '../secrets/types';
 
 // Environment configuration
 export const EnvConfigSchema = z.object({
@@ -33,6 +34,18 @@ export const EnvConfigSchema = z.object({
   MAX_CONCURRENT_OPERATIONS: z.string().default('10'),
   REQUEST_TIMEOUT: z.string().default('30000'), // 30 seconds
   CACHE_TTL: z.string().default('3600'), // 1 hour
+  
+  // 1Password configuration
+  ONEPASSWORD_VAULT: z.string().optional(),
+  ONEPASSWORD_ALLOWED_VAULTS: z.string().optional(), // Comma-separated list
+  ONEPASSWORD_SERVICE_ACCOUNT_TOKEN: z.string().optional(),
+  ONEPASSWORD_CONNECT_HOST: z.string().optional(),
+  ONEPASSWORD_CONNECT_TOKEN: z.string().optional(),
+  
+  // Secrets management
+  SECRETS_DEFAULT_PROVIDER: z.nativeEnum(SecretProvider).default(SecretProvider.ENVIRONMENT),
+  SECRETS_CACHE_ENABLED: z.string().default('true'),
+  SECRETS_CACHE_TTL: z.string().default('300'), // 5 minutes
 });
 
 export type EnvConfig = z.infer<typeof EnvConfigSchema>;
@@ -43,7 +56,11 @@ export interface ServerConfig {
   servers: Record<string, MCPServerInstanceConfig>;
   security: SecurityConfig;
   performance: PerformanceConfig;
+  secrets: SecretsConfig;
 }
+
+// Import the SecretsConfig type
+export type SecretsConfig = z.infer<typeof SecretsConfigSchema>;
 
 export interface GatewayConfig {
   port: number;
@@ -176,6 +193,54 @@ export const defaultConfig: ServerConfig = {
       restartOnFailure: true,
       maxRestarts: 3,
     },
+    postgresql: {
+      enabled: false,
+      command: 'node',
+      args: ['./dist/servers/postgresql/index.js'],
+      autoStart: false,
+      restartOnFailure: true,
+      maxRestarts: 3,
+    },
+    redis: {
+      enabled: false,
+      command: 'node',
+      args: ['./dist/servers/redis/index.js'],
+      autoStart: false,
+      restartOnFailure: true,
+      maxRestarts: 3,
+    },
+    mongodb: {
+      enabled: false,
+      command: 'node',
+      args: ['./dist/servers/mongodb/index.js'],
+      autoStart: false,
+      restartOnFailure: true,
+      maxRestarts: 3,
+    },
+    kubernetes: {
+      enabled: false,
+      command: 'node',
+      args: ['./dist/servers/kubernetes/index.js'],
+      autoStart: false,
+      restartOnFailure: true,
+      maxRestarts: 3,
+    },
+    neo4j: {
+      enabled: false,
+      command: 'node',
+      args: ['./dist/servers/neo4j/index.js'],
+      autoStart: false,
+      restartOnFailure: true,
+      maxRestarts: 3,
+    },
+    jupyter: {
+      enabled: false,
+      command: 'node',
+      args: ['./dist/servers/jupyter/index.js'],
+      autoStart: false,
+      restartOnFailure: true,
+      maxRestarts: 3,
+    },
   },
   security: {
     authentication: {
@@ -202,6 +267,20 @@ export const defaultConfig: ServerConfig = {
     monitoring: {
       enabled: true,
       metricsPort: 9090,
+    },
+  },
+  secrets: {
+    defaultProvider: SecretProvider.ENVIRONMENT,
+    providers: [],
+    cache: {
+      enabled: true,
+      maxSize: 100,
+      ttl: 300,
+    },
+    audit: {
+      enabled: false,
+      logAccess: false,
+      logRotation: true,
     },
   },
 };

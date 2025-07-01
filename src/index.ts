@@ -2,10 +2,10 @@
  * Main entry point for MCP Workshop Servers
  */
 
-import { MCPGateway } from './gateway';
+import { MCPGateway } from './gateway/index.js';
 import { loadServerConfig, ensureDirectories } from './utils/config';
 import { logger } from './utils/logger';
-import { ServerConfig } from './types/config';
+// import { ServerConfig } from './types/config';
 
 async function main() {
   try {
@@ -48,11 +48,11 @@ async function main() {
 }
 
 // Run if this is the main module
-if (require.main === module) {
+if (import.meta.url === `file://${process.argv[1]}`) {
   main();
 }
 
-export { MCPGateway } from './gateway';
+export { MCPGateway } from './gateway/index.js';
 export * from './types';
 export * from './utils/logger';
 export * from './utils/config';

@@ -1,0 +1,44 @@
+{
+  "mcpServers": {
+    "mcp-filesystem-monorepo": {
+      "command": "npx",
+      "args": [
+        "-y", 
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/developer/monorepo"
+      ]
+    },
+    "mcp-memory-monorepo": {
+      "command": "node",
+      "args": ["/path/to/mcp-server/dist/servers/memory/index.js"],
+      "env": {
+        "MEMORY_PROJECT": "monorepo",
+        "MEMORY_STORAGE_PATH": "/Users/developer/.mcp/memory/monorepo",
+        "MEMORY_TAGS": "monorepo,microservices,fullstack"
+      }
+    },
+    "mcp-github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "env:GITHUB_TOKEN"
+      }
+    },
+    "mcp-docker": {
+      "command": "node",
+      "args": ["/path/to/mcp-server/dist/servers/docker/index.js"],
+      "env": {
+        "DOCKER_HOST": "unix:///var/run/docker.sock",
+        "DOCKER_COMPOSE_FILE": "/Users/developer/monorepo/docker-compose.yml"
+      }
+    },
+    "mcp-kubernetes": {
+      "command": "node",
+      "args": ["/path/to/mcp-server/dist/servers/kubernetes/index.js"],
+      "env": {
+        "KUBECONFIG": "/Users/developer/.kube/config",
+        "K8S_NAMESPACE": "development"
+      }
+    }
+  }
+}

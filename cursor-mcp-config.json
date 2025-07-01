@@ -1,0 +1,108 @@
+{
+  "name": "MCP Workshop Servers",
+  "description": "Comprehensive MCP server ecosystem for rapid CS experimentation",
+  "version": "1.0.0",
+  "gateway": {
+    "url": "http://localhost:3000",
+    "authToken": "${MCP_CURSOR_AUTH_TOKEN}",
+    "transport": "http"
+  },
+  "servers": [
+    {
+      "id": "github",
+      "name": "GitHub Integration",
+      "description": "Manage repositories, issues, and pull requests",
+      "icon": "github",
+      "capabilities": ["repository", "issues", "pull_requests", "search"]
+    },
+    {
+      "id": "filesystem",
+      "name": "File System",
+      "description": "Secure file operations with sandboxing",
+      "icon": "folder",
+      "capabilities": ["read", "write", "watch", "search"]
+    },
+    {
+      "id": "memory",
+      "name": "Memory & Context",
+      "description": "Persistent context management across sessions",
+      "icon": "brain",
+      "capabilities": ["store", "retrieve", "graph", "tags"]
+    },
+    {
+      "id": "docker",
+      "name": "Docker",
+      "description": "Container management and operations",
+      "icon": "docker",
+      "capabilities": ["containers", "images", "exec", "build"]
+    },
+    {
+      "id": "postgresql",
+      "name": "PostgreSQL",
+      "description": "Relational database operations",
+      "icon": "database",
+      "capabilities": ["query", "schema", "transactions"]
+    },
+    {
+      "id": "redis",
+      "name": "Redis",
+      "description": "In-memory data store",
+      "icon": "redis",
+      "capabilities": ["cache", "pubsub", "streams"]
+    },
+    {
+      "id": "mongodb",
+      "name": "MongoDB",
+      "description": "NoSQL document database",
+      "icon": "mongodb",
+      "capabilities": ["documents", "aggregation", "indexes"]
+    },
+    {
+      "id": "neo4j",
+      "name": "Neo4j",
+      "description": "Graph database operations",
+      "icon": "graph",
+      "capabilities": ["cypher", "paths", "relationships"]
+    },
+    {
+      "id": "jupyter",
+      "name": "Jupyter",
+      "description": "Interactive computing and notebooks",
+      "icon": "jupyter",
+      "capabilities": ["execute", "notebooks", "kernels"]
+    },
+    {
+      "id": "xcodebuild",
+      "name": "Xcode Build",
+      "description": "Xcode, Swift, and iOS/macOS development tools",
+      "icon": "xcode",
+      "capabilities": ["build", "test", "simulator", "devices", "swift"]
+    }
+  ],
+  "shortcuts": {
+    "quick_query": {
+      "name": "Quick Database Query",
+      "description": "Execute a query on any database",
+      "template": "Execute query '${query}' on ${database}",
+      "parameters": ["query", "database"]
+    },
+    "git_workflow": {
+      "name": "Git Workflow",
+      "description": "Common git operations",
+      "template": "Perform git ${operation} on ${repository}",
+      "parameters": ["operation", "repository"]
+    },
+    "docker_exec": {
+      "name": "Docker Execute",
+      "description": "Run command in container",
+      "template": "Execute '${command}' in container ${container}",
+      "parameters": ["command", "container"]
+    }
+  },
+  "settings": {
+    "defaultTimeout": 30000,
+    "enableCaching": true,
+    "logLevel": "info",
+    "maxConcurrentRequests": 10
+  }
+}

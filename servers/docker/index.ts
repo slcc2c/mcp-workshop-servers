@@ -6,8 +6,7 @@
 import { z } from 'zod';
 import Docker from 'dockerode';
 import { BaseMCPServer, createToolHandler } from '../../src/core/base-server';
-import { config } from '../../src/utils/config';
-import { ResourceLimitError, ResourceNotFoundError, InvalidParamsError } from '../../src/utils/errors';
+import { ResourceNotFoundError, InvalidParamsError } from '../../src/utils/errors';
 
 // Input schemas
 const ContainerCreateSchema = z.object({
@@ -75,19 +74,8 @@ const NetworkCreateSchema = z.object({
   labels: z.record(z.string()).default({}).describe('Network labels'),
 });
 
-interface ContainerInfo {
-  id: string;
-  name: string;
-  image: string;
-  state: string;
-  status: string;
-  created: Date;
-  ports: any[];
-  mounts: any[];
-}
-
 export class DockerServer extends BaseMCPServer {
-  private docker: Docker;
+  private docker!: Docker;
   private defaultLimits: {
     memory: string;
     cpus: string;
@@ -119,7 +107,7 @@ export class DockerServer extends BaseMCPServer {
   }
 
   protected async onInitialize(): Promise<void> {
-    const dockerConfig = config.getDatabaseUrl('docker') || 'unix:///var/run/docker.sock';
+    const dockerConfig = process.env.DOCKER_HOST || 'unix:///var/run/docker.sock';
     
     try {
       this.docker = new Docker({
@@ -153,7 +141,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_create_container',
       'Create a new Docker container',
       ContainerCreateSchema,
-      createToolHandler(async (params) => {
+      createToolHandler(async (params: z.infer<typeof ContainerCreateSchema>) => {
         return this.createContainer(params);
       })
     );
@@ -162,7 +150,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_start_container',
       'Start a Docker container',
       ContainerActionSchema,
-      createToolHandler(async ({ containerId }) => {
+      createToolHandler(async ({ containerId }: z.infer<typeof ContainerActionSchema>) => {
         return this.startContainer(containerId);
       })
     );
@@ -174,7 +162,7 @@ export class DockerServer extends BaseMCPServer {
         containerId: z.string().describe('Container ID or name'),
         timeout: z.number().default(10).describe('Timeout in seconds'),
       }),
-      createToolHandler(async ({ containerId, timeout }) => {
+      createToolHandler(async ({ containerId, timeout }: { containerId: string; timeout: number }) => {
         return this.stopContainer(containerId, timeout);
       })
     );
@@ -187,7 +175,7 @@ export class DockerServer extends BaseMCPServer {
         force: z.boolean().default(false).describe('Force remove running container'),
         volumes: z.boolean().default(false).describe('Remove associated volumes'),
       }),
-      createToolHandler(async ({ containerId, force, volumes }) => {
+      createToolHandler(async ({ containerId, force, volumes }: { containerId: string; force: boolean; volumes: boolean }) => {
         return this.removeContainer(containerId, force, volumes);
       })
     );
@@ -199,7 +187,7 @@ export class DockerServer extends BaseMCPServer {
         containerId: z.string().describe('Container ID or name'),
         timeout: z.number().default(10).describe('Timeout in seconds'),
       }),
-      createToolHandler(async ({ containerId, timeout }) => {
+      createToolHandler(async ({ containerId, timeout }: { containerId: string; timeout: number }) => {
         return this.restartContainer(containerId, timeout);
       })
     );
@@ -212,7 +200,7 @@ export class DockerServer extends BaseMCPServer {
         all: z.boolean().default(false).describe('Show all containers (including stopped)'),
         filters: z.record(z.string()).default({}).describe('Filters to apply'),
       }),
-      createToolHandler(async ({ all, filters }) => {
+      createToolHandler(async ({ all, filters }: { all: boolean; filters: Record<string, string> }) => {
         return this.listContainers(all, filters);
       })
     );
@@ -221,7 +209,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_inspect_container',
       'Get detailed container information',
       ContainerActionSchema,
-      createToolHandler(async ({ containerId }) => {
+      createToolHandler(async ({ containerId }: z.infer<typeof ContainerActionSchema>) => {
         return this.inspectContainer(containerId);
       })
     );
@@ -230,7 +218,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_container_logs',
       'Get container logs',
       ContainerLogsSchema,
-      createToolHandler(async (params) => {
+      createToolHandler(async (params: z.infer<typeof ContainerLogsSchema>) => {
         return this.getContainerLogs(params);
       })
     );
@@ -242,7 +230,7 @@ export class DockerServer extends BaseMCPServer {
         containerId: z.string().describe('Container ID or name'),
         stream: z.boolean().default(false).describe('Stream stats continuously'),
       }),
-      createToolHandler(async ({ containerId, stream }) => {
+      createToolHandler(async ({ containerId, stream }: { containerId: string; stream: boolean }) => {
         return this.getContainerStats(containerId, stream);
       })
     );
@@ -252,7 +240,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_exec',
       'Execute command in running container',
       ContainerExecSchema,
-      createToolHandler(async (params) => {
+      createToolHandler(async (params: z.infer<typeof ContainerExecSchema>) => {
         return this.execInContainer(params);
       })
     );
@@ -265,7 +253,7 @@ export class DockerServer extends BaseMCPServer {
         all: z.boolean().default(false).describe('Show all images (including intermediates)'),
         filters: z.record(z.string()).default({}).describe('Filters to apply'),
       }),
-      createToolHandler(async ({ all, filters }) => {
+      createToolHandler(async ({ all, filters }: { all: boolean; filters: Record<string, string> }) => {
         return this.listImages(all, filters);
       })
     );
@@ -274,7 +262,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_pull_image',
       'Pull Docker image from registry',
       ImagePullSchema,
-      createToolHandler(async (params) => {
+      createToolHandler(async (params: z.infer<typeof ImagePullSchema>) => {
         return this.pullImage(params);
       })
     );
@@ -283,7 +271,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_build_image',
       'Build Docker image',
       ImageBuildSchema,
-      createToolHandler(async (params) => {
+      createToolHandler(async (params: z.infer<typeof ImageBuildSchema>) => {
         return this.buildImage(params);
       })
     );
@@ -296,7 +284,7 @@ export class DockerServer extends BaseMCPServer {
         force: z.boolean().default(false).describe('Force remove image'),
         noPrune: z.boolean().default(false).describe('Do not delete untagged parents'),
       }),
-      createToolHandler(async ({ imageId, force, noPrune }) => {
+      createToolHandler(async ({ imageId, force, noPrune }: { imageId: string; force: boolean; noPrune: boolean }) => {
         return this.removeImage(imageId, force, noPrune);
       })
     );
@@ -306,7 +294,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_create_volume',
       'Create Docker volume',
       VolumeCreateSchema,
-      createToolHandler(async (params) => {
+      createToolHandler(async (params: z.infer<typeof VolumeCreateSchema>) => {
         return this.createVolume(params);
       })
     );
@@ -317,7 +305,7 @@ export class DockerServer extends BaseMCPServer {
       z.object({
         filters: z.record(z.string()).default({}).describe('Filters to apply'),
       }),
-      createToolHandler(async ({ filters }) => {
+      createToolHandler(async ({ filters }: { filters: Record<string, string> }) => {
         return this.listVolumes(filters);
       })
     );
@@ -329,7 +317,7 @@ export class DockerServer extends BaseMCPServer {
         volumeName: z.string().describe('Volume name'),
         force: z.boolean().default(false).describe('Force remove volume'),
       }),
-      createToolHandler(async ({ volumeName, force }) => {
+      createToolHandler(async ({ volumeName, force }: { volumeName: string; force: boolean }) => {
         return this.removeVolume(volumeName, force);
       })
     );
@@ -339,7 +327,7 @@ export class DockerServer extends BaseMCPServer {
       'docker_create_network',
       'Create Docker network',
       NetworkCreateSchema,
-      createToolHandler(async (params) => {
+      createToolHandler(async (params: z.infer<typeof NetworkCreateSchema>) => {
         return this.createNetwork(params);
       })
     );
@@ -350,7 +338,7 @@ export class DockerServer extends BaseMCPServer {
       z.object({
         filters: z.record(z.string()).default({}).describe('Filters to apply'),
       }),
-      createToolHandler(async ({ filters }) => {
+      createToolHandler(async ({ filters }: { filters: Record<string, string> }) => {
         return this.listNetworks(filters);
       })
     );
@@ -361,7 +349,7 @@ export class DockerServer extends BaseMCPServer {
       z.object({
         networkId: z.string().describe('Network ID or name'),
       }),
-      createToolHandler(async ({ networkId }) => {
+      createToolHandler(async ({ networkId }: { networkId: string }) => {
         return this.removeNetwork(networkId);
       })
     );
@@ -384,7 +372,7 @@ export class DockerServer extends BaseMCPServer {
         all: z.boolean().default(false).describe('Remove all unused images'),
         filters: z.record(z.string()).default({}).describe('Filters to apply'),
       }),
-      createToolHandler(async ({ volumes, all, filters }) => {
+      createToolHandler(async ({ volumes, all, filters }: { volumes: boolean; all: boolean; filters: Record<string, string> }) => {
         return this.systemPrune(volumes, all, filters);
       })
     );
@@ -585,13 +573,13 @@ export class DockerServer extends BaseMCPServer {
     }
   }
 
-  private async listContainers(all: boolean, filters: Record<string, string>) {
+  private async listContainers(all: boolean, filters: Record<string, string>): Promise<{ containers: any[], count: number }> {
     try {
-      const containers = await this.docker.listContainers({ all, filters });
+      const containers = await (this.docker as any).listContainers({ all, filters });
       
-      const result = containers.map(container => ({
+      const result = containers.map((container: any) => ({
         id: container.Id,
-        names: container.Names.map(name => name.startsWith('/') ? name.slice(1) : name),
+        names: container.Names.map((name: string) => name.startsWith('/') ? name.slice(1) : name),
         image: container.Image,
         imageId: container.ImageID,
         command: container.Command,
@@ -685,7 +673,7 @@ export class DockerServer extends BaseMCPServer {
       
       return {
         containerId: params.containerId,
-        logs: logs.toString(),
+        logs: (logs as any).toString(),
         tail: params.tail,
         timestamps: params.timestamps,
       };
@@ -697,7 +685,7 @@ export class DockerServer extends BaseMCPServer {
     }
   }
 
-  private async getContainerStats(containerId: string, stream: boolean) {
+  private async getContainerStats(containerId: string, _stream: boolean) {
     try {
       const container = this.docker.getContainer(containerId);
       
@@ -770,11 +758,11 @@ export class DockerServer extends BaseMCPServer {
     }
   }
 
-  private async listImages(all: boolean, filters: Record<string, string>) {
+  private async listImages(all: boolean, filters: Record<string, string>): Promise<{ images: any[], count: number }> {
     try {
-      const images = await this.docker.listImages({ all, filters });
+      const images = await (this.docker as any).listImages({ all, filters });
       
-      const result = images.map(image => ({
+      const result = images.map((image: any) => ({
         id: image.Id,
         parentId: image.ParentId,
         repoTags: image.RepoTags || [],
@@ -859,7 +847,7 @@ export class DockerServer extends BaseMCPServer {
       // Wait for build to complete and collect output
       const buildOutput: string[] = [];
       await new Promise((resolve, reject) => {
-        this.docker.modem.followProgress(stream, (err: any, res: any) => {
+        this.docker.modem.followProgress(stream as any, (err: any, res: any) => {
           if (err) reject(err);
           else resolve(res);
         }, (event: any) => {
@@ -931,7 +919,7 @@ export class DockerServer extends BaseMCPServer {
 
   private async listVolumes(filters: Record<string, string>) {
     try {
-      const result = await this.docker.listVolumes({ filters });
+      const result = await (this.docker as any).listVolumes({ filters });
       
       return {
         volumes: result.Volumes || [],
@@ -990,10 +978,10 @@ export class DockerServer extends BaseMCPServer {
 
   private async listNetworks(filters: Record<string, string>) {
     try {
-      const networks = await this.docker.listNetworks({ filters });
+      const networks = await (this.docker as any).listNetworks({ filters });
       
       return {
-        networks: networks.map(network => ({
+        networks: networks.map((network: any) => ({
           id: network.Id,
           name: network.Name,
           driver: network.Driver,
@@ -1054,7 +1042,7 @@ export class DockerServer extends BaseMCPServer {
 
   private async systemPrune(volumes: boolean, all: boolean, filters: Record<string, string>) {
     try {
-      const result = await this.docker.pruneSystem({
+      const result = await (this.docker as any).pruneSystem({
         filters: {
           ...filters,
           volumes: volumes ? 'true' : 'false',
@@ -1094,6 +1082,7 @@ export class DockerServer extends BaseMCPServer {
       return operationRecord;
     } catch (error) {
       this.logger.error('Failed to track Docker operation', { error, operation, target });
+      return null;
     }
   }
 

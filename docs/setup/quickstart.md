@@ -30,6 +30,7 @@ Get up and running with MCP Workshop Servers in under 5 minutes! This guide will
 - 32GB+ RAM
 - Docker Desktop for Mac
 - Claude Desktop installed
+- Xcode 14.0+ (for iOS/macOS development)
 
 ## Installation Steps
 
@@ -71,6 +72,11 @@ Add the following to your Claude Desktop configuration:
     "workshop-memory": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    "workshop-xcode": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-xcodebuild"],
+      "env": {}
     }
   }
 }
@@ -93,6 +99,24 @@ MONGODB_URL=mongodb://localhost:27017/workshop
 DOCKER_HOST=unix:///var/run/docker.sock
 ```
 
+### 4a. macOS Developers: Set Up XcodeBuildMCP
+
+If you're developing iOS/macOS applications, ensure Xcode is properly configured:
+
+```bash
+# Verify Xcode installation
+xcode-select -p
+# Should output: /Applications/Xcode.app/Contents/Developer
+
+# Install Command Line Tools if needed
+xcode-select --install
+
+# Accept Xcode license
+sudo xcodebuild -license accept
+```
+
+The XcodeBuildMCP server will automatically use your system's Xcode installation.
+
 ### 5. Start MCP Servers
 
 ```bash
@@ -106,6 +130,7 @@ This command starts all configured MCP servers. You should see:
 ✅ Filesystem MCP Server started
 ✅ Memory MCP Server started
 ✅ Docker MCP Server started
+✅ XcodeBuildMCP Server started (macOS only)
 🚀 All servers running! Open Claude Desktop to start experimenting.
 ```
 
@@ -131,6 +156,7 @@ Expected output:
 - Filesystem Server: ✅ Running (Port 3002)
 - Memory Server: ✅ Running (Port 3003)
 - Docker Server: ✅ Running (Port 3004)
+- XcodeBuildMCP Server: ✅ Running (Port 3005) - macOS only
 ```
 
 ## Your First Experiment
@@ -147,6 +173,21 @@ Claude will:
 2. Generate package.json and code files
 3. Use the GitHub server to create and push the repository
 4. Remember the context using the Memory server
+
+### macOS/iOS Development Example
+
+Try this for iOS development:
+
+```
+"Create a new iOS app called 'HelloMCP' with SwiftUI, add Alamofire 
+as a dependency, and test it on the iPhone 15 Pro simulator."
+```
+
+Claude will:
+1. Use XcodeBuildMCP to create the Xcode project
+2. Add the Alamofire dependency via Swift Package Manager
+3. Create and boot an iPhone 15 Pro simulator
+4. Build and run the app on the simulator
 
 ## Common Quick Start Issues
 

@@ -1,0 +1,28 @@
+# MCP Starter Kit
+# Local configuration
+claude_desktop_config.json
+mcp-usage-examples.md
+
+# Logs
+*.log
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Node (if used later)
+node_modules/
+package-lock.json

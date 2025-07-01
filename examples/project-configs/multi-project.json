@@ -1,0 +1,49 @@
+{
+  "mcpServers": {
+    "mcp-filesystem-frontend": {
+      "command": "npx",
+      "args": [
+        "-y", 
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/developer/projects/app-frontend"
+      ]
+    },
+    "mcp-filesystem-backend": {
+      "command": "npx",
+      "args": [
+        "-y", 
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/developer/projects/app-backend"
+      ]
+    },
+    "mcp-filesystem-shared": {
+      "command": "npx",
+      "args": [
+        "-y", 
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/developer/projects/shared-libs"
+      ]
+    },
+    "mcp-memory": {
+      "command": "node",
+      "args": ["/path/to/mcp-server/dist/servers/memory/index.js"],
+      "env": {
+        "MEMORY_STORAGE_PATH": "/Users/developer/.mcp/memory"
+      }
+    },
+    "mcp-postgresql": {
+      "command": "node",
+      "args": ["/path/to/mcp-server/dist/servers/postgresql/index.js"],
+      "env": {
+        "POSTGRES_URL": "env:POSTGRES_URL"
+      }
+    },
+    "mcp-redis": {
+      "command": "node",
+      "args": ["/path/to/mcp-server/dist/servers/redis/index.js"],
+      "env": {
+        "REDIS_URL": "env:REDIS_URL"
+      }
+    }
+  }
+}

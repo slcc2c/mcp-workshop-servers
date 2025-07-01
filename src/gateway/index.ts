@@ -5,7 +5,7 @@
 import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { createServer, Server as HTTPServer } from 'http';
-import { GatewayRequest, MCPResponse, ServerConnection } from '../types/mcp';
+import { GatewayRequest } from '../types/mcp';
 import { ServerConfig } from '../types/config';
 import { Logger } from '../types/logger';
 import { createLogger } from '../utils/logger';
@@ -13,6 +13,8 @@ import { ServerNotFoundError, formatError } from '../utils/errors';
 import { ServerManager } from './server-manager';
 import { RequestRouter } from './router';
 import { Middleware } from './middleware';
+import { AuthenticationMiddleware } from './auth';
+import { WebSocketHandler } from './websocket';
 
 export class MCPGateway {
   private app: Express;
@@ -21,6 +23,8 @@ export class MCPGateway {
   private serverManager: ServerManager;
   private router: RequestRouter;
   private middleware: Middleware;
+  private auth: AuthenticationMiddleware;
+  private wsHandler?: WebSocketHandler;
   private started: boolean = false;
 
   constructor(private config: ServerConfig) {
@@ -31,6 +35,7 @@ export class MCPGateway {
     this.serverManager = new ServerManager(config);
     this.router = new RequestRouter(this.serverManager);
     this.middleware = new Middleware(config);
+    this.auth = new AuthenticationMiddleware();
     
     this.setupMiddleware();
     this.setupRoutes();
@@ -51,20 +56,23 @@ export class MCPGateway {
     
     // Custom middleware
     this.app.use(this.middleware.requestLogger());
-    this.app.use(this.middleware.errorHandler());
     
-    if (this.config.gateway.rateLimit.enabled) {
+    if (this.config.security.authentication.enabled) {
+      // Use enhanced authentication with multi-client support
+      this.app.use(this.auth.middleware());
+      // Client-specific rate limiting
+      this.app.use(this.auth.clientRateLimiter());
+    } else if (this.config.gateway.rateLimit.enabled) {
+      // Use global rate limiting if auth is disabled
       this.app.use(this.middleware.rateLimiter());
     }
     
-    if (this.config.security.authentication.enabled) {
-      this.app.use(this.middleware.authenticate());
-    }
+    this.app.use(this.middleware.errorHandler());
   }
 
   private setupRoutes(): void {
     // Health check
-    this.app.get('/health', (req: Request, res: Response) => {
+    this.app.get('/health', (_req: Request, res: Response) => {
       res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
@@ -73,7 +81,7 @@ export class MCPGateway {
     });
     
     // Server status
-    this.app.get('/api/v1/servers', (req: Request, res: Response) => {
+    this.app.get('/api/v1/servers', (_req: Request, res: Response) => {
       res.json({
         servers: this.serverManager.getServerStatuses(),
       });
@@ -136,13 +144,41 @@ export class MCPGateway {
       }
     });
     
-    // WebSocket endpoint for real-time communication (future enhancement)
-    this.app.get('/api/v1/ws', (req: Request, res: Response) => {
-      res.status(501).json({ error: 'WebSocket support coming soon' });
+    // Server-Sent Events endpoint for real-time status updates
+    this.app.get('/api/v1/events', (req: Request, res: Response) => {
+      // Set up SSE headers
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Cache-Control'
+      });
+
+      // Send initial connection event
+      res.write(`data: ${JSON.stringify({ 
+        type: 'connected', 
+        timestamp: Date.now(),
+        message: 'Connected to MCP Gateway events'
+      })}\n\n`);
+
+      // Keep connection alive
+      const keepAlive = setInterval(() => {
+        res.write(`data: ${JSON.stringify({ 
+          type: 'heartbeat', 
+          timestamp: Date.now() 
+        })}\n\n`);
+      }, 30000);
+
+      // Clean up on client disconnect
+      req.on('close', () => {
+        clearInterval(keepAlive);
+        res.end();
+      });
     });
     
     // Error handling
-    this.app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
+    this.app.use((error: Error, req: Request, res: Response, _next: NextFunction) => {
       const mcpError = formatError(error);
       this.logger.error('Request error', { 
         error: mcpError, 
@@ -171,6 +207,11 @@ export class MCPGateway {
     }
 
     try {
+      // Initialize authentication middleware
+      if (this.config.security.authentication.enabled) {
+        await this.auth.initialize();
+      }
+      
       // Initialize server manager
       await this.serverManager.initialize();
       
@@ -182,6 +223,13 @@ export class MCPGateway {
         
         this.server.on('error', reject);
       });
+
+      // Initialize WebSocket handler
+      this.wsHandler = new WebSocketHandler(
+        this.server,
+        this.serverManager,
+        this.auth
+      );
       
       this.started = true;
       this.logger.info('Gateway started', {
@@ -210,6 +258,11 @@ export class MCPGateway {
     }
 
     try {
+      // Stop WebSocket handler
+      if (this.wsHandler) {
+        await this.wsHandler.shutdown();
+      }
+
       // Stop all servers
       await this.serverManager.shutdown();
       
@@ -234,6 +287,10 @@ export class MCPGateway {
 
   getServerManager(): ServerManager {
     return this.serverManager;
+  }
+
+  getWebSocketHandler(): WebSocketHandler | undefined {
+    return this.wsHandler;
   }
 }
 

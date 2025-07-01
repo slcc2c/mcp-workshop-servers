@@ -7,7 +7,6 @@ import {
   MCPTool, 
   MCPRequest, 
   MCPResponse, 
-  MCPErrorCode,
   ToolHandler 
 } from '../types/mcp';
 import { Logger } from '../types/logger';
@@ -202,7 +201,7 @@ export abstract class BaseMCPServer implements IMCPServer {
 
   // Optional methods for subclasses
 
-  protected async handleCustomMethod(method: string, params: unknown): Promise<unknown> {
+  protected async handleCustomMethod(method: string, _params: unknown): Promise<unknown> {
     throw new MethodNotFoundError(method);
   }
 

@@ -8,7 +8,6 @@ import { ServerConfig } from '../types/config';
 import { Logger } from '../types/logger';
 import { createLogger } from '../utils/logger';
 import { EventEmitter } from 'events';
-import path from 'path';
 
 interface ManagedServer {
   config: MCPServerConfig;
@@ -54,7 +53,7 @@ export class ServerManager extends EventEmitter {
     // Start servers configured for auto-start
     const promises: Promise<void>[] = [];
     
-    for (const [name, server] of this.servers) {
+    for (const [name] of this.servers) {
       const serverConfig = this.config.servers[name];
       if (serverConfig?.autoStart) {
         promises.push(this.startServer(name));
@@ -176,7 +175,7 @@ export class ServerManager extends EventEmitter {
 
   private isBuiltInServer(name: string): boolean {
     // These servers are implemented in this codebase
-    const builtInServers = ['memory', 'docker', 'filesystem'];
+    const builtInServers = ['memory', 'docker', 'filesystem', 'postgresql', 'redis', 'mongodb', 'kubernetes', 'neo4j', 'jupyter'];
     return builtInServers.includes(name);
   }
 
@@ -185,7 +184,7 @@ export class ServerManager extends EventEmitter {
     
     switch (name) {
       case 'memory':
-        const { MemoryServer } = await import('../servers/memory');
+        const { MemoryServer } = await import('../../servers/memory');
         instance = new MemoryServer();
         break;
         
@@ -197,6 +196,36 @@ export class ServerManager extends EventEmitter {
       case 'filesystem':
         const { FilesystemServer } = await import('../../servers/filesystem');
         instance = new FilesystemServer();
+        break;
+        
+      case 'postgresql':
+        const { PostgreSQLServer } = await import('../../servers/postgresql');
+        instance = new PostgreSQLServer();
+        break;
+        
+      case 'redis':
+        const { RedisServer } = await import('../../servers/redis');
+        instance = new RedisServer();
+        break;
+        
+      case 'mongodb':
+        const { MongoDBServer } = await import('../../servers/mongodb');
+        instance = new MongoDBServer();
+        break;
+        
+      case 'kubernetes':
+        const { KubernetesServer } = await import('../../servers/kubernetes');
+        instance = new KubernetesServer();
+        break;
+        
+      case 'neo4j':
+        const { Neo4jServer } = await import('../../servers/neo4j');
+        instance = new Neo4jServer();
+        break;
+        
+      case 'jupyter':
+        const { JupyterServer } = await import('../../servers/jupyter');
+        instance = new JupyterServer();
         break;
         
       default:

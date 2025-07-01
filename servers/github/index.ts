@@ -47,7 +47,7 @@ const CloneRepoSchema = z.object({
 });
 
 export class GitHubServer extends BaseMCPServer {
-  private octokit: Octokit;
+  private octokit!: Octokit;
 
   constructor() {
     super('github', '1.0.0', 'GitHub integration for repository management');
@@ -84,7 +84,7 @@ export class GitHubServer extends BaseMCPServer {
       'github_get_repo',
       'Get repository information',
       RepoSchema,
-      createToolHandler(async ({ owner, repo }) => {
+      createToolHandler<z.infer<typeof RepoSchema>>(async ({ owner, repo }) => {
         const { data } = await this.octokit.repos.get({ owner, repo });
         return {
           name: data.name,
@@ -104,7 +104,7 @@ export class GitHubServer extends BaseMCPServer {
       'github_create_repo',
       'Create a new repository',
       CreateRepoSchema,
-      createToolHandler(async ({ name, description, private: isPrivate, autoInit }) => {
+      createToolHandler<z.infer<typeof CreateRepoSchema>>(async ({ name, description, private: isPrivate, autoInit }) => {
         const { data: user } = await this.octokit.users.getAuthenticated();
         const { data } = await this.octokit.repos.createForAuthenticatedUser({
           name,
@@ -129,7 +129,7 @@ export class GitHubServer extends BaseMCPServer {
         sort: z.enum(['created', 'updated', 'pushed', 'full_name']).default('updated'),
         perPage: z.number().min(1).max(100).default(30),
       }),
-      createToolHandler(async ({ type, sort, perPage }) => {
+      createToolHandler<{ type: 'all' | 'owner' | 'member'; sort: 'created' | 'updated' | 'pushed' | 'full_name'; perPage: number }>(async ({ type, sort, perPage }) => {
         const { data } = await this.octokit.repos.listForAuthenticatedUser({
           type,
           sort,
@@ -151,7 +151,7 @@ export class GitHubServer extends BaseMCPServer {
       'github_create_issue',
       'Create a new issue',
       CreateIssueSchema,
-      createToolHandler(async ({ owner, repo, title, body, labels, assignees }) => {
+      createToolHandler<z.infer<typeof CreateIssueSchema>>(async ({ owner, repo, title, body, labels, assignees }) => {
         const { data } = await this.octokit.issues.create({
           owner,
           repo,
@@ -180,7 +180,7 @@ export class GitHubServer extends BaseMCPServer {
         sort: z.enum(['created', 'updated', 'comments']).default('created'),
         perPage: z.number().min(1).max(100).default(30),
       }),
-      createToolHandler(async ({ owner, repo, state, labels, sort, perPage }) => {
+      createToolHandler<{ owner: string; repo: string; state: 'open' | 'closed' | 'all'; labels?: string; sort: 'created' | 'updated' | 'comments'; perPage: number }>(async ({ owner, repo, state, labels, sort, perPage }) => {
         const { data } = await this.octokit.issues.listForRepo({
           owner,
           repo,
@@ -207,7 +207,7 @@ export class GitHubServer extends BaseMCPServer {
       'github_create_pr',
       'Create a pull request',
       CreatePRSchema,
-      createToolHandler(async ({ owner, repo, title, body, head, base }) => {
+      createToolHandler<z.infer<typeof CreatePRSchema>>(async ({ owner, repo, title, body, head, base }) => {
         const { data } = await this.octokit.pulls.create({
           owner,
           repo,
@@ -231,7 +231,7 @@ export class GitHubServer extends BaseMCPServer {
       'github_list_branches',
       'List repository branches',
       RepoSchema,
-      createToolHandler(async ({ owner, repo }) => {
+      createToolHandler<z.infer<typeof RepoSchema>>(async ({ owner, repo }) => {
         const { data } = await this.octokit.repos.listBranches({
           owner,
           repo,
@@ -254,7 +254,7 @@ export class GitHubServer extends BaseMCPServer {
         branch: z.string().describe('New branch name'),
         from: z.string().default('main').describe('Source branch or commit SHA'),
       }),
-      createToolHandler(async ({ owner, repo, branch, from }) => {
+      createToolHandler<{ owner: string; repo: string; branch: string; from: string }>(async ({ owner, repo, branch, from }) => {
         // Get the SHA of the source
         const { data: ref } = await this.octokit.git.getRef({
           owner,
@@ -288,7 +288,7 @@ export class GitHubServer extends BaseMCPServer {
         sha: z.string().optional().describe('Branch or commit SHA'),
         perPage: z.number().min(1).max(100).default(30),
       }),
-      createToolHandler(async ({ owner, repo, sha, perPage }) => {
+      createToolHandler<{ owner: string; repo: string; sha?: string; perPage: number }>(async ({ owner, repo, sha, perPage }) => {
         const { data } = await this.octokit.repos.listCommits({
           owner,
           repo,
@@ -310,7 +310,7 @@ export class GitHubServer extends BaseMCPServer {
       'github_clone_repo',
       'Clone a repository to local filesystem',
       CloneRepoSchema,
-      createToolHandler(async ({ owner, repo, path, branch }) => {
+      createToolHandler<z.infer<typeof CloneRepoSchema>>(async ({ owner, repo, path, branch }) => {
         const { data } = await this.octokit.repos.get({ owner, repo });
         const cloneUrl = data.clone_url;
         
@@ -335,7 +335,7 @@ export class GitHubServer extends BaseMCPServer {
         status: z.enum(['completed', 'action_required', 'cancelled', 'failure', 'neutral', 'skipped', 'stale', 'success', 'timed_out', 'in_progress', 'queued', 'requested', 'waiting']).optional(),
         perPage: z.number().min(1).max(100).default(10),
       }),
-      createToolHandler(async ({ owner, repo, status, perPage }) => {
+      createToolHandler<{ owner: string; repo: string; status?: 'completed' | 'action_required' | 'cancelled' | 'failure' | 'neutral' | 'skipped' | 'stale' | 'success' | 'timed_out' | 'in_progress' | 'queued' | 'requested' | 'waiting'; perPage: number }>(async ({ owner, repo, status, perPage }) => {
         const { data } = await this.octokit.actions.listWorkflowRunsForRepo({
           owner,
           repo,

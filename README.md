@@ -14,8 +14,24 @@ This project implements a comprehensive Model Context Protocol (MCP) server ecos
 - **AI Memory**: Persistent context across sessions
 - **Multi-Database Support**: PostgreSQL, Redis, MongoDB, Neo4j out of the box
 - **GitHub Integration**: Automated repository management and CI/CD
+- **TypeScript Build**: Clean compilation with full type safety ✅
 
 ## Quick Start
+
+### Option 1: MCP Starter Kit (Recommended for New Users)
+
+```bash
+# Get the starter kit for a 5-minute setup
+cd mcp-starter-kit/
+./setup.sh
+
+# Or with 1Password integration:
+./setup-with-1password.sh
+
+# Restart Claude Desktop and you're ready! 🚀
+```
+
+### Option 2: Full Workshop Setup
 
 ```bash
 # Clone the repository
@@ -25,13 +41,48 @@ cd mcp-workshop-servers
 # Install dependencies
 npm install
 
-# (Optional) Set up self-hosted GitHub runner for Mac Studio
-./scripts/setup-runner.sh
+# Set up 1Password integration (recommended)
+./scripts/add-database-connections.sh
 
 # Start all MCP servers
 npm run mcp:start
+```
 
-# Your environment is ready! 🚀
+📚 **[Read the Quick Start Guide](./docs/quick-start.md)** for detailed setup instructions.
+
+## Attaching Your Project
+
+### Quick Attach (2 minutes)
+
+```bash
+# Run the interactive attachment script
+./scripts/attach-project.sh
+
+# Follow the prompts to:
+# 1. Select your project directory
+# 2. Choose a project name
+# 3. Configure filesystem + memory access
+
+# Restart Claude Desktop and start coding!
+```
+
+📎 **[Read the Project Attachment Guide](./docs/attach-project-guide.md)** for detailed instructions and advanced configurations.
+
+### Project Templates
+
+Use our pre-configured templates for common project types:
+
+- **Web App**: React + Node.js full-stack template
+- **API**: RESTful API with authentication and docs
+- **Data Science**: Python ML project with Jupyter
+- **Mobile**: React Native cross-platform template
+
+```bash
+# View available templates
+ls templates/
+
+# Use a template
+cp -r templates/web-app/* /path/to/your/project/
 ```
 
 ## Architecture
@@ -75,10 +126,22 @@ Configure Claude Desktop by adding to `claude_config.json`:
 
 ## Documentation
 
+- [MCP Starter Kit](mcp-starter-kit/README.md) - Quick 5-minute setup guide
+- [Memory Segregation Guide](docs/memory-segregation.md) - Project isolation strategy
 - [Architecture Guide](docs/architecture.md)
 - [Server Setup](docs/setup.md)
 - [API Reference](docs/api.md)
 - [Workshop Examples](examples/README.md)
+
+## Documentation
+
+- 📖 **[Quick Start Guide](./docs/quick-start.md)** - Get up and running in 5 minutes
+- 🔧 **[Server Reference](./docs/server-reference.md)** - Comprehensive guide to all MCP servers
+- 💾 **[Database Servers](./docs/database-servers.md)** - PostgreSQL, Redis, MongoDB setup and usage
+- 🧠 **[Memory Segregation](./docs/memory-segregation.md)** - Managing multiple projects with the Memory server
+- 🔐 **[Secrets Management](./docs/guides/secrets-management.md)** - 1Password integration guide
+- 📦 **[MCP Starter Kit](./mcp-starter-kit/README.md)** - Standalone package for easy distribution
+- 🔨 **[TypeScript Patterns](./docs/typescript-patterns.md)** - Development patterns and best practices
 
 ## Contributing
 

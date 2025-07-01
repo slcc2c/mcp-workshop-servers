@@ -3,7 +3,8 @@
  */
 
 import { config as dotenvConfig } from 'dotenv';
-import { EnvConfigSchema, EnvConfig, ServerConfig, defaultConfig } from '../types/config';
+import { EnvConfigSchema, EnvConfig, ServerConfig } from '../types/config';
+import { defaultConfig } from '../config/defaults';
 import { logger } from './logger';
 import fs from 'fs/promises';
 import path from 'path';
@@ -25,18 +26,33 @@ export function loadEnvConfig(): EnvConfig {
 
 // Load server configuration from file or use defaults
 export async function loadServerConfig(configPath?: string): Promise<ServerConfig> {
-  if (configPath) {
-    try {
-      const configFile = await fs.readFile(configPath, 'utf-8');
-      const config = JSON.parse(configFile) as ServerConfig;
-      logger.info('Server configuration loaded from file', { path: configPath });
-      return { ...defaultConfig, ...config };
-    } catch (error) {
-      logger.warn('Failed to load configuration file, using defaults', { error, path: configPath });
-    }
-  }
+  // Default to gateway.json if no path specified
+  const configFile = configPath || path.join(process.cwd(), 'config', 'gateway.json');
   
-  return defaultConfig;
+  try {
+    const configContent = await fs.readFile(configFile, 'utf-8');
+    const config = JSON.parse(configContent) as Partial<ServerConfig>;
+    logger.info('Server configuration loaded from file', { path: configFile });
+    
+    // Merge with defaults, ensuring authentication is properly set
+    const mergedConfig = {
+      ...defaultConfig,
+      ...config,
+      security: {
+        ...defaultConfig.security,
+        ...config.security,
+        authentication: {
+          ...defaultConfig.security.authentication,
+          ...(config.security?.authentication || {}),
+        },
+      },
+    };
+    
+    return mergedConfig;
+  } catch (error) {
+    logger.warn('Failed to load configuration file, using defaults', { error, path: configFile });
+    return defaultConfig;
+  }
 }
 
 // Get configuration value with fallback

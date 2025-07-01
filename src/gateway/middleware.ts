@@ -44,7 +44,7 @@ export class Middleware {
   }
 
   errorHandler() {
-    return (err: Error, req: Request, res: Response, next: NextFunction) => {
+    return (err: Error, req: Request, res: Response, _next: NextFunction) => {
       this.logger.error('Request error', {
         error: err.message,
         stack: err.stack,
@@ -170,7 +170,7 @@ export class Middleware {
         }
       }
 
-      next();
+      return next();
     };
   }
 }

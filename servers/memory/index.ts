@@ -100,7 +100,7 @@ export class MemoryServer extends BaseMCPServer {
       'memory_store',
       'Store a new memory entry',
       StoreMemorySchema,
-      createToolHandler(async (params) => {
+      createToolHandler<z.infer<typeof StoreMemorySchema>>(async (params) => {
         const entry = await this.storeMemory(params);
         return {
           id: entry.id,
@@ -114,7 +114,7 @@ export class MemoryServer extends BaseMCPServer {
       'memory_search',
       'Search memory entries',
       SearchMemorySchema,
-      createToolHandler(async (params) => {
+      createToolHandler<z.infer<typeof SearchMemorySchema>>(async (params) => {
         return this.searchMemory(params);
       })
     );
@@ -125,7 +125,7 @@ export class MemoryServer extends BaseMCPServer {
       z.object({
         id: z.string().describe('Memory entry ID'),
       }),
-      createToolHandler(async ({ id }) => {
+      createToolHandler<{ id: string }>(async ({ id }) => {
         const entry = this.graph.entries.get(id);
         if (!entry) {
           throw new Error(`Memory entry not found: ${id}`);
@@ -138,7 +138,7 @@ export class MemoryServer extends BaseMCPServer {
       'memory_update',
       'Update an existing memory entry',
       UpdateMemorySchema,
-      createToolHandler(async (params) => {
+      createToolHandler<z.infer<typeof UpdateMemorySchema>>(async (params) => {
         return this.updateMemory(params);
       })
     );
@@ -149,7 +149,7 @@ export class MemoryServer extends BaseMCPServer {
       z.object({
         id: z.string().describe('Memory entry ID'),
       }),
-      createToolHandler(async ({ id }) => {
+      createToolHandler<{ id: string }>(async ({ id }) => {
         return this.deleteMemory(id);
       })
     );
@@ -173,7 +173,7 @@ export class MemoryServer extends BaseMCPServer {
         id: z.string().describe('Memory entry ID'),
         depth: z.number().min(1).max(3).default(1).describe('Relationship depth'),
       }),
-      createToolHandler(async ({ id, depth }) => {
+      createToolHandler<{ id: string; depth: number }>(async ({ id, depth }) => {
         return this.getRelatedEntries(id, depth);
       })
     );
@@ -184,7 +184,7 @@ export class MemoryServer extends BaseMCPServer {
       z.object({
         format: z.enum(['json', 'csv']).default('json'),
       }),
-      createToolHandler(async ({ format }) => {
+      createToolHandler<{ format: 'json' | 'csv' }>(async ({ format }) => {
         return this.exportMemory(format);
       })
     );

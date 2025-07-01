@@ -1,0 +1,26 @@
+{
+  "name": "@mcp-workshop/xcodebuild-server",
+  "version": "1.0.0",
+  "description": "XcodeBuildMCP server wrapper for Xcode and iOS/macOS development",
+  "main": "index.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "xcode",
+    "ios",
+    "macos",
+    "swift",
+    "simulator",
+    "xcodebuild"
+  ],
+  "dependencies": {
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

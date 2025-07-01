@@ -1,0 +1,76 @@
+{
+  "gateway": {
+    "port": 8081,
+    "host": "localhost",
+    "cors": {
+      "enabled": true,
+      "origins": ["*"]
+    },
+    "rateLimit": {
+      "enabled": true,
+      "windowMs": 60000,
+      "max": 100
+    }
+  },
+  "security": {
+    "authentication": {
+      "enabled": true,
+      "type": "token"
+    },
+    "encryption": {
+      "enabled": false,
+      "algorithm": "aes-256-gcm"
+    },
+    "audit": {
+      "enabled": true,
+      "logPath": "./logs/audit.log"
+    }
+  },
+  "performance": {
+    "maxConcurrentRequests": 100,
+    "requestTimeout": 30000,
+    "caching": {
+      "enabled": true,
+      "ttl": 3600,
+      "maxSize": 1000
+    },
+    "monitoring": {
+      "enabled": false,
+      "metricsPort": 9090
+    }
+  },
+  "clients": {
+    "claude": {
+      "name": "Claude Desktop",
+      "rateLimit": {
+        "windowMs": 60000,
+        "max": 200
+      },
+      "allowedServers": ["*"]
+    },
+    "cursor": {
+      "name": "Cursor IDE",
+      "rateLimit": {
+        "windowMs": 60000,
+        "max": 150
+      },
+      "allowedServers": ["*"]
+    },
+    "openai": {
+      "name": "OpenAI",
+      "rateLimit": {
+        "windowMs": 60000,
+        "max": 100
+      },
+      "allowedServers": ["github", "filesystem", "memory"]
+    },
+    "default": {
+      "name": "Default Client",
+      "rateLimit": {
+        "windowMs": 60000,
+        "max": 50
+      },
+      "allowedServers": ["github", "filesystem"]
+    }
+  }
+}

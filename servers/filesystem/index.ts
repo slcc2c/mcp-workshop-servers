@@ -4,7 +4,7 @@
  */
 
 import { z } from 'zod';
-import { promises as fs, constants, Stats } from 'fs';
+import { promises as fs, constants } from 'fs';
 import { watch, FSWatcher } from 'chokidar';
 import path from 'path';
 import { BaseMCPServer, createToolHandler } from '../../src/core/base-server';
@@ -121,7 +121,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_read_file',
       'Read contents of a file',
       ReadFileSchema,
-      createToolHandler(async (params) => {
+      createToolHandler<any>(async (params) => {
         return this.readFile(params);
       })
     );
@@ -130,7 +130,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_write_file',
       'Write content to a file',
       WriteFileSchema,
-      createToolHandler(async (params) => {
+      createToolHandler<any>(async (params) => {
         return this.writeFile(params);
       })
     );
@@ -139,7 +139,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_delete_file',
       'Delete a file',
       FilePathSchema,
-      createToolHandler(async ({ path: filePath }) => {
+      createToolHandler<any>(async ({ path: filePath }) => {
         return this.deleteFile(filePath);
       })
     );
@@ -148,7 +148,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_copy_file',
       'Copy a file to another location',
       CopyFileSchema,
-      createToolHandler(async (params) => {
+      createToolHandler<any>(async (params) => {
         return this.copyFile(params);
       })
     );
@@ -157,7 +157,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_move_file',
       'Move/rename a file',
       MoveFileSchema,
-      createToolHandler(async (params) => {
+      createToolHandler<any>(async (params) => {
         return this.moveFile(params);
       })
     );
@@ -167,7 +167,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_list_directory',
       'List contents of a directory',
       ListDirectorySchema,
-      createToolHandler(async (params) => {
+      createToolHandler<any>(async (params) => {
         return this.listDirectory(params);
       })
     );
@@ -176,7 +176,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_create_directory',
       'Create a directory',
       CreateDirectorySchema,
-      createToolHandler(async (params) => {
+      createToolHandler<any>(async (params) => {
         return this.createDirectory(params);
       })
     );
@@ -188,7 +188,7 @@ export class FilesystemServer extends BaseMCPServer {
         path: z.string().describe('Directory path to delete'),
         recursive: z.boolean().default(false).describe('Delete recursively (dangerous!)'),
       }),
-      createToolHandler(async ({ path: dirPath, recursive }) => {
+      createToolHandler<any>(async ({ path: dirPath, recursive }) => {
         return this.deleteDirectory(dirPath, recursive);
       })
     );
@@ -198,7 +198,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_get_stats',
       'Get file or directory statistics',
       FilePathSchema,
-      createToolHandler(async ({ path: filePath }) => {
+      createToolHandler<any>(async ({ path: filePath }) => {
         return this.getStats(filePath);
       })
     );
@@ -207,7 +207,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_exists',
       'Check if a file or directory exists',
       FilePathSchema,
-      createToolHandler(async ({ path: filePath }) => {
+      createToolHandler<any>(async ({ path: filePath }) => {
         const absolutePath = this.resolvePath(filePath);
         this.validatePath(absolutePath);
 
@@ -225,7 +225,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_watch_path',
       'Watch a path for file system changes',
       WatchPathSchema,
-      createToolHandler(async (params) => {
+      createToolHandler<any>(async (params) => {
         return this.watchPath(params);
       })
     );
@@ -236,7 +236,7 @@ export class FilesystemServer extends BaseMCPServer {
       z.object({
         watcherId: z.string().describe('Watcher ID returned from fs_watch_path'),
       }),
-      createToolHandler(async ({ watcherId }) => {
+      createToolHandler<any>(async ({ watcherId }) => {
         return this.unwatchPath(watcherId);
       })
     );
@@ -255,7 +255,7 @@ export class FilesystemServer extends BaseMCPServer {
       'fs_search_files',
       'Search for files by name or content',
       SearchFilesSchema,
-      createToolHandler(async (params) => {
+      createToolHandler<any>(async (params) => {
         return this.searchFiles(params);
       })
     );
@@ -500,7 +500,7 @@ export class FilesystemServer extends BaseMCPServer {
     };
   }
 
-  private async listDirectory(params: z.infer<typeof ListDirectorySchema>) {
+  private async listDirectory(params: z.infer<typeof ListDirectorySchema>): Promise<any> {
     const absolutePath = this.resolvePath(params.path);
     this.validatePath(absolutePath);
 
@@ -539,7 +539,7 @@ export class FilesystemServer extends BaseMCPServer {
           // Recursive listing for directories
           if (params.recursive && stats.isDirectory()) {
             try {
-              const subItems = await this.listDirectory({
+              const subItems: any = await this.listDirectory({
                 path: relativePath,
                 recursive: true,
                 includeHidden: params.includeHidden,
@@ -559,7 +559,7 @@ export class FilesystemServer extends BaseMCPServer {
       }
 
       // Apply pattern filter if specified
-      let filteredResults = results;
+      let filteredResults: any = results;
       if (params.pattern) {
         const minimatch = await import('minimatch');
         filteredResults = results.filter(item => 
@@ -669,7 +669,6 @@ export class FilesystemServer extends BaseMCPServer {
     const watcherId = `watcher-${++this.watcherCounter}`;
     
     const watcher = watch(absolutePath, {
-      recursive: params.recursive,
       persistent: true,
       ignoreInitial: true,
     });
@@ -737,7 +736,7 @@ export class FilesystemServer extends BaseMCPServer {
     const absolutePath = this.resolvePath(params.path);
     this.validatePath(absolutePath);
 
-    const results = [];
+    const results: any[] = [];
     const query = params.caseSensitive ? params.query : params.query.toLowerCase();
 
     async function searchInDirectory(dirPath: string, relativePath: string) {
@@ -852,6 +851,7 @@ export class FilesystemServer extends BaseMCPServer {
       return operationRecord;
     } catch (error) {
       this.logger.error('Failed to track file operation', { error, operation, filePath });
+      return null;
     }
   }
 

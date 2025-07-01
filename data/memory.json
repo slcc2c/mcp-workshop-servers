@@ -1,0 +1,202 @@
+{
+  "version": "1.0.0",
+  "timestamp": "2025-07-01T02:02:01.568Z",
+  "entries": [
+    {
+      "id": "mem_1751220965539_a44h4z0ug",
+      "content": "{\"task\":\"Create REST API\",\"language\":\"TypeScript\",\"framework\":\"Express\",\"requirements\":[\"authentication\",\"validation\",\"error handling\"]}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:16:05.539Z",
+      "tags": [
+        "session:ai-workshop-session-1751220965539"
+      ],
+      "metadata": {
+        "sessionId": "ai-workshop-session-1751220965539"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751220965539_iy8cmaqso",
+      "content": "{\"iteration\":1,\"status\":\"initial\",\"files\":[]}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:16:05.539Z",
+      "tags": [
+        "iterative-project-1751220965539"
+      ],
+      "metadata": {
+        "projectKey": "iterative-project-1751220965539"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751220965540_irhr8oath",
+      "content": "{\"test\":true}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:16:05.540Z",
+      "tags": [
+        "concurrent-test-1"
+      ],
+      "metadata": {},
+      "relationships": []
+    },
+    {
+      "id": "mem_1751220965543_qcgv5bk9s",
+      "content": "{\"checkpoint\":\"before-failure\",\"data\":{\"important\":true}}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:16:05.543Z",
+      "tags": [
+        "critical-state"
+      ],
+      "metadata": {},
+      "relationships": []
+    },
+    {
+      "id": "mem_1751221062626_app9nzspa",
+      "content": "{\"projectPath\":\"/Users/spencer/repos/mcp-server/tests/tmp/rapid-prototype-test\",\"databases\":{\"postgres\":{\"containerId\":null,\"port\":5433},\"redis\":{\"containerId\":null,\"port\":6380}},\"createdAt\":\"2025-06-29T18:17:42.626Z\"}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:17:42.626Z",
+      "tags": [
+        "project:rapid-prototype-test"
+      ],
+      "metadata": {
+        "projectName": "rapid-prototype-test"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751221063564_4d58w8lil",
+      "content": "{\"imageTag\":\"workshop-multi-server-test\",\"buildTime\":\"2025-06-29T18:17:43.564Z\",\"dockerfilePath\":\"/Users/spencer/repos/mcp-server/tests/tmp/test-dockerfile\",\"dockerAvailable\":true}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:17:43.564Z",
+      "tags": [
+        "build:workshop-multi-server"
+      ],
+      "metadata": {
+        "buildId": "workshop-multi-server"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751221063566_5akehz8gr",
+      "content": "{\"task\":\"Create REST API\",\"language\":\"TypeScript\",\"framework\":\"Express\",\"requirements\":[\"authentication\",\"validation\",\"error handling\"],\"generatedFiles\":[\"/Users/spencer/repos/mcp-server/tests/tmp/generated-api.ts\"],\"lastUpdate\":\"2025-06-29T18:17:43.567Z\"}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:17:43.566Z",
+      "tags": [
+        "session:ai-workshop-session-1751221063566"
+      ],
+      "metadata": {
+        "sessionId": "ai-workshop-session-1751221063566"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751221063569_jmxx3g5x4",
+      "content": "{\"iteration\":3,\"status\":\"tests-added\",\"files\":[\"/Users/spencer/repos/mcp-server/tests/tmp/feature1.js\",\"/Users/spencer/repos/mcp-server/tests/tmp/feature1.test.js\"]}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:17:43.569Z",
+      "tags": [
+        "iterative-project-1751221063568"
+      ],
+      "metadata": {
+        "projectKey": "iterative-project-1751221063568"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751221063578_ox15n3nfz",
+      "content": "{\"test\":true}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:17:43.578Z",
+      "tags": [
+        "concurrent-test-1"
+      ],
+      "metadata": {},
+      "relationships": []
+    },
+    {
+      "id": "mem_1751221063585_6kfelxhln",
+      "content": "{\"checkpoint\":\"before-failure\",\"data\":{\"important\":true}}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:17:43.585Z",
+      "tags": [
+        "critical-state"
+      ],
+      "metadata": {},
+      "relationships": []
+    },
+    {
+      "id": "mem_1751222401253_90lpcqcmb",
+      "content": "{\"projectPath\":\"/Users/spencer/repos/mcp-server/tests/tmp/rapid-prototype-test\",\"databases\":{\"postgres\":{\"containerId\":null,\"port\":5433},\"redis\":{\"containerId\":null,\"port\":6380}},\"createdAt\":\"2025-06-29T18:40:01.253Z\"}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:40:01.253Z",
+      "tags": [
+        "project:rapid-prototype-test"
+      ],
+      "metadata": {
+        "projectName": "rapid-prototype-test"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751222401266_q7wbfyt1c",
+      "content": "{\"imageTag\":\"workshop-multi-server-test\",\"buildTime\":\"2025-06-29T18:40:01.266Z\",\"dockerfilePath\":\"/Users/spencer/repos/mcp-server/tests/tmp/test-dockerfile\",\"dockerAvailable\":true}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:40:01.266Z",
+      "tags": [
+        "build:workshop-multi-server"
+      ],
+      "metadata": {
+        "buildId": "workshop-multi-server"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751222401267_cubfm74u2",
+      "content": "{\"task\":\"Create REST API\",\"language\":\"TypeScript\",\"framework\":\"Express\",\"requirements\":[\"authentication\",\"validation\",\"error handling\"],\"generatedFiles\":[\"/Users/spencer/repos/mcp-server/tests/tmp/generated-api.ts\"],\"lastUpdate\":\"2025-06-29T18:40:01.267Z\"}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:40:01.267Z",
+      "tags": [
+        "session:ai-workshop-session-1751222401267"
+      ],
+      "metadata": {
+        "sessionId": "ai-workshop-session-1751222401267"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751222401268_ouzvb02v6",
+      "content": "{\"iteration\":3,\"status\":\"tests-added\",\"files\":[\"/Users/spencer/repos/mcp-server/tests/tmp/feature1.js\",\"/Users/spencer/repos/mcp-server/tests/tmp/feature1.test.js\"]}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:40:01.268Z",
+      "tags": [
+        "iterative-project-1751222401268"
+      ],
+      "metadata": {
+        "projectKey": "iterative-project-1751222401268"
+      },
+      "relationships": []
+    },
+    {
+      "id": "mem_1751222401271_rnxhteaqy",
+      "content": "{\"test\":true}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:40:01.271Z",
+      "tags": [
+        "concurrent-test-1"
+      ],
+      "metadata": {},
+      "relationships": []
+    },
+    {
+      "id": "mem_1751222401275_ce9xd9o4d",
+      "content": "{\"checkpoint\":\"before-failure\",\"data\":{\"important\":true}}",
+      "type": "context",
+      "timestamp": "2025-06-29T18:40:01.275Z",
+      "tags": [
+        "critical-state"
+      ],
+      "metadata": {},
+      "relationships": []
+    }
+  ]
+}
