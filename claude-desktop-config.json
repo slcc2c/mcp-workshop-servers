@@ -81,8 +81,8 @@
       }
     },
     "mcp-xcodebuild": {
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server", "xcodebuild-server"],
+      "command": "node",
+      "args": ["/Users/spencer/repos/mcp-server/scripts/run-xcodebuild-mcp.js"],
       "env": {
         "XCODE_DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
         "NODE_ENV": "production"

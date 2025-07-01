@@ -5,8 +5,13 @@
  * This script provides a direct way to run the XcodeBuildMCP server for Claude Desktop
  */
 
-const { spawn } = require('child_process');
-const path = require('path');
+import { spawn } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Check if running in MCP mode (via stdio)
 const isMCPMode = !process.argv.includes('--help') && !process.argv.includes('--version');
@@ -18,10 +23,9 @@ if (!isMCPMode) {
 }
 
 // Path to the actual XcodeBuildMCP repository
-const XCODEBUILD_MCP_PATH = process.env.XCODEBUILD_MCP_PATH || path.join(process.env.HOME, 'repos', 'XcodeBuildMCP');
+const XCODEBUILD_MCP_PATH = process.env.XCODEBUILD_MCP_PATH || path.join(__dirname, '..', 'external', 'XcodeBuildMCP');
 
 // Check if XcodeBuildMCP is installed
-const fs = require('fs');
 if (!fs.existsSync(XCODEBUILD_MCP_PATH)) {
   console.error(`XcodeBuildMCP not found at: ${XCODEBUILD_MCP_PATH}`);
   console.error('Please clone it from: https://github.com/cameroncooke/XcodeBuildMCP');
@@ -30,7 +34,7 @@ if (!fs.existsSync(XCODEBUILD_MCP_PATH)) {
 }
 
 // Check if it's built
-const builtPath = path.join(XCODEBUILD_MCP_PATH, 'dist', 'index.js');
+const builtPath = path.join(XCODEBUILD_MCP_PATH, 'build', 'index.js');
 if (!fs.existsSync(builtPath)) {
   console.error('XcodeBuildMCP is not built. Please run:');
   console.error(`cd ${XCODEBUILD_MCP_PATH} && npm install && npm run build`);
