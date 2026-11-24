@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -15,8 +16,10 @@ from mcp_stack.core.config import MCPStackSettings
 
 MLFLOW_MCP_LABEL = "com.spencer.mcp-mlflow-mcp"
 GATEWAY_LABEL = "com.spencer.mcp-workshop-gateway"
+WATCHDOG_LABEL = "com.spencer.mcp-workshop-watchdog"
 LOG_DIR = Path.home() / "Library/Logs/mcp-workshop-stack"
 LAUNCH_AGENTS_DIR = Path.home() / "Library/LaunchAgents"
+WATCHDOG_STATE_PATH = Path.home() / ".local/share/mcp-workshop-stack/watchdog-state.json"
 
 
 def rotate_log_file(path: Path, *, max_bytes: int = 10 * 1024 * 1024, keep: int = 3) -> bool:
@@ -80,6 +83,7 @@ def get_service_status(settings: MCPStackSettings) -> dict[str, Any]:
     services = {
         MLFLOW_MCP_LABEL: _launchctl_info(uid, MLFLOW_MCP_LABEL),
         GATEWAY_LABEL: _launchctl_info(uid, GATEWAY_LABEL),
+        WATCHDOG_LABEL: _launchctl_info(uid, WATCHDOG_LABEL),
     }
     ready: dict[str, Any] = {}
     url = f"http://{settings.gateway.host}:{settings.gateway.port}/ready"
@@ -88,7 +92,18 @@ def get_service_status(settings: MCPStackSettings) -> dict[str, Any]:
         ready = r.json()
     except Exception as exc:
         ready = {"status": "unreachable", "error": str(exc)}
-    return {"uid": uid, "launchagents": services, "gateway_ready": ready}
+    watchdog_state: dict[str, Any] | None = None
+    if WATCHDOG_STATE_PATH.exists():
+        try:
+            watchdog_state = json.loads(WATCHDOG_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            watchdog_state = None
+    return {
+        "uid": uid,
+        "launchagents": services,
+        "gateway_ready": ready,
+        "watchdog_state": watchdog_state,
+    }
 
 
 def _wait_ready(settings: MCPStackSettings, timeout_s: float = 25.0) -> dict[str, Any]:
@@ -122,14 +137,14 @@ def install_launchagents(
     agents_dir.mkdir(parents=True, exist_ok=True)
 
     installed: list[str] = []
-    for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL):
+    for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL, WATCHDOG_LABEL):
         src = src_dir / f"{label}.plist"
         dst = agents_dir / f"{label}.plist"
         shutil.copy2(src, dst)
         subprocess.run(["plutil", "-lint", str(dst)], check=True, capture_output=True, text=True)
         installed.append(str(dst))
 
-    for label in (GATEWAY_LABEL, MLFLOW_MCP_LABEL):
+    for label in (WATCHDOG_LABEL, GATEWAY_LABEL, MLFLOW_MCP_LABEL):
         bootout = subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}/{label}"],
             check=False,
@@ -149,7 +164,7 @@ def install_launchagents(
                     break
                 time.sleep(0.2)
 
-    for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL):
+    for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL, WATCHDOG_LABEL):
         plist_path = str(agents_dir / f"{label}.plist")
         last_err = ""
         for attempt in range(3):
@@ -198,9 +213,10 @@ def tail_service_logs(
     targets = {
         "gateway": ["gateway.log", "gateway.err.log"],
         "mlflow-mcp": ["mlflow-mcp.log", "mlflow-mcp.err.log"],
+        "watchdog": ["watchdog.log"],
     }
     names = (
-        [*targets["gateway"], *targets["mlflow-mcp"]]
+        [*targets["gateway"], *targets["mlflow-mcp"], *targets["watchdog"]]
         if service == "all"
         else targets.get(service, [])
     )

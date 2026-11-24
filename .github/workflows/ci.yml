@@ -51,9 +51,12 @@ jobs:
           uv run python -c "
           import json, tomllib
           from pathlib import Path
-          manifests = list(Path('manifests').glob('*.server.json'))
-          assert len(manifests) == 15, f'Expected 15 manifests, got {len(manifests)}'
-          for p in manifests:
+          from mcp_stack.core.config import load_settings
+          from mcp_stack.registry import build_server_manifests
+          expected = set(build_server_manifests(load_settings(load_dotenv=False)).keys())
+          manifests = {p.name.removesuffix('.server.json'): p for p in Path('manifests').glob('*.server.json')}
+          assert set(manifests.keys()) == expected, f'Manifest mismatch: {set(manifests.keys()) ^ expected}'
+          for p in manifests.values():
               data = json.loads(p.read_text(encoding='utf-8'))
               assert '\$schema' in data and 'name' in data
           json.loads(Path('.mcp.json').read_text(encoding='utf-8'))

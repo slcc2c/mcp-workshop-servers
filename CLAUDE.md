@@ -22,18 +22,20 @@ uv run mcp-stack serve <server> --transport stdio
 uv run mcp-stack doctor
 uv run mcp-stack uc bootstrap
 
-# LaunchAgents, log rotation & MLflow GenAI trace evaluation
+# LaunchAgents, 60s watchdog, log rotation & MLflow GenAI trace evaluation
 uv run mcp-stack service status
 uv run mcp-stack service restart
+uv run mcp-stack service watchdog-once
 uv run mcp-stack eval run --experiment mcp-workshop-servers --limit 20
 
 # Open MCP Registry manifests & MLflow 3.15+ MCP Registry sync
 uv run mcp-stack registry sync --dry-run
 uv run mcp-stack registry sync
 
-# Client config generation & safe live installation (with backups)
+# Client config generation, live install & silent ~/.zshrc token hook (with backups)
 uv run mcp-stack config generate --target all --write
 uv run mcp-stack config install --client codex --client claude-code --client claude-desktop
+uv run mcp-stack config install-shell-hook
 
 # Quality & tests
 uv run ruff check src tests
@@ -43,7 +45,8 @@ uv run pytest -m "not live and not databricks" -v
 
 ## Conventions & Guardrails
 - **Stdio cleanliness**: Never write logs to `stdout`. All logging goes to `sys.stderr` via `mcp_stack.core.logging`.
-- **Safe defaults**: `UC_ALLOW_MUTATIONS=false` and `MLFLOW_ALLOW_MUTATIONS=false` by default; `UC_FUNCTION_ALLOWLIST` defaults to `unity.default`.
+- **Tool profiles & routing**: Curated `/profiles/{core,data,ops,macos}/mcp` routes (and full `/mcp`) normalize trailing slashes in ASGI without `307` redirects.
+- **Safe defaults**: `UC_ALLOW_MUTATIONS=false` and `MLFLOW_ALLOW_MUTATIONS=false` by default; `UC_FUNCTION_ALLOWLIST` defaults to `unity.default,workshop.default`.
 - **Gateway auth**: Disabled on loopback (`127.0.0.1`/`localhost`) unless `MCP_AUTH_ENABLED=true`; automatically enforced on non-loopback binds (e.g., `0.0.0.0` in Docker).
 - **MLflow tracing**: Fail-open middleware with a 60s circuit breaker (`SpanType.TOOL` under `MLFLOW_EXPERIMENT_NAME`).
 - **macOS Photos**: Host-only (`sys.platform == "darwin"`) via `osascript` JXA; requires `PHOTOS_EXPORT_ROOT`.

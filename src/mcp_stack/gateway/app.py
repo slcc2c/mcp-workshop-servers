@@ -13,6 +13,7 @@ import httpx
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastmcp import FastMCP
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mcp_stack import __version__
 from mcp_stack.core.auth import GatewayAuthMiddleware
@@ -45,6 +46,27 @@ from mcp_stack.servers.xcodebuild import create_xcodebuild_server
 
 def _slug_for(server_key: str) -> str:
     return server_key.replace("_", "-")
+
+
+class NormalizeMCPPathMiddleware:
+    """Rewrite exact /mcp, /servers/<slug>/mcp, and /profiles/<name>/mcp to avoid 307."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path == "/mcp" or (
+                path.startswith(("/servers/", "/profiles/")) and path.endswith("/mcp")
+            ):
+                new_scope = dict(scope)
+                new_scope["path"] = path + "/"
+                raw_path = scope.get("raw_path")
+                if isinstance(raw_path, bytes) and not raw_path.endswith(b"/"):
+                    new_scope["raw_path"] = raw_path + b"/"
+                scope = new_scope
+        await self.app(scope, receive, send)
 
 
 def build_server_instance(
@@ -143,6 +165,39 @@ def build_gateway_app(
     if upstream_proxy is not None:
         per_server_http["mlflow-upstream"] = upstream_proxy.http_app(path="/")
 
+    profile_apps: dict[str, FastMCP] = {}
+    profile_http: dict[str, Any] = {}
+    profile_wants_upstream: dict[str, bool] = {}
+    profile_inventory: list[dict[str, Any]] = []
+
+    for profile_name, raw_members in settings.gateway.profiles.items():
+        clean_profile = profile_name.strip()
+        if not clean_profile:
+            continue
+        p_mcp = FastMCP(f"mcp-profile-{clean_profile}")
+        resolved_slugs: list[str] = []
+        wants_upstream = False
+        for member in raw_members:
+            norm = member.strip().replace("-", "_")
+            if norm == "mlflow_upstream":
+                if upstream_proxy is not None:
+                    wants_upstream = True
+                continue
+            if norm in servers:
+                p_mcp.mount(servers[norm])
+                resolved_slugs.append(_slug_for(norm))
+        profile_apps[clean_profile] = p_mcp
+        profile_http[clean_profile] = p_mcp.http_app(path="/")
+        profile_wants_upstream[clean_profile] = wants_upstream
+        profile_inventory.append(
+            {
+                "name": clean_profile,
+                "route": f"/profiles/{clean_profile}/mcp",
+                "servers": resolved_slugs,
+                "includesUpstreamMcp": wants_upstream,
+            }
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with AsyncExitStack() as stack:
@@ -171,8 +226,11 @@ def build_gateway_app(
                     should_compose = bool(probe.get("reachable"))
                 if should_compose:
                     composed.mount(upstream_proxy)
+                    for pname, p_mcp in profile_apps.items():
+                        if profile_wants_upstream.get(pname):
+                            p_mcp.mount(upstream_proxy)
                     logger.info(
-                        "Composed upstream mlflow[mcp] into /mcp",
+                        "Composed upstream mlflow[mcp] into /mcp and enabled profiles",
                         url=settings.mlflow.mcp_url,
                     )
                 else:
@@ -184,6 +242,8 @@ def build_gateway_app(
             await stack.enter_async_context(composed_http.lifespan(app))
             for _slug, sub_http in per_server_http.items():
                 await stack.enter_async_context(sub_http.lifespan(app))
+            for _pname, p_http in profile_http.items():
+                await stack.enter_async_context(p_http.lifespan(app))
             yield
 
     app = FastAPI(
@@ -219,7 +279,9 @@ def build_gateway_app(
             "version": __version__,
             "timestamp": datetime.now(UTC).isoformat(),
             "composedRoute": "/mcp",
+            "defaultProfile": settings.gateway.default_client_profile,
             "servers": server_inventory,
+            "profiles": profile_inventory,
         }
 
     @app.get("/ready")
@@ -282,6 +344,14 @@ def build_gateway_app(
             "servers": server_inventory,
         }
 
+    @app.get("/api/v1/profiles")
+    async def list_profiles() -> dict[str, Any]:
+        return {
+            "defaultProfile": settings.gateway.default_client_profile,
+            "fullRoute": "/mcp",
+            "profiles": profile_inventory,
+        }
+
     @app.get("/metrics")
     async def metrics() -> Response:
         payload, content_type = render_metrics()
@@ -290,9 +360,12 @@ def build_gateway_app(
     app.mount("/mcp", composed_http)
     for slug, sub_http in per_server_http.items():
         app.mount(f"/servers/{slug}/mcp", sub_http)
+    for pname, p_http in profile_http.items():
+        app.mount(f"/profiles/{pname}/mcp", p_http)
 
-    # Pure ASGI middlewares (outermost executes first)
+    # Pure ASGI middlewares (outermost added last: CORS -> NormalizePath -> Auth)
     app.add_middleware(GatewayAuthMiddleware, settings=settings)
+    app.add_middleware(NormalizeMCPPathMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.gateway.cors_origins,

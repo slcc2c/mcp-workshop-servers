@@ -98,6 +98,33 @@ def build_server_manifests(settings: MCPStackSettings) -> dict[str, dict[str, An
             ]
         manifests[slug] = entry
 
+    for profile_name, raw_members in settings.gateway.profiles.items():
+        clean_profile = profile_name.strip()
+        if not clean_profile:
+            continue
+        member_slugs = ", ".join(m.strip().replace("_", "-") for m in raw_members)
+        manifests[f"profile-{clean_profile}"] = {
+            "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+            "name": f"io.github.slcc2c/mcp-profile-{clean_profile}",
+            "title": f"MCP Profile: {clean_profile.replace('-', ' ').title()}",
+            "description": f"Curated MCP toolset profile '{clean_profile}' ({member_slugs})",
+            "version": __version__,
+            "remotes": [
+                {
+                    "type": "streamable-http",
+                    "url": f"{base_http}/profiles/{clean_profile}/mcp",
+                }
+            ],
+            "packages": [
+                {
+                    "registryType": "pypi",
+                    "identifier": "mcp-workshop-stack",
+                    "version": __version__,
+                    "transport": {"type": "streamable-http"},
+                }
+            ],
+        }
+
     return manifests
 
 

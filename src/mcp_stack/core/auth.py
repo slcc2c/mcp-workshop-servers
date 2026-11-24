@@ -20,6 +20,7 @@ caller_client_id_var: ContextVar[str | None] = ContextVar("caller_client_id", de
 
 _EXEMPT_PATHS = frozenset({"/", "/health", "/ready", "/metrics"})
 _SERVER_PATH_RE = re.compile(r"^/servers/([^/]+)/")
+_PROFILE_PATH_RE = re.compile(r"^/profiles/([^/]+)/")
 
 
 class GatewayAuthMiddleware:
@@ -104,6 +105,43 @@ class GatewayAuthMiddleware:
                         },
                     )
                     return
+
+            profile_match = _PROFILE_PATH_RE.match(path)
+            if profile_match:
+                profile_name = profile_match.group(1)
+                profile_servers = self._settings.gateway.profiles.get(profile_name)
+                if profile_servers is not None:
+                    allowed = client_policy.allowed_servers
+                    if "*" not in allowed:
+                        disallowed: list[str] = []
+                        for srv_key in profile_servers:
+                            norm = srv_key.replace("-", "_")
+                            slug_val = norm.replace("_", "-")
+                            if norm == "mlflow_upstream":
+                                ok = any(
+                                    k in allowed
+                                    for k in ("mlflow", "mlflow_upstream", "mlflow-upstream")
+                                )
+                            else:
+                                ok = any(k in allowed for k in (srv_key, norm, slug_val))
+                            if not ok:
+                                disallowed.append(slug_val)
+                        if disallowed:
+                            await self._send_json(
+                                send,
+                                403,
+                                {
+                                    "error": {
+                                        "code": "FORBIDDEN",
+                                        "message": (
+                                            f"Client '{client_policy.client_name}' is not allowed "
+                                            f"to access profile '{profile_name}' "
+                                            f"(disallowed servers: {', '.join(disallowed)})"
+                                        ),
+                                    }
+                                },
+                            )
+                            return
 
             if not self._check_rate_limit(client_policy):
                 await self._send_json(

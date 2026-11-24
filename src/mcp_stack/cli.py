@@ -17,6 +17,7 @@ from mcp_stack import __version__
 from mcp_stack.client_configs import (
     generate_client_configs,
     install_client_configs,
+    install_shell_hook,
     write_client_configs,
 )
 from mcp_stack.core.config import load_settings
@@ -34,6 +35,7 @@ from mcp_stack.service import (
     tail_service_logs,
 )
 from mcp_stack.uc_bootstrap import bootstrap_oss_unity_catalog
+from mcp_stack.watchdog import run_watchdog_once
 
 app = typer.Typer(
     name="mcp-stack",
@@ -240,6 +242,9 @@ def config_generate(
     write: bool = typer.Option(
         False, "--write", help="Write generated configuration files to the workspace"
     ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="Gateway toolset profile (core | data | ops | macos | full)"
+    ),
     repo_root: Path = typer.Option(
         Path("."), "--repo-root", help="Repository root for launcher paths"
     ),
@@ -247,10 +252,12 @@ def config_generate(
     """Generate MCP client configs for Claude Code, Claude Desktop, Codex, and Cursor."""
     settings = load_settings()
     if write:
-        written = write_client_configs(settings, repo_root=repo_root, target=target)
+        written = write_client_configs(
+            settings, repo_root=repo_root, target=target, profile=profile
+        )
         typer.echo(json.dumps({"written": [str(p) for p in written]}, indent=2))
     else:
-        rendered = generate_client_configs(settings, repo_root=repo_root)
+        rendered = generate_client_configs(settings, repo_root=repo_root, profile=profile)
         if target == "all":
             typer.echo(json.dumps(rendered, indent=2))
         else:
@@ -266,12 +273,30 @@ def config_install(
         "--client",
         help="Host client(s) to update with backup: codex | claude-code | claude-desktop",
     ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="Gateway toolset profile (core | data | ops | macos | full)"
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview targets without writing"),
     repo_root: Path = typer.Option(Path("."), "--repo-root", help="Repository root path"),
 ) -> None:
     """Safely install env-var Bearer/stdio entries into local host client configs."""
     settings = load_settings()
-    res = install_client_configs(settings, repo_root=repo_root, clients=client, dry_run=dry_run)
+    res = install_client_configs(
+        settings, repo_root=repo_root, clients=client, profile=profile, dry_run=dry_run
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@config_app.command("install-shell-hook")
+def config_install_shell_hook(
+    shell_rc: Path | None = typer.Option(
+        None, "--shell-rc", help="Shell RC path (defaults to ~/.zshrc)"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without writing"),
+    repo_root: Path = typer.Option(Path("."), "--repo-root", help="Repository root path"),
+) -> None:
+    """Idempotently install guarded MCP_*_AUTH_TOKEN autoload block into ~/.zshrc."""
+    res = install_shell_hook(repo_root=repo_root, shell_rc=shell_rc, dry_run=dry_run)
     typer.echo(json.dumps(res, indent=2))
 
 
@@ -300,7 +325,7 @@ def service_restart() -> None:
 
 @service_app.command("logs")
 def service_logs(
-    service: str = typer.Option("all", "--service", help="all | gateway | mlflow-mcp"),
+    service: str = typer.Option("all", "--service", help="all | gateway | mlflow-mcp | watchdog"),
     lines: int = typer.Option(40, "--lines", help="Number of trailing log lines"),
 ) -> None:
     """Print recent LaunchAgent stdout/stderr log lines."""
@@ -316,6 +341,24 @@ def service_rotate_logs(
 ) -> None:
     """Rotate oversized LaunchAgent log files."""
     typer.echo(json.dumps(rotate_service_logs(max_mb=max_mb, keep=keep), indent=2))
+
+
+@service_app.command("watchdog-once")
+def service_watchdog_once(
+    threshold: int = typer.Option(2, "--threshold", help="Consecutive failures before recovery"),
+    cooldown: float = typer.Option(180.0, "--cooldown", help="Minimum seconds between restarts"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report actions without restarting"),
+) -> None:
+    """Run one LaunchAgent watchdog probe and cooldown-guarded recovery pass."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = run_watchdog_once(
+        settings,
+        failure_threshold=threshold,
+        cooldown_seconds=cooldown,
+        dry_run=dry_run,
+    )
+    typer.echo(json.dumps(res, indent=2))
 
 
 @eval_app.command("run")

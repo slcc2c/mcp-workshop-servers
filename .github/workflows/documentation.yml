@@ -40,9 +40,11 @@ jobs:
           uv run python -c "
           import json, xml.etree.ElementTree as ET
           from pathlib import Path
-          from mcp_stack.registry import SERVER_DESCRIPTIONS
+          from mcp_stack.core.config import load_settings
+          from mcp_stack.registry import build_server_manifests
 
-          for slug in SERVER_DESCRIPTIONS:
+          expected = build_server_manifests(load_settings(load_dotenv=False))
+          for slug in expected:
               p = Path('manifests') / f'{slug}.server.json'
               assert p.exists(), f'Missing manifest: {p}'
               json.loads(p.read_text(encoding='utf-8'))
@@ -52,7 +54,7 @@ jobs:
 
           readme = Path('README.md').read_text(encoding='utf-8')
           claude_md = Path('CLAUDE.md').read_text(encoding='utf-8')
-          for key in ('postgresql', 'redis', 'mongodb', 'neo4j', 'kubernetes', 'jupyter', 'xcodebuild'):
+          for key in ('postgresql', 'redis', 'mongodb', 'neo4j', 'kubernetes', 'jupyter', 'xcodebuild', '/profiles/'):
               assert key in readme, f'{key} missing in README.md'
               assert key in claude_md, f'{key} missing in CLAUDE.md'
           "

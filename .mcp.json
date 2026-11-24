@@ -2,7 +2,7 @@
   "mcpServers": {
     "mcp-workshop-gateway": {
       "type": "http",
-      "url": "http://127.0.0.1:8090/mcp",
+      "url": "http://127.0.0.1:8090/profiles/core/mcp",
       "headers": {
         "Authorization": "Bearer ${MCP_CLAUDE_AUTH_TOKEN}"
       }

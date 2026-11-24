@@ -12,13 +12,25 @@ from typing import Any
 from mcp_stack.core.config import MCPStackSettings
 
 
+def _gateway_mcp_url(settings: MCPStackSettings, profile: str | None = None) -> str:
+    selected = (
+        profile if profile is not None else settings.gateway.default_client_profile
+    ).strip()
+    base = f"http://{settings.gateway.host}:{settings.gateway.port}"
+    if not selected or selected == "full":
+        return f"{base}/mcp"
+    return f"{base}/profiles/{selected}/mcp"
+
+
 def generate_client_configs(
     settings: MCPStackSettings,
     repo_root: Path,
+    *,
+    profile: str | None = None,
 ) -> dict[str, str]:
     """Render configuration payloads for supported MCP clients."""
     root_str = str(repo_root.resolve())
-    gw_url = f"http://{settings.gateway.host}:{settings.gateway.port}/mcp"
+    gw_url = _gateway_mcp_url(settings, profile=profile)
     auth_enabled = settings.gateway.effective_auth_enabled
 
     claude_gateway_entry: dict[str, Any] = {
@@ -156,9 +168,11 @@ def write_client_configs(
     settings: MCPStackSettings,
     repo_root: Path,
     target: str = "all",
+    *,
+    profile: str | None = None,
 ) -> list[Path]:
     """Write selected client configs into repo root."""
-    rendered = generate_client_configs(settings, repo_root)
+    rendered = generate_client_configs(settings, repo_root, profile=profile)
     targets_map = {
         "claude-code": repo_root / ".mcp.json",
         "claude-desktop": repo_root / "claude-desktop-config.json",
@@ -228,14 +242,15 @@ def install_client_configs(
     repo_root: Path,
     clients: list[str],
     *,
+    profile: str | None = None,
     dry_run: bool = False,
     home_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Non-destructively merge gateway/stdio MCP entries into live host client configs."""
     home = (home_dir or Path.home()).resolve()
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    rendered = generate_client_configs(settings, repo_root)
-    gw_url = f"http://{settings.gateway.host}:{settings.gateway.port}/mcp"
+    rendered = generate_client_configs(settings, repo_root, profile=profile)
+    gw_url = _gateway_mcp_url(settings, profile=profile)
     auth_enabled = settings.gateway.effective_auth_enabled
 
     results: dict[str, Any] = {}
@@ -299,3 +314,59 @@ def install_client_configs(
             raise ValueError(f"Unsupported live install target: {client_name}")
 
     return {"dry_run": dry_run, "results": results}
+
+
+_HOOK_START = "# >>> mcp-workshop-stack tokens >>>"
+_HOOK_END = "# <<< mcp-workshop-stack tokens <<<"
+
+
+def install_shell_hook(
+    repo_root: Path,
+    *,
+    shell_rc: Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Idempotently install a silent guarded token-autoload block into ~/.zshrc."""
+    target = (shell_rc or (Path.home() / ".zshrc")).expanduser().resolve()
+    loader = (repo_root.resolve() / "deploy/launchd/load_mcp_tokens.sh").resolve()
+    block_lines = [
+        _HOOK_START,
+        f'if [ -r "{loader}" ]; then',
+        f'  . "{loader}" >/dev/null 2>&1 || true',
+        "fi",
+        _HOOK_END,
+    ]
+    block = "\n".join(block_lines)
+
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    start_pos = existing.find(_HOOK_START)
+    end_pos = existing.find(_HOOK_END)
+    if start_pos != -1 and end_pos != -1 and end_pos >= start_pos:
+        after_end = end_pos + len(_HOOK_END)
+        updated = existing[:start_pos].rstrip("\n")
+        if updated:
+            updated += "\n\n"
+        updated += block + existing[after_end:]
+        if not updated.endswith("\n"):
+            updated += "\n"
+        action = "updated"
+    else:
+        prefix = existing.rstrip("\n")
+        sep = "\n\n" if prefix else ""
+        updated = prefix + sep + block + "\n"
+        action = "appended"
+
+    backup: str | None = None
+    if not dry_run:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup = _backup_file(target, stamp)
+        target.write_text(updated, encoding="utf-8")
+
+    return {
+        "dry_run": dry_run,
+        "path": str(target),
+        "loader": str(loader),
+        "backup": backup,
+        "status": f"dry_run_{action}" if dry_run else action,
+    }

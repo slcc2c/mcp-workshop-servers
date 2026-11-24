@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -53,6 +54,30 @@ class GatewaySettings(BaseModel):
     )
     enable_photos_on_macos: bool = True
     enable_xcode_on_macos: bool = True
+    default_client_profile: str = "core"
+    profiles: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "core": [
+                "unity_catalog",
+                "mlflow",
+                "mlflow_upstream",
+                "memory",
+                "filesystem",
+                "github",
+            ],
+            "data": [
+                "unity_catalog",
+                "mlflow",
+                "postgresql",
+                "redis",
+                "mongodb",
+                "neo4j",
+                "jupyter",
+            ],
+            "ops": ["docker", "kubernetes", "filesystem", "github"],
+            "macos": ["photos", "xcodebuild", "filesystem"],
+        }
+    )
     clients: dict[str, ClientPolicy] = Field(default_factory=dict)
 
     @property
@@ -405,6 +430,18 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         env_overrides["gateway"]["enable_photos_on_macos"] = b
     if (b := _parse_bool(os.getenv("MCP_ENABLE_XCODE_ON_MACOS"))) is not None:
         env_overrides["gateway"]["enable_xcode_on_macos"] = b
+    if val := os.getenv("MCP_DEFAULT_CLIENT_PROFILE"):
+        env_overrides["gateway"]["default_client_profile"] = val.strip()
+    if val := os.getenv("MCP_PROFILES_JSON"):
+        loaded_profiles = json.loads(val)
+        if not isinstance(loaded_profiles, dict) or not all(
+            isinstance(k, str)
+            and isinstance(v, list)
+            and all(isinstance(s, str) for s in v)
+            for k, v in loaded_profiles.items()
+        ):
+            raise ValueError("MCP_PROFILES_JSON must map profile names to lists of server keys")
+        env_overrides["gateway"]["profiles"] = loaded_profiles
 
     if val := os.getenv("MLFLOW_TRACKING_URI"):
         env_overrides["mlflow"]["tracking_uri"] = val

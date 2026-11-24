@@ -8,9 +8,11 @@ A modern Python 3.12 (`uv`) Model Context Protocol ecosystem built on **FastMCP 
 ## Architecture
 
 - **Unified Gateway (`:8090`)**: FastAPI + FastMCP Streamable HTTP gateway exposing:
-  - `/mcp` — Composed MCP endpoint across all enabled servers
+  - `/mcp` — Full composed MCP endpoint across all enabled servers
+  - `/profiles/{core,data,ops,macos}/mcp` — Curated toolset profiles (`MCP_DEFAULT_CLIENT_PROFILE=core` default for Codex/Claude Code to keep context lean; override via `MCP_PROFILES_JSON`)
   - `/servers/<slug>/mcp` — Isolated per-server Streamable HTTP endpoints
-  - `/health`, `/ready`, `/api/v1/servers`, `/metrics` (Prometheus)
+  - Zero-`307` path normalization on `/mcp`, `/profiles/<name>/mcp`, and `/servers/<slug>/mcp`
+  - `/health`, `/ready`, `/api/v1/servers`, `/api/v1/profiles`, `/metrics` (Prometheus)
   - Pure ASGI Bearer auth (auto-enforced on non-loopback binds), client server allowlists, rate limiting, and `X-UC-Token` on-behalf-of passthrough
   - Fail-open MLflow 3.x `SpanType.TOOL` tracing middleware with sensitive-key redaction and a 60s circuit breaker
 - **Modern Data & AI Governance Servers**:
@@ -56,13 +58,17 @@ uv run mcp-stack registry sync
 # Generate / update configs for Claude Code, Claude Desktop, Codex, and Cursor
 uv run mcp-stack config generate --target all --write
 
-# Safely merge into live host client configs (creates .bak-<timestamp> backups)
+# Safely merge into live host client configs (creates .bak-<timestamp> backups; defaults to /profiles/core/mcp)
 uv run mcp-stack config install --client codex --client claude-code --client claude-desktop
 
-# Manage LaunchAgents & log rotation (~/Library/Logs/mcp-workshop-stack/)
+# Install guarded silent token-autoload block into ~/.zshrc (creates backup)
+uv run mcp-stack config install-shell-hook
+
+# Manage LaunchAgents, 60s background watchdog & log rotation (~/Library/Logs/mcp-workshop-stack/)
 uv run mcp-stack service status
 uv run mcp-stack service install
 uv run mcp-stack service restart
+uv run mcp-stack service watchdog-once
 uv run mcp-stack service rotate-logs --max-mb 10
 
 # Bootstrap clean UC workshop catalog + external volume + sample UDFs
