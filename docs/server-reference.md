@@ -264,6 +264,34 @@ JUPYTER_PORT=8888
 JUPYTER_TOKEN=1password:Server-Configurations/Jupyter Token:notesPlain
 ```
 
+### Photos Server (macOS)
+**Purpose**: Read/search/export assets from the local Apple Photos library
+**Status**: Implemented
+**Platform**: macOS only
+
+**Key Features**:
+- Album discovery (regular + smart albums)
+- Rich asset search filters (text/date/favorite/hidden/media type)
+- Per-asset metadata lookup
+- Sandboxed export to a required root path
+- Partial export failures with per-item reasons
+
+**Tools**: 4
+- `photos_list_albums`
+- `photos_search_assets`
+- `photos_get_asset`
+- `photos_export_assets`
+
+**Configuration**:
+```bash
+# Required for export operations
+PHOTOS_EXPORT_ROOT=/Users/you/Exports/photos-mcp
+```
+
+**Permission Notes**:
+- The host process must have Automation permission to control Photos.
+- On first use, macOS prompts for Apple Events permission to Photos.
+
 ### XcodeBuildMCP Server
 **Purpose**: iOS/macOS development and Xcode project management
 **Status**: Implemented
