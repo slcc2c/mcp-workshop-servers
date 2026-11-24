@@ -5,26 +5,36 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import Body, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mcp_stack import __version__
-from mcp_stack.core.auth import GatewayAuthMiddleware
+from mcp_stack.client_configs import generate_client_configs
+from mcp_stack.core.auth import (
+    GatewayAuthMiddleware,
+    caller_client_policy_var,
+    is_server_allowed,
+)
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.core.logging import get_logger
 from mcp_stack.core.metrics import render_metrics
 from mcp_stack.evals import (
+    _POLICY_REFUSAL_MARKERS,
     _trace_duration_ms,
     is_expected_policy_refusal,
+    run_golden_benchmark,
     run_trace_evaluation,
 )
 from mcp_stack.gateway.dashboard import render_dashboard_html
@@ -364,6 +374,7 @@ def build_gateway_app(
             "defaultProfile": settings.gateway.default_client_profile,
             "fullRoute": "/mcp",
             "profiles": profile_inventory,
+            "clientSnippets": generate_client_configs(settings, repo_root=Path.cwd()),
         }
 
     @app.get("/ui", response_class=HTMLResponse)
@@ -546,6 +557,98 @@ def build_gateway_app(
                 "latestEvalRun": None,
             }
 
+    @app.get("/api/v1/traces/{trace_id}", response_model=None)
+    async def trace_detail_api(trace_id: str) -> dict[str, Any] | JSONResponse:
+        def _safe_json(val: Any) -> Any:
+            try:
+                return json.loads(json.dumps(val, default=str))
+            except Exception:
+                return str(val)
+
+        def _fetch_one() -> dict[str, Any]:
+            import mlflow
+
+            client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+            trace = client.get_trace(trace_id)
+            info = getattr(trace, "info", trace)
+            raw_spans = getattr(getattr(trace, "data", None), "spans", None) or []
+            spans_out: list[dict[str, Any]] = []
+            for sp in raw_spans:
+                start_ns = getattr(sp, "start_time_ns", None)
+                end_ns = getattr(sp, "end_time_ns", None)
+                dur_ms = (
+                    round((end_ns - start_ns) / 1_000_000.0, 2)
+                    if isinstance(start_ns, int)
+                    and isinstance(end_ns, int)
+                    and end_ns >= start_ns
+                    else None
+                )
+                events_out: list[dict[str, Any]] = []
+                for ev in getattr(sp, "events", None) or []:
+                    attrs = getattr(ev, "attributes", None)
+                    clean_attrs = (
+                        {
+                            k: v
+                            for k, v in attrs.items()
+                            if k != "exception.stacktrace"
+                        }
+                        if isinstance(attrs, dict)
+                        else attrs
+                    )
+                    events_out.append(
+                        {
+                            "name": getattr(ev, "name", None),
+                            "attributes": _safe_json(clean_attrs),
+                        }
+                    )
+                spans_out.append(
+                    {
+                        "spanId": getattr(sp, "span_id", None),
+                        "parentId": getattr(sp, "parent_id", None),
+                        "name": getattr(sp, "name", ""),
+                        "spanType": str(getattr(sp, "span_type", "")),
+                        "status": str(getattr(sp, "status", "")),
+                        "durationMs": dur_ms,
+                        "inputs": _safe_json(getattr(sp, "inputs", None)),
+                        "outputs": _safe_json(getattr(sp, "outputs", None)),
+                        "events": events_out,
+                    }
+                )
+
+            assessments_out: list[dict[str, Any]] = []
+            for item in getattr(info, "assessments", None) or []:
+                feedback = getattr(item, "feedback", None)
+                val = getattr(feedback, "value", None) if feedback else getattr(item, "value", None)
+                assessments_out.append(
+                    {
+                        "name": getattr(item, "name", None),
+                        "value": _safe_json(val),
+                        "rationale": getattr(item, "rationale", None),
+                    }
+                )
+
+            return {
+                "traceId": getattr(info, "trace_id", None) or trace_id,
+                "state": str(getattr(info, "state", "")),
+                "policyRefusal": is_expected_policy_refusal(trace),
+                "durationMs": round(_trace_duration_ms(trace), 2),
+                "timestampMs": getattr(info, "timestamp_ms", None),
+                "spans": spans_out,
+                "assessments": assessments_out,
+            }
+
+        try:
+            return await asyncio.to_thread(_fetch_one)
+        except Exception as exc:
+            msg = str(exc)
+            lowered = msg.lower()
+            status_code = 404 if ("not found" in lowered or "does not exist" in lowered) else 503
+            code = "NOT_FOUND" if status_code == 404 else "MLFLOW_UNAVAILABLE"
+            return JSONResponse(
+                status_code=status_code,
+                content={"error": {"code": code, "message": msg}},
+            )
+
     @app.post("/api/v1/actions/refresh-uc")
     async def action_refresh_uc() -> dict[str, Any]:
         if "unity_catalog" not in servers or uc_adapter is None:
@@ -564,6 +667,149 @@ def build_gateway_app(
         raw_limit = 20 if not isinstance(payload, dict) else int(payload.get("limit", 20))
         clamped = max(1, min(raw_limit, 100))
         return await asyncio.to_thread(run_trace_evaluation, settings, limit=clamped)
+
+    @app.post("/api/v1/actions/benchmark")
+    async def action_benchmark(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
+        with_judge = (
+            False if not isinstance(payload, dict) else bool(payload.get("with_llm_judge", False))
+        )
+        raw_model = None if not isinstance(payload, dict) else payload.get("judge_model")
+        judge_model = str(raw_model).strip() if isinstance(raw_model, str) and raw_model else None
+        return await asyncio.to_thread(
+            run_golden_benchmark,
+            settings,
+            with_llm_judge=with_judge,
+            judge_model=judge_model,
+        )
+
+    @app.post("/api/v1/actions/call-tool", response_model=None)
+    async def action_call_tool(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_REQUEST", "message": "JSON body required"}},
+            )
+        raw_server = str(payload.get("server") or "").strip()
+        tool_name = str(payload.get("tool") or "").strip()
+        arguments = payload.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not raw_server or not tool_name or not isinstance(arguments, dict):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "INVALID_REQUEST",
+                        "message": "Provide 'server', 'tool', and object 'arguments'",
+                    }
+                },
+            )
+
+        slug = raw_server.replace("_", "-").lower()
+        key = slug.replace("-", "_")
+        if settings.gateway.effective_auth_enabled:
+            policy = caller_client_policy_var.get()
+            if not is_server_allowed(policy, slug):
+                client_label = policy.client_name if policy else "caller"
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": {
+                            "code": "FORBIDDEN",
+                            "message": (
+                                f"Client '{client_label}' is not allowed to invoke tools "
+                                f"on server '{slug}'"
+                            ),
+                        }
+                    },
+                )
+
+        target_srv = upstream_proxy if slug == "mlflow-upstream" else servers.get(key)
+        if target_srv is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "SERVER_NOT_FOUND", "message": f"Unknown '{slug}'"}},
+            )
+
+        try:
+            avail_tools = await asyncio.wait_for(target_srv.list_tools(), timeout=3.0)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "SERVER_UNAVAILABLE", "message": str(exc)}},
+            )
+
+        if not any(getattr(t, "name", "") == tool_name for t in avail_tools):
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "TOOL_NOT_FOUND",
+                        "message": f"Tool '{tool_name}' not found on server '{slug}'",
+                    }
+                },
+            )
+
+        t0 = time.monotonic()
+        try:
+            tool_res = await asyncio.wait_for(
+                target_srv.call_tool(tool_name, arguments=arguments, run_middleware=True),
+                timeout=30.0,
+            )
+            elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
+            blocks = getattr(tool_res, "content", None) or []
+            raw_text = "".join(str(getattr(b, "text", b)) for b in blocks)
+            structured = getattr(tool_res, "structured_content", None)
+            if not raw_text and structured is not None:
+                raw_text = json.dumps(structured, default=str)
+
+            max_chars = 50_000
+            truncated = len(raw_text) > max_chars
+            clipped = raw_text[:max_chars] if truncated else raw_text
+            parsed_out: Any = clipped
+            if not truncated:
+                try:
+                    parsed_out = json.loads(clipped)
+                except Exception:
+                    parsed_out = clipped
+
+            return {
+                "ok": True,
+                "policyRefusal": False,
+                "server": slug,
+                "tool": tool_name,
+                "durationMs": elapsed_ms,
+                "truncated": truncated,
+                "result": parsed_out,
+            }
+        except ToolError as exc:
+            elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
+            msg = str(exc)
+            is_refusal = any(m in msg.lower() for m in _POLICY_REFUSAL_MARKERS)
+            return {
+                "ok": False,
+                "policyRefusal": is_refusal,
+                "server": slug,
+                "tool": tool_name,
+                "durationMs": elapsed_ms,
+                "error": msg,
+            }
+        except TimeoutError:
+            elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "ok": False,
+                    "server": slug,
+                    "tool": tool_name,
+                    "durationMs": elapsed_ms,
+                    "error": "Tool execution timed out after 30s",
+                },
+            )
 
     @app.get("/metrics")
     async def metrics() -> Response:

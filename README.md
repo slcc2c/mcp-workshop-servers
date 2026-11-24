@@ -83,7 +83,7 @@ uv run mcp-stack eval run --experiment mcp-workshop-servers --limit 20
 ```
 
 > [!NOTE]
-> Visit `http://127.0.0.1:8090/ui` when the gateway is running for the interactive Web Dashboard (status cards, searchable tool browser, watchdog history, MLflow traces/evals, and Bearer-protected operational actions).
+> Visit `http://127.0.0.1:8090/ui` when the gateway is running for the interactive Web Dashboard (status cards, profile tool counts & copyable client snippets, searchable Tool Browser + live **Interactive Tool Playground**, Trace Span Drilldown, watchdog history, and Bearer-protected operational & benchmark actions).
 
 > [!NOTE]
 > When `MCP_AUTH_ENABLED=true`, generated configs in [`.mcp.json`](file:///Users/spencer/repos/mcp-server/.mcp.json), [`cursor-mcp-config.json`](file:///Users/spencer/repos/mcp-server/cursor-mcp-config.json), and [`config/codex-mcp-snippet.toml`](file:///Users/spencer/repos/mcp-server/config/codex-mcp-snippet.toml) reference env-var Bearer tokens (`${MCP_CLAUDE_AUTH_TOKEN}`, `${env:MCP_CURSOR_AUTH_TOKEN}`, `MCP_CODEX_AUTH_TOKEN`) with zero plaintext secrets stored on disk.
@@ -122,7 +122,8 @@ docker-compose -f docker-compose.yml -f docker-compose.standalone.yml --profile 
 ## Testing & Quality
 
 ```bash
-uv run ruff check src tests
+uv run python scripts/secret_scan.py
+uv run ruff check src tests scripts
 uv run mypy src
 uv run pytest -m "not live and not databricks and not tier2" -v
 uv run pytest -m tier2 -v       # Live integration tests against --profile tier2 containers

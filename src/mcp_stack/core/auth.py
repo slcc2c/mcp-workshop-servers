@@ -17,10 +17,27 @@ from mcp_stack.core.logging import get_logger
 
 caller_uc_token_var: ContextVar[str | None] = ContextVar("caller_uc_token", default=None)
 caller_client_id_var: ContextVar[str | None] = ContextVar("caller_client_id", default=None)
+caller_client_policy_var: ContextVar[ClientPolicy | None] = ContextVar(
+    "caller_client_policy", default=None
+)
 
 _EXEMPT_PATHS = frozenset({"/", "/health", "/ready", "/metrics", "/ui"})
 _SERVER_PATH_RE = re.compile(r"^/servers/([^/]+)/")
 _PROFILE_PATH_RE = re.compile(r"^/profiles/([^/]+)/")
+
+
+def is_server_allowed(policy: ClientPolicy | None, server_key_or_slug: str) -> bool:
+    """Return True when the given ClientPolicy allows calling tools on the server."""
+    if policy is None:
+        return True
+    allowed = policy.allowed_servers
+    if "*" in allowed:
+        return True
+    norm = server_key_or_slug.strip().replace("-", "_")
+    slug = norm.replace("_", "-")
+    if norm == "mlflow_upstream":
+        return any(k in allowed for k in ("mlflow", "mlflow_upstream", "mlflow-upstream"))
+    return any(k in allowed for k in (server_key_or_slug, norm, slug))
 
 
 class GatewayAuthMiddleware:
@@ -84,13 +101,7 @@ class GatewayAuthMiddleware:
             server_match = _SERVER_PATH_RE.match(path)
             if server_match:
                 slug = server_match.group(1)
-                normalized = slug.replace("-", "_")
-                allowed = client_policy.allowed_servers
-                if (
-                    "*" not in allowed
-                    and slug not in allowed
-                    and normalized not in allowed
-                ):
+                if not is_server_allowed(client_policy, slug):
                     await self._send_json(
                         send,
                         403,
@@ -111,37 +122,27 @@ class GatewayAuthMiddleware:
                 profile_name = profile_match.group(1)
                 profile_servers = self._settings.gateway.profiles.get(profile_name)
                 if profile_servers is not None:
-                    allowed = client_policy.allowed_servers
-                    if "*" not in allowed:
-                        disallowed: list[str] = []
-                        for srv_key in profile_servers:
-                            norm = srv_key.replace("-", "_")
-                            slug_val = norm.replace("_", "-")
-                            if norm == "mlflow_upstream":
-                                ok = any(
-                                    k in allowed
-                                    for k in ("mlflow", "mlflow_upstream", "mlflow-upstream")
-                                )
-                            else:
-                                ok = any(k in allowed for k in (srv_key, norm, slug_val))
-                            if not ok:
-                                disallowed.append(slug_val)
-                        if disallowed:
-                            await self._send_json(
-                                send,
-                                403,
-                                {
-                                    "error": {
-                                        "code": "FORBIDDEN",
-                                        "message": (
-                                            f"Client '{client_policy.client_name}' is not allowed "
-                                            f"to access profile '{profile_name}' "
-                                            f"(disallowed servers: {', '.join(disallowed)})"
-                                        ),
-                                    }
-                                },
-                            )
-                            return
+                    disallowed = [
+                        srv_key.replace("_", "-")
+                        for srv_key in profile_servers
+                        if not is_server_allowed(client_policy, srv_key)
+                    ]
+                    if disallowed:
+                        await self._send_json(
+                            send,
+                            403,
+                            {
+                                "error": {
+                                    "code": "FORBIDDEN",
+                                    "message": (
+                                        f"Client '{client_policy.client_name}' is not allowed "
+                                        f"to access profile '{profile_name}' "
+                                        f"(disallowed servers: {', '.join(disallowed)})"
+                                    ),
+                                }
+                            },
+                        )
+                        return
 
             if not self._check_rate_limit(client_policy):
                 await self._send_json(
@@ -170,11 +171,13 @@ class GatewayAuthMiddleware:
         client_tok = caller_client_id_var.set(
             client_policy.client_id if client_policy else "anonymous"
         )
+        policy_tok = caller_client_policy_var.set(client_policy)
         try:
             await self.app(scope, receive, send)
         finally:
             caller_uc_token_var.reset(uc_tok)
             caller_client_id_var.reset(client_tok)
+            caller_client_policy_var.reset(policy_tok)
 
     def _check_rate_limit(self, policy: ClientPolicy) -> bool:
         now = self._clock()

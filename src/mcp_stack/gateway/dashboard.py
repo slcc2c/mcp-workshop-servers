@@ -68,13 +68,20 @@ def render_dashboard_html(version: str) -> str:
     .pill.warn {{ color: var(--warn); border-color: rgba(245, 158, 11, 0.4); }}
     .pill.err {{ color: var(--err); border-color: rgba(239, 68, 68, 0.4); }}
     .auth-bar {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }}
-    input, select {{
+    input, select, textarea {{
       background: var(--panel);
       color: var(--text);
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 6px 10px;
       font-size: 0.85rem;
+    }}
+    textarea {{
+      width: 100%;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      min-height: 110px;
+      resize: vertical;
     }}
     button {{
       background: var(--panel-alt);
@@ -85,6 +92,7 @@ def render_dashboard_html(version: str) -> str:
       font-size: 0.85rem;
       cursor: pointer;
     }}
+    button.mini {{ padding: 3px 8px; font-size: 0.76rem; }}
     button:hover {{ border-color: var(--accent); }}
     button.primary {{
       background: #0284c7;
@@ -102,7 +110,7 @@ def render_dashboard_html(version: str) -> str:
     }}
     .grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 14px;
     }}
     .card {{
@@ -118,6 +126,7 @@ def render_dashboard_html(version: str) -> str:
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 8px;
     }}
     .muted {{ color: var(--muted); font-size: 0.84rem; }}
     code, pre {{ font-family: var(--mono); font-size: 0.8rem; }}
@@ -127,7 +136,7 @@ def render_dashboard_html(version: str) -> str:
       border-radius: 6px;
       padding: 10px;
       overflow-x: auto;
-      max-height: 260px;
+      max-height: 280px;
     }}
     table {{ width: 100%; border-collapse: collapse; font-size: 0.84rem; }}
     th, td {{
@@ -137,17 +146,26 @@ def render_dashboard_html(version: str) -> str:
       vertical-align: top;
     }}
     th {{ color: var(--muted); font-weight: 600; }}
-    .toolbar {{
+    .toolbar, .actions {{
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
       margin-bottom: 12px;
       align-items: center;
     }}
-    .actions {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }}
+    .drawer {{
+      margin-top: 12px;
+      padding: 12px;
+      border-radius: 8px;
+      background: #0f172a;
+      border: 1px solid var(--border);
+    }}
     a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
-    .kv {{ display: flex; justify-content: space-between; padding: 4px 0; }}
+    .kv {{ display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }}
+    label.inline {{ display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem; }}
+    tr.clickable {{ cursor: pointer; }}
+    tr.clickable:hover {{ background: rgba(56, 189, 248, 0.08); }}
   </style>
 </head>
 <body>
@@ -158,6 +176,13 @@ def render_dashboard_html(version: str) -> str:
       <span id="overall-pill" class="pill warn">Checking...</span>
     </div>
     <div class="auth-bar">
+      <label class="inline muted" for="auto-refresh-select">Auto-refresh
+        <select id="auto-refresh-select" aria-label="Auto refresh interval">
+          <option value="0" selected>Off</option>
+          <option value="15000">15s</option>
+          <option value="60000">60s</option>
+        </select>
+      </label>
       <input
         id="token-input"
         type="password"
@@ -179,6 +204,12 @@ def render_dashboard_html(version: str) -> str:
       <div class="card">
         <h2>Profiles &amp; Routes</h2>
         <div id="profiles-box" class="muted">Loading /health...</div>
+        <details id="snippets-drawer" style="margin-top:8px;">
+          <summary class="muted">Client Config Snippets</summary>
+          <div id="snippets-box" class="muted" style="margin-top:6px;">
+            Connect token to load client snippets...
+          </div>
+        </details>
       </div>
       <div class="card">
         <h2>Watchdog <span id="wd-pill" class="pill">--</span></h2>
@@ -192,6 +223,17 @@ def render_dashboard_html(version: str) -> str:
         <button id="act-uc-btn" type="button">Refresh UC Tools</button>
         <button id="act-wd-btn" type="button">Run Watchdog Check (Dry Run)</button>
         <button id="act-eval-btn" type="button">Run Trace Eval (Last 20)</button>
+        <button id="bench-btn" class="primary" type="button">Run Golden Benchmark</button>
+        <label class="inline muted">
+          <input id="judge-toggle" type="checkbox" /> Ollama judge
+        </label>
+        <input
+          id="judge-model-input"
+          type="text"
+          value="ollama:/qwen3.8:27b"
+          aria-label="Ollama judge model"
+          style="width:190px;"
+        />
         <span id="action-status" class="muted"></span>
       </div>
       <pre id="action-output" style="display:none; margin-top:10px;"></pre>
@@ -199,8 +241,8 @@ def render_dashboard_html(version: str) -> str:
 
     <section class="card">
       <h2>
-        <span>Tool Browser <span id="tool-count" class="pill">0 tools</span></span>
-        <span class="muted">Filter by server, profile, or keyword</span>
+        <span>Tool Browser &amp; Playground <span id="tool-count" class="pill">0 tools</span></span>
+        <span class="muted">Filter, inspect schema, or run live tools</span>
       </h2>
       <div class="toolbar">
         <select id="profile-filter"><option value="">All Profiles</option></select>
@@ -212,7 +254,25 @@ def render_dashboard_html(version: str) -> str:
           style="min-width:260px;"
         />
       </div>
-      <div id="tools-body" class="muted">
+      <div id="playground-card" class="drawer" style="display:none;">
+        <div class="kv" style="margin-bottom:8px;">
+          <div>
+            <strong>Playground:</strong>
+            <code id="pg-server"></code> / <code id="pg-tool"></code>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <span id="pg-latency" class="pill">idle</span>
+            <button id="pg-close-btn" class="mini" type="button">Close</button>
+          </div>
+        </div>
+        <textarea id="pg-args" aria-label="Tool JSON arguments"></textarea>
+        <div class="toolbar" style="margin-top:8px; margin-bottom:0;">
+          <button id="pg-run-btn" class="primary" type="button">Run Tool</button>
+          <span id="pg-status" class="muted"></span>
+        </div>
+        <pre id="pg-output" style="display:none; margin-top:10px;"></pre>
+      </div>
+      <div id="tools-body" class="muted" style="margin-top:10px;">
         Connect token (if auth enabled) to browse live tools...
       </div>
     </section>
@@ -228,11 +288,19 @@ def render_dashboard_html(version: str) -> str:
       <div id="traces-body" class="muted">
         Connect token (if auth enabled) to load MLflow traces...
       </div>
+      <div id="trace-detail-box" class="drawer" style="display:none;"></div>
     </section>
   </main>
 
   <script>
     const TOKEN_KEY = "mcp_gateway_token";
+    let loadedTools = [];
+    let profileCountsCache = {{}};
+    let healthProfiles = [];
+    let healthServersCount = 0;
+    let refreshTimer = null;
+    let actionBusy = false;
+
     const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (ch) => ({{
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     }}[ch]));
@@ -250,7 +318,7 @@ def render_dashboard_html(version: str) -> str:
       let json = null;
       try {{ json = JSON.parse(text); }} catch {{}}
       if (!res.ok) {{
-        const msg = json?.error?.message || ("HTTP " + res.status);
+        const msg = json?.error?.message || json?.error || ("HTTP " + res.status);
         const err = new Error(msg);
         err.status = res.status;
         throw err;
@@ -261,6 +329,121 @@ def render_dashboard_html(version: str) -> str:
     function badge(ok, okLabel = "healthy", failLabel = "degraded") {{
       const cls = ok ? "ok" : "err";
       return '<span class="pill ' + cls + '">' + esc(ok ? okLabel : failLabel) + "</span>";
+    }}
+
+    function copyText(text, btn) {{
+      if (navigator.clipboard && navigator.clipboard.writeText) {{
+        navigator.clipboard.writeText(text).then(() => {{
+          const orig = btn.textContent;
+          btn.textContent = "Copied";
+          setTimeout(() => {{ btn.textContent = orig; }}, 1200);
+        }});
+      }}
+    }}
+
+    function renderProfileRows() {{
+      const origin = window.location.origin;
+      const box = document.getElementById("profiles-box");
+      if (!healthProfiles.length) return;
+      box.innerHTML = healthProfiles.map((p) => {{
+        const cnt = profileCountsCache[p.name];
+        const countTag = typeof cnt === "number" ? " (" + cnt + " tools)" : "";
+        const fullUrl = origin + p.route;
+        return '<div class="kv"><code>' + esc(p.route) + '</code>' +
+          '<span><span class="muted">' + esc((p.servers || []).length) +
+          ' srv' + esc(countTag) + '</span> ' +
+          '<button class="mini copy-url-btn" data-url="' + esc(fullUrl) +
+          '" type="button">Copy URL</button></span></div>';
+      }}).join("") + '<div class="kv"><code>/mcp</code>' +
+        '<span><span class="muted">' + esc(healthServersCount) +
+        ' total mounted</span> <button class="mini copy-url-btn" data-url="' +
+        esc(origin + "/mcp") + '" type="button">Copy URL</button></span></div>';
+
+      box.querySelectorAll(".copy-url-btn").forEach((btn) => {{
+        btn.addEventListener("click", () => copyText(btn.dataset.url || "", btn));
+      }});
+    }}
+
+    function seedArgsFromSchema(schema) {{
+      const props = (schema && schema.properties) || {{}};
+      const req = new Set((schema && schema.required) || []);
+      const out = {{}};
+      for (const [k, spec] of Object.entries(props)) {{
+        if (!req.has(k)) continue;
+        const tp = spec && spec.type;
+        if (spec && spec.default !== undefined) out[k] = spec.default;
+        else if (tp === "integer" || tp === "number") out[k] = 0;
+        else if (tp === "boolean") out[k] = false;
+        else if (tp === "array") out[k] = [];
+        else if (tp === "object") out[k] = {{}};
+        else out[k] = "";
+      }}
+      return JSON.stringify(out, null, 2);
+    }}
+
+    function openPlayground(idx) {{
+      const tool = loadedTools[idx];
+      if (!tool) return;
+      document.getElementById("pg-server").textContent = tool.server;
+      document.getElementById("pg-tool").textContent = tool.name;
+      document.getElementById("pg-args").value = seedArgsFromSchema(tool.parameters);
+      document.getElementById("pg-latency").textContent = "ready";
+      document.getElementById("pg-latency").className = "pill";
+      document.getElementById("pg-status").textContent = "";
+      document.getElementById("pg-output").style.display = "none";
+      document.getElementById("playground-card").style.display = "block";
+    }}
+
+    async function runPlaygroundTool() {{
+      const server = document.getElementById("pg-server").textContent;
+      const tool = document.getElementById("pg-tool").textContent;
+      const rawArgs = document.getElementById("pg-args").value.trim() || "{{}}";
+      const statusEl = document.getElementById("pg-status");
+      const latEl = document.getElementById("pg-latency");
+      const outEl = document.getElementById("pg-output");
+      const runBtn = document.getElementById("pg-run-btn");
+
+      let parsedArgs;
+      try {{
+        parsedArgs = JSON.parse(rawArgs);
+      }} catch (err) {{
+        statusEl.textContent = "Invalid JSON: " + err.message;
+        return;
+      }}
+
+      runBtn.disabled = true;
+      actionBusy = true;
+      statusEl.textContent = "Invoking...";
+      try {{
+        const res = await apiFetch("/api/v1/actions/call-tool", {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ server, tool, arguments: parsedArgs }}),
+        }});
+        latEl.textContent = (res.durationMs ?? "-") + " ms";
+        if (res.ok) {{
+          latEl.className = "pill ok";
+          statusEl.textContent = res.truncated ? "OK (truncated)" : "OK";
+        }} else if (res.policyRefusal) {{
+          latEl.className = "pill warn";
+          statusEl.textContent = "Policy Refusal";
+        }} else {{
+          latEl.className = "pill err";
+          statusEl.textContent = "Error";
+        }}
+        outEl.style.display = "block";
+        outEl.textContent = JSON.stringify(res, null, 2);
+        await loadTraces();
+      }} catch (err) {{
+        latEl.className = "pill err";
+        latEl.textContent = "failed";
+        statusEl.textContent = err.message;
+        outEl.style.display = "block";
+        outEl.textContent = err.message;
+      }} finally {{
+        actionBusy = false;
+        runBtn.disabled = false;
+      }}
     }}
 
     async function loadHealthAndReady() {{
@@ -278,10 +461,13 @@ def render_dashboard_html(version: str) -> str:
             badge(ok, "ok", "down") + "</div>";
         }}).join("");
 
-      const profiles = health.profiles || [];
+      healthProfiles = health.profiles || [];
+      const servers = health.servers || [];
+      healthServersCount = servers.length;
+
       const profSel = document.getElementById("profile-filter");
       const prevProf = profSel.value;
-      profSel.innerHTML = '<option value="">All Profiles</option>' + profiles.map(
+      profSel.innerHTML = '<option value="">All Profiles</option>' + healthProfiles.map(
         (p) => '<option value="' + esc(p.name) + '">' + esc(p.name) +
           " (" + esc(p.route) + ")</option>"
       ).join("");
@@ -289,17 +475,43 @@ def render_dashboard_html(version: str) -> str:
 
       const srvSel = document.getElementById("server-filter");
       const prevSrv = srvSel.value;
-      const servers = health.servers || [];
       srvSel.innerHTML = '<option value="">All Servers</option>' + servers.map(
         (s) => '<option value="' + esc(s.slug) + '">' + esc(s.slug) + "</option>"
       ).join("");
       srvSel.value = prevSrv;
 
-      document.getElementById("profiles-box").innerHTML = profiles.map((p) => (
-        '<div class="kv"><code>' + esc(p.route) + '</code><span class="muted">' +
-        esc((p.servers || []).length) + " servers</span></div>"
-      )).join("") + '<div class="kv"><code>/mcp</code><span class="muted">' +
-        esc(servers.length) + " total mounted</span></div>";
+      renderProfileRows();
+    }}
+
+    async function loadProfileSnippets() {{
+      const box = document.getElementById("snippets-box");
+      try {{
+        const data = await apiFetch("/api/v1/profiles");
+        const snippets = data.clientSnippets || {{}};
+        const entries = Object.entries(snippets).filter(
+          ([k]) => k === "codex" || k === "claude-code" || k === "cursor"
+        );
+        if (!entries.length) {{
+          box.textContent = "No client snippets available.";
+          return;
+        }}
+        box.innerHTML = entries.map(([name, body]) => (
+          '<div style="margin-bottom:8px;">' +
+          '<div class="kv"><strong>' + esc(name) + '</strong>' +
+          '<button class="mini copy-snip-btn" data-name="' + esc(name) +
+          '" type="button">Copy</button></div>' +
+          '<pre style="max-height:140px;">' + esc(body) + '</pre></div>'
+        )).join("");
+        box.querySelectorAll(".copy-snip-btn").forEach((btn) => {{
+          btn.addEventListener("click", () => {{
+            copyText(snippets[btn.dataset.name] || "", btn);
+          }});
+        }});
+      }} catch (err) {{
+        box.textContent = err.status === 401
+          ? "Enter Bearer token to view client config snippets."
+          : err.message;
+      }}
     }}
 
     async function loadWatchdog() {{
@@ -343,14 +555,18 @@ def render_dashboard_html(version: str) -> str:
       const qs = params.toString() ? ("?" + params.toString()) : "";
       try {{
         const data = await apiFetch("/api/v1/tools" + qs);
-        const tools = data.tools || [];
-        countEl.textContent = tools.length + " tools";
-        if (!tools.length) {{
+        loadedTools = data.tools || [];
+        profileCountsCache = data.profileCounts || {{}};
+        renderProfileRows();
+        countEl.textContent = loadedTools.length + " tools";
+        if (!loadedTools.length) {{
           body.textContent = "No matching tools.";
           return;
         }}
-        const rows = tools.slice(0, 150).map((t) => (
-          "<tr><td><code>" + esc(t.name) + "</code></td>" +
+        const rows = loadedTools.slice(0, 150).map((t, idx) => (
+          "<tr><td><code>" + esc(t.name) + "</code>" +
+          '<div style="margin-top:4px;"><button class="mini try-tool-btn" data-idx="' + idx +
+          '" type="button">Try Tool</button></div></td>' +
           "<td><span class='pill'>" + esc(t.server) + "</span></td>" +
           "<td>" + esc(t.description || "") +
           "<details style='margin-top:4px;'><summary class='muted'>schema</summary><pre>" +
@@ -359,10 +575,54 @@ def render_dashboard_html(version: str) -> str:
         body.innerHTML =
           "<table><thead><tr><th>Tool</th><th>Server</th>" +
           "<th>Description &amp; Schema</th></tr></thead><tbody>" + rows + "</tbody></table>";
+        body.querySelectorAll(".try-tool-btn").forEach((btn) => {{
+          btn.addEventListener("click", () => openPlayground(Number(btn.dataset.idx)));
+        }});
       }} catch (err) {{
         body.textContent = err.status === 401
           ? "Enter Bearer token to browse /api/v1/tools."
           : err.message;
+      }}
+    }}
+
+    async function inspectTrace(traceId) {{
+      const detailBox = document.getElementById("trace-detail-box");
+      detailBox.style.display = "block";
+      detailBox.textContent = "Loading spans for " + traceId + "...";
+      try {{
+        const tr = await apiFetch("/api/v1/traces/" + encodeURIComponent(traceId));
+        const stPill = tr.policyRefusal
+          ? '<span class="pill warn">policy_refusal</span>'
+          : badge(String(tr.state).includes("OK"), "OK", tr.state);
+        const spansHtml = (tr.spans || []).map((sp) => (
+          '<div style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border);">' +
+          '<div class="kv"><code>' + esc(sp.name) + '</code>' +
+          '<span class="muted">' + esc(sp.spanType) + " · " +
+          esc(sp.durationMs ?? "-") + " ms</span></div>" +
+          '<pre style="max-height:180px;">' +
+          esc(JSON.stringify({{
+            status: sp.status,
+            inputs: sp.inputs,
+            outputs: sp.outputs,
+            events: sp.events,
+          }}, null, 2)) + "</pre></div>"
+        )).join("");
+        const assessHtml = (tr.assessments || []).length
+          ? '<div style="margin-top:8px;"><strong>Assessments:</strong> ' +
+            tr.assessments.map((a) => (
+              '<span class="pill">' + esc(a.name) + "=" + esc(a.value) + "</span>"
+            )).join(" ") + "</div>"
+          : "";
+        detailBox.innerHTML =
+          '<div class="kv"><div><strong>Trace:</strong> <code>' + esc(tr.traceId) +
+          "</code> " + stPill + ' <span class="muted">' + esc(tr.durationMs) +
+          ' ms</span></div><button id="close-trace-btn" class="mini" type="button">' +
+          "Close</button></div>" + assessHtml + spansHtml;
+        document.getElementById("close-trace-btn").addEventListener("click", () => {{
+          detailBox.style.display = "none";
+        }});
+      }} catch (err) {{
+        detailBox.textContent = "Failed to load trace details: " + err.message;
       }}
     }}
 
@@ -397,13 +657,19 @@ def render_dashboard_html(version: str) -> str:
           const st = tr.policyRefusal
             ? '<span class="pill warn">policy_refusal</span>'
             : badge(String(tr.state).includes("OK"), "OK", tr.state);
-          return "<tr><td><code>" + esc(tr.traceId) + "</code></td>" +
+          return '<tr class="clickable" data-trace-id="' + esc(tr.traceId) + '">' +
+            "<td><code>" + esc(tr.traceId) + "</code></td>" +
             "<td><code>" + esc(tr.name || "") + "</code></td><td>" + st +
-            "</td><td>" + esc(tr.durationMs ?? "-") + " ms</td></tr>";
+            "</td><td>" + esc(tr.durationMs ?? "-") + " ms</td>" +
+            '<td><button class="mini inspect-trace-btn" type="button">Spans</button></td></tr>';
         }}).join("");
         body.innerHTML =
           "<table><thead><tr><th>Trace ID</th><th>Span</th>" +
-          "<th>Outcome</th><th>Duration</th></tr></thead><tbody>" + rows + "</tbody></table>";
+          "<th>Outcome</th><th>Duration</th><th>Inspect</th></tr></thead>" +
+          "<tbody>" + rows + "</tbody></table>";
+        body.querySelectorAll("tr.clickable").forEach((row) => {{
+          row.addEventListener("click", () => inspectTrace(row.dataset.traceId || ""));
+        }});
       }} catch (err) {{
         evalEl.textContent = "";
         body.textContent = err.status === 401
@@ -416,6 +682,7 @@ def render_dashboard_html(version: str) -> str:
       const outEl = document.getElementById("action-output");
       const statusEl = document.getElementById("action-status");
       btn.disabled = true;
+      actionBusy = true;
       statusEl.textContent = "Running " + path + "...";
       try {{
         const res = await apiFetch(path, {{
@@ -432,13 +699,31 @@ def render_dashboard_html(version: str) -> str:
         outEl.style.display = "block";
         outEl.textContent = err.message;
       }} finally {{
+        actionBusy = false;
         btn.disabled = false;
       }}
     }}
 
     async function refreshAll() {{
       await loadHealthAndReady();
-      await Promise.all([loadWatchdog(), loadTools(), loadTraces()]);
+      await Promise.all([
+        loadProfileSnippets(),
+        loadWatchdog(),
+        loadTools(),
+        loadTraces(),
+      ]);
+    }}
+
+    function updateAutoRefresh(ms) {{
+      if (refreshTimer) {{
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }}
+      if (ms > 0) {{
+        refreshTimer = setInterval(() => {{
+          if (!actionBusy) refreshAll();
+        }}, ms);
+      }}
     }}
 
     document.getElementById("save-token-btn").addEventListener("click", () => {{
@@ -452,9 +737,16 @@ def render_dashboard_html(version: str) -> str:
       refreshAll();
     }});
     document.getElementById("refresh-btn").addEventListener("click", refreshAll);
+    document.getElementById("auto-refresh-select").addEventListener(
+      "change", (e) => updateAutoRefresh(Number(e.target.value))
+    );
     document.getElementById("profile-filter").addEventListener("change", loadTools);
     document.getElementById("server-filter").addEventListener("change", loadTools);
     document.getElementById("tool-search").addEventListener("input", loadTools);
+    document.getElementById("pg-run-btn").addEventListener("click", runPlaygroundTool);
+    document.getElementById("pg-close-btn").addEventListener("click", () => {{
+      document.getElementById("playground-card").style.display = "none";
+    }});
     document.getElementById("act-uc-btn").addEventListener(
       "click", (e) => runAction("/api/v1/actions/refresh-uc", {{}}, e.target)
     );
@@ -464,6 +756,15 @@ def render_dashboard_html(version: str) -> str:
     document.getElementById("act-eval-btn").addEventListener(
       "click", (e) => runAction("/api/v1/actions/eval", {{ limit: 20 }}, e.target)
     );
+    document.getElementById("bench-btn").addEventListener("click", (e) => {{
+      const withJudge = document.getElementById("judge-toggle").checked;
+      const model = document.getElementById("judge-model-input").value.trim() || null;
+      runAction(
+        "/api/v1/actions/benchmark",
+        {{ with_llm_judge: withJudge, judge_model: withJudge ? model : null }},
+        e.target
+      );
+    }});
 
     if (getToken()) {{
       document.getElementById("token-input").value = getToken();
