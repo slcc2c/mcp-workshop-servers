@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "mcp-workshop-gateway": {
+      "type": "http",
+      "url": "http://127.0.0.1:8090/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_CLAUDE_AUTH_TOKEN}"
+      }
+    },
+    "mlflow": {
+      "type": "http",
+      "url": "http://localhost:9012/mcp"
+    },
+    "mcp-photos": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "photos",
+        "--transport",
+        "stdio"
+      ],
+      "env": {
+        "PHOTOS_EXPORT_ROOT": "/Users/spencer/Exports/photos-mcp"
+      }
+    }
+  }
+}

@@ -1,111 +1,49 @@
-# MCP Servers for CS Experimentation Workshop
+# MCP Workshop Stack — Developer & Agent Guide
 
-## Project Overview
-This project implements a comprehensive Model Context Protocol (MCP) server ecosystem for rapid CS experimentation. The goal is to achieve "5-minute magic" - enabling developers to go from concept to working experiment in under 5 minutes using AI-collaborative development.
-
-## Quick Start: Connect AI Clients
-- **Claude Desktop**: Copy `claude-desktop-config.json` to Claude's config directory
-- **Cursor IDE**: Use `cursor-mcp-config.json` with your `MCP_CURSOR_AUTH_TOKEN`
-- **OpenAI**: Use `openai-functions.json` for function calling
-- See [Quick Setup Guide](docs/quick-setup-clients.md) or [Full Documentation](docs/client-connections.md)
-
-## Architecture
-- **Tier 1**: Essential foundation servers (GitHub, filesystem, Docker, memory)
-- **Tier 2**: Database and service management (PostgreSQL, Redis, MongoDB, Neo4j, Kubernetes)
-- **Tier 3**: AI collaboration and rapid prototyping tools
+## Stack Overview
+This repository implements the modern Python 3.12 (`uv`) **FastMCP + FastAPI + MLflow 3.x + Unity Catalog** MCP stack.
+Legacy TypeScript files are preserved recoverably in `legacy/ts/`.
 
 ## Key Commands
-
-### Development
 ```bash
-# Install dependencies
-npm install
+# Sync dependencies
+uv sync --extra dev
 
-# Run development server
-npm run dev
+# Run unified Streamable HTTP gateway (127.0.0.1:8090)
+uv run mcp-stack serve gateway
 
-# Run tests
-npm test
+# Run individual server over stdio (stderr-only logs, clean JSON-RPC stdout)
+uv run mcp-stack serve <server> --transport stdio
+# Servers: unity-catalog | mlflow | memory | filesystem | github | docker |
+#   postgresql | redis | mongodb | neo4j | kubernetes | jupyter |
+#   photos (macOS only) | xcodebuild (macOS only)
 
-# Lint code
-npm run lint
+# Environment diagnostics & UC bootstrap
+uv run mcp-stack doctor
+uv run mcp-stack uc bootstrap
 
-# Type check
-npm run typecheck
+# LaunchAgents, log rotation & MLflow GenAI trace evaluation
+uv run mcp-stack service status
+uv run mcp-stack service restart
+uv run mcp-stack eval run --experiment mcp-workshop-servers --limit 20
 
-# Build project (TypeScript compilation - now clean!)
-npm run build
+# Open MCP Registry manifests & MLflow 3.15+ MCP Registry sync
+uv run mcp-stack registry sync --dry-run
+uv run mcp-stack registry sync
+
+# Client config generation & safe live installation (with backups)
+uv run mcp-stack config generate --target all --write
+uv run mcp-stack config install --client codex --client claude-code --client claude-desktop
+
+# Quality & tests
+uv run ruff check src tests
+uv run mypy src
+uv run pytest -m "not live and not databricks" -v
 ```
 
-### Docker
-```bash
-# Build Docker image
-docker build -t mcp-workshop .
-
-# Run container
-docker run -d -p 3000:3000 mcp-workshop
-
-# Docker compose up
-docker-compose up -d
-```
-
-### MCP Server Management
-```bash
-# Start all MCP servers
-npm run mcp:start
-
-# Stop all MCP servers
-npm run mcp:stop
-
-# Check MCP server status
-npm run mcp:status
-
-# Install a specific MCP server
-npm run mcp:install <server-name>
-```
-
-## Project Structure
-```
-mcp-server/
-├── servers/           # Individual MCP server implementations
-│   ├── github/       # GitHub integration server
-│   ├── filesystem/   # File operations server
-│   ├── docker/       # Docker management server
-│   └── memory/       # Persistent context server
-├── docs/             # Documentation
-├── scripts/          # Build and deployment scripts
-├── config/           # Configuration files
-└── examples/         # Example implementations
-```
-
-## Key Features
-- Sub-5-minute project setup
-- Comprehensive GitHub integration
-- Multi-database support
-- Docker-based isolation
-- AI memory and context persistence
-- Mac Studio M3 Ultra optimized
-
-## Testing Strategy
-- Unit tests for individual servers
-- Integration tests for server communication
-- End-to-end workshop scenario tests
-- Performance benchmarks for 5-minute target
-
-## Deployment
-- Docker containers for each server
-- Kubernetes orchestration for production
-- One-click deployment scripts
-- Automatic health monitoring
-
-## Security
-- OAuth 2.1 authentication
-- Container isolation (2GB RAM limits)
-- Configurable access controls
-- Comprehensive audit logging
-
-## Recent Improvements (2025-06-29)
-- Fixed all TypeScript compilation errors (400+ → 0)
-- Improved type safety across all servers
-- Enhanced build reliability
-- See [TypeScript Patterns](docs/typescript-patterns.md) for development guidelines
+## Conventions & Guardrails
+- **Stdio cleanliness**: Never write logs to `stdout`. All logging goes to `sys.stderr` via `mcp_stack.core.logging`.
+- **Safe defaults**: `UC_ALLOW_MUTATIONS=false` and `MLFLOW_ALLOW_MUTATIONS=false` by default; `UC_FUNCTION_ALLOWLIST` defaults to `unity.default`.
+- **Gateway auth**: Disabled on loopback (`127.0.0.1`/`localhost`) unless `MCP_AUTH_ENABLED=true`; automatically enforced on non-loopback binds (e.g., `0.0.0.0` in Docker).
+- **MLflow tracing**: Fail-open middleware with a 60s circuit breaker (`SpanType.TOOL` under `MLFLOW_EXPERIMENT_NAME`).
+- **macOS Photos**: Host-only (`sys.platform == "darwin"`) via `osascript` JXA; requires `PHOTOS_EXPORT_ROOT`.

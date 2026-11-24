@@ -1,113 +1,189 @@
 {
   "mcpServers": {
-    "mcp-workshop-gateway": {
-      "command": "node",
+    "mcp-unity-catalog": {
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/dist/src/gateway/stdio-adapter.js"
-      ],
-      "env": {
-        "MCP_GATEWAY_URL": "http://localhost:3000",
-        "MCP_AUTH_TOKEN": "env:MCP_CLAUDE_AUTH_TOKEN",
-        "NODE_ENV": "production"
-      }
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "unity-catalog",
+        "--transport",
+        "stdio"
+      ]
     },
-    "mcp-github": {
-      "command": "npx",
+    "mcp-mlflow": {
+      "command": "uv",
       "args": [
-        "-y",
-        "@modelcontextprotocol/server-github"
-      ],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "env:GITHUB_PERSONAL_ACCESS_TOKEN"
-      }
-    },
-    "mcp-filesystem": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/Users/spencer/repos/mcp-server"
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "mlflow",
+        "--transport",
+        "stdio"
       ]
     },
     "mcp-memory": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/dist/servers/memory/run.js"
-      ],
-      "env": {
-        "MEMORY_PROJECT": "mcp-workshop",
-        "MEMORY_STORAGE_PATH": "/Users/spencer/.mcp/memory"
-      }
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "memory",
+        "--transport",
+        "stdio"
+      ]
+    },
+    "mcp-filesystem": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "filesystem",
+        "--transport",
+        "stdio"
+      ]
+    },
+    "mcp-github": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "github",
+        "--transport",
+        "stdio"
+      ]
     },
     "mcp-docker": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/dist/servers/docker/run.js"
-      ],
-      "env": {
-        "DOCKER_HOST": "unix:///var/run/docker.sock",
-        "DOCKER_RESOURCE_LIMITS": "true"
-      }
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "docker",
+        "--transport",
+        "stdio"
+      ]
     },
     "mcp-postgresql": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/dist/servers/postgresql/run.js"
-      ],
-      "env": {
-        "POSTGRES_URL": "env:POSTGRES_URL",
-        "PG_MAX_CONNECTIONS": "10"
-      }
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "postgresql",
+        "--transport",
+        "stdio"
+      ]
     },
     "mcp-redis": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/dist/servers/redis/run.js"
-      ],
-      "env": {
-        "REDIS_URL": "env:REDIS_URL"
-      }
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "redis",
+        "--transport",
+        "stdio"
+      ]
     },
     "mcp-mongodb": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/dist/servers/mongodb/run.js"
-      ],
-      "env": {
-        "MONGODB_URL": "env:MONGODB_URL",
-        "MONGODB_DATABASE": "mcp_workshop"
-      }
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "mongodb",
+        "--transport",
+        "stdio"
+      ]
     },
     "mcp-neo4j": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/dist/servers/neo4j/run.js"
-      ],
-      "env": {
-        "NEO4J_URL": "env:NEO4J_URL",
-        "NEO4J_USER": "env:NEO4J_USER",
-        "NEO4J_PASSWORD": "env:NEO4J_PASSWORD"
-      }
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "neo4j",
+        "--transport",
+        "stdio"
+      ]
+    },
+    "mcp-kubernetes": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "kubernetes",
+        "--transport",
+        "stdio"
+      ]
     },
     "mcp-jupyter": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/dist/servers/jupyter/run.js"
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "jupyter",
+        "--transport",
+        "stdio"
+      ]
+    },
+    "mcp-photos": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "photos",
+        "--transport",
+        "stdio"
       ],
       "env": {
-        "JUPYTER_URL": "http://localhost:8888",
-        "JUPYTER_TOKEN": "env:JUPYTER_TOKEN"
+        "PHOTOS_EXPORT_ROOT": "/Users/spencer/Exports/photos-mcp"
       }
     },
     "mcp-xcodebuild": {
-      "command": "node",
+      "command": "uv",
       "args": [
-        "/Users/spencer/repos/mcp-server/scripts/run-xcodebuild-mcp.js"
-      ],
-      "env": {
-        "XCODE_DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
-        "NODE_ENV": "production"
-      }
+        "--directory",
+        "/Users/spencer/repos/mcp-server",
+        "run",
+        "mcp-stack",
+        "serve",
+        "xcodebuild",
+        "--transport",
+        "stdio"
+      ]
     }
   }
 }
