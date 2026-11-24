@@ -2,7 +2,9 @@
   "mcpServers": {
     "mcp-workshop-gateway": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/dist/gateway/stdio-adapter.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/dist/src/gateway/stdio-adapter.js"
+      ],
       "env": {
         "MCP_GATEWAY_URL": "http://localhost:3000",
         "MCP_AUTH_TOKEN": "env:MCP_CLAUDE_AUTH_TOKEN",
@@ -11,22 +13,27 @@
     },
     "mcp-github": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
       "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "env:GITHUB_TOKEN"
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "env:GITHUB_PERSONAL_ACCESS_TOKEN"
       }
     },
     "mcp-filesystem": {
       "command": "npx",
       "args": [
-        "-y", 
+        "-y",
         "@modelcontextprotocol/server-filesystem",
         "/Users/spencer/repos/mcp-server"
       ]
     },
     "mcp-memory": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/dist/servers/memory/index.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/dist/servers/memory/run.js"
+      ],
       "env": {
         "MEMORY_PROJECT": "mcp-workshop",
         "MEMORY_STORAGE_PATH": "/Users/spencer/.mcp/memory"
@@ -34,7 +41,9 @@
     },
     "mcp-docker": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/dist/servers/docker/index.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/dist/servers/docker/run.js"
+      ],
       "env": {
         "DOCKER_HOST": "unix:///var/run/docker.sock",
         "DOCKER_RESOURCE_LIMITS": "true"
@@ -42,7 +51,9 @@
     },
     "mcp-postgresql": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/dist/servers/postgresql/index.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/dist/servers/postgresql/run.js"
+      ],
       "env": {
         "POSTGRES_URL": "env:POSTGRES_URL",
         "PG_MAX_CONNECTIONS": "10"
@@ -50,14 +61,18 @@
     },
     "mcp-redis": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/dist/servers/redis/index.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/dist/servers/redis/run.js"
+      ],
       "env": {
         "REDIS_URL": "env:REDIS_URL"
       }
     },
     "mcp-mongodb": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/dist/servers/mongodb/index.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/dist/servers/mongodb/run.js"
+      ],
       "env": {
         "MONGODB_URL": "env:MONGODB_URL",
         "MONGODB_DATABASE": "mcp_workshop"
@@ -65,7 +80,9 @@
     },
     "mcp-neo4j": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/dist/servers/neo4j/index.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/dist/servers/neo4j/run.js"
+      ],
       "env": {
         "NEO4J_URL": "env:NEO4J_URL",
         "NEO4J_USER": "env:NEO4J_USER",
@@ -74,7 +91,9 @@
     },
     "mcp-jupyter": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/dist/servers/jupyter/index.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/dist/servers/jupyter/run.js"
+      ],
       "env": {
         "JUPYTER_URL": "http://localhost:8888",
         "JUPYTER_TOKEN": "env:JUPYTER_TOKEN"
@@ -82,7 +101,9 @@
     },
     "mcp-xcodebuild": {
       "command": "node",
-      "args": ["/Users/spencer/repos/mcp-server/scripts/run-xcodebuild-mcp.js"],
+      "args": [
+        "/Users/spencer/repos/mcp-server/scripts/run-xcodebuild-mcp.js"
+      ],
       "env": {
         "XCODE_DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
         "NODE_ENV": "production"

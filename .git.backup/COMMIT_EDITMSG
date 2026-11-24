@@ -1,0 +1,10 @@
+Remove exposed GitHub tokens from scripts
+
+- Replace hardcoded tokens with environment variable references
+- Use ${GITHUB_TOKEN:-} pattern in scripts
+- Replace tokens in documentation with <GITHUB_TOKEN> placeholder
+- Scripts now expect GITHUB_TOKEN environment variable
+
+🤖 Generated with Claude Code
+
+Co-Authored-By: Claude <noreply@anthropic.com>

@@ -1,0 +1,138 @@
+services:
+  mlflow-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-mlflow-mcp
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MLFLOW_TRACKING_URI: "${DOCKER_MLFLOW_TRACKING_URI:-http://host.docker.internal:5002}"
+      MLFLOW_DISABLE_AGENT_HINT: "1"
+    command:
+      [
+        "python",
+        "-c",
+        "from mlflow.mcp.server import create_mcp; create_mcp().run(transport='streamable-http', host='0.0.0.0', port=9012, show_banner=False)",
+      ]
+    ports:
+      - "127.0.0.1:${MLFLOW_MCP_PORT:-9012}:9012"
+    networks:
+      - atelier-core
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request, urllib.error; req = urllib.request.Request('http://127.0.0.1:9012/mcp', data=b'{\"jsonrpc\":\"2.0\",\"id\":\"hc\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"hc\",\"version\":\"1.0\"}}}', headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'}); urllib.request.urlopen(req, timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  mcp-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-workshop-gateway
+    restart: unless-stopped
+    depends_on:
+      mlflow-mcp:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MCP_GATEWAY_PORT:-8090}:8090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MCP_GATEWAY_HOST: "0.0.0.0"
+      MCP_GATEWAY_PORT: "8090"
+      MCP_AUTH_ENABLED: "${MCP_AUTH_ENABLED:-true}"
+      MCP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK: "${MCP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK:-false}"
+      MCP_CLAUDE_AUTH_TOKEN: "${MCP_CLAUDE_AUTH_TOKEN:-}"
+      MCP_CURSOR_AUTH_TOKEN: "${MCP_CURSOR_AUTH_TOKEN:-}"
+      MCP_CODEX_AUTH_TOKEN: "${MCP_CODEX_AUTH_TOKEN:-}"
+      MCP_OPENAI_AUTH_TOKEN: "${MCP_OPENAI_AUTH_TOKEN:-}"
+      MCP_DEFAULT_AUTH_TOKEN: "${MCP_DEFAULT_AUTH_TOKEN:-}"
+      MLFLOW_TRACKING_URI: "${DOCKER_MLFLOW_TRACKING_URI:-http://host.docker.internal:5002}"
+      MLFLOW_MCP_URL: "${DOCKER_MLFLOW_MCP_URL:-http://mlflow-mcp:9012/mcp}"
+      MLFLOW_EXPERIMENT_NAME: "${MLFLOW_EXPERIMENT_NAME:-mcp-workshop-servers}"
+      MLFLOW_TRACING_ENABLED: "${MLFLOW_TRACING_ENABLED:-true}"
+      MLFLOW_ALLOW_MUTATIONS: "${MLFLOW_ALLOW_MUTATIONS:-false}"
+      UC_MODE: "${UC_MODE:-oss}"
+      UC_BASE_URL: "${DOCKER_UC_BASE_URL:-http://unity-catalog:8080}"
+      UC_TOKEN: "${UC_TOKEN:-}"
+      UC_ALLOW_MUTATIONS: "${UC_ALLOW_MUTATIONS:-false}"
+      UC_FUNCTION_ALLOWLIST: "${UC_FUNCTION_ALLOWLIST:-unity.default}"
+      UC_EXECUTION_MODE: "${UC_EXECUTION_MODE:-sandbox}"
+      EXECUTOR_MAX_MEMORY_LIMIT: "${EXECUTOR_MAX_MEMORY_LIMIT:-4096}"
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      ALLOWED_PATHS: "/workspace"
+      MEMORY_DB_PATH: "/app/data/memory.db"
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+    volumes:
+      - mcp-memory-data:/app/data
+      - "${WORKSPACE_PATH:-.}:/workspace:rw"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - atelier-core
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  unity-catalog:
+    image: unitycatalog/unitycatalog:latest
+    container_name: mcp-unity-catalog
+    profiles: ["uc"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${UC_PORT:-8082}:8080"
+    volumes:
+      - uc-data:/home/unitycatalog/etc/data
+      - "./data/uc-volumes:/home/unitycatalog/etc/data/external/workshop:rw"
+    networks:
+      - atelier-core
+
+  mlflow-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-mlflow-server
+    profiles: ["mlflow"]
+    restart: unless-stopped
+    command:
+      [
+        "mlflow",
+        "server",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "5002",
+        "--allowed-hosts",
+        "localhost:*,127.0.0.1:*,mlflow-server:*,host.docker.internal:*",
+        "--backend-store-uri",
+        "sqlite:////app/data/mlflow.db",
+        "--default-artifact-root",
+        "/app/data/mlartifacts",
+      ]
+    ports:
+      - "127.0.0.1:${MLFLOW_SERVER_PORT:-5002}:5002"
+    volumes:
+      - mlflow-data:/app/data
+    networks:
+      - atelier-core
+
+volumes:
+  mcp-memory-data:
+  uc-data:
+  mlflow-data:
+
+networks:
+  atelier-core:
+    external: true

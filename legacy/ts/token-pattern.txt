@@ -1,0 +1,1 @@
+github_pat_[A-Za-z0-9_]{20,}==>GITHUB_TOKEN_REMOVED

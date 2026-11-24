@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "timestamp": "2025-07-01T12:55:18.604Z",
+  "timestamp": "2025-07-01T23:56:06.709Z",
   "entries": [
     {
       "id": "mem_1751220965539_a44h4z0ug",
@@ -194,6 +194,17 @@
       "timestamp": "2025-06-29T18:40:01.275Z",
       "tags": [
         "critical-state"
+      ],
+      "metadata": {},
+      "relationships": []
+    },
+    {
+      "id": "mem_1751337454396_5jgpncx8c",
+      "content": "Test memory entry",
+      "type": "fact",
+      "timestamp": "2025-07-01T02:37:34.396Z",
+      "tags": [
+        "test"
       ],
       "metadata": {},
       "relationships": []

@@ -1,0 +1,7 @@
+# Override for environments where the external 'atelier-core' network does not yet exist:
+#   docker compose -f docker-compose.yml -f docker-compose.standalone.yml up -d
+
+networks:
+  atelier-core:
+    external: false
+    driver: bridge
