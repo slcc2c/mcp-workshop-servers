@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -10,8 +11,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Response
+from fastapi import Body, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastmcp import FastMCP
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -20,6 +22,12 @@ from mcp_stack.core.auth import GatewayAuthMiddleware
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.core.logging import get_logger
 from mcp_stack.core.metrics import render_metrics
+from mcp_stack.evals import (
+    _trace_duration_ms,
+    is_expected_policy_refusal,
+    run_trace_evaluation,
+)
+from mcp_stack.gateway.dashboard import render_dashboard_html
 from mcp_stack.servers.docker_server import create_docker_server
 from mcp_stack.servers.filesystem import create_filesystem_server
 from mcp_stack.servers.github import create_github_server
@@ -42,6 +50,12 @@ from mcp_stack.servers.unity_catalog import (
     sync_uc_function_tools,
 )
 from mcp_stack.servers.xcodebuild import create_xcodebuild_server
+from mcp_stack.watchdog import (
+    DEFAULT_LOG_PATH,
+    DEFAULT_STATE_PATH,
+    _load_state,
+    run_watchdog_once,
+)
 
 
 def _slug_for(server_key: str) -> str:
@@ -351,6 +365,205 @@ def build_gateway_app(
             "fullRoute": "/mcp",
             "profiles": profile_inventory,
         }
+
+    @app.get("/ui", response_class=HTMLResponse)
+    async def dashboard_ui() -> HTMLResponse:
+        return HTMLResponse(content=render_dashboard_html(__version__))
+
+    async def _collect_tools_for_server(slug: str, srv: FastMCP) -> list[dict[str, Any]]:
+        try:
+            items = await asyncio.wait_for(srv.list_tools(), timeout=2.0)
+        except Exception as exc:
+            logger.debug("Tool inspection skipped for server", server=slug, error=str(exc))
+            return []
+        collected: list[dict[str, Any]] = []
+        for tool in items:
+            params = getattr(tool, "parameters", None)
+            if not isinstance(params, dict):
+                params = {}
+            collected.append(
+                {
+                    "name": getattr(tool, "name", ""),
+                    "server": slug,
+                    "description": (getattr(tool, "description", None) or "").strip(),
+                    "parameters": params,
+                }
+            )
+        return collected
+
+    @app.get("/api/v1/tools")
+    async def list_tools_api(
+        server: str | None = None,
+        profile: str | None = None,
+        q: str | None = None,
+    ) -> dict[str, Any]:
+        target_slugs: dict[str, FastMCP] = {
+            _slug_for(k): srv for k, srv in servers.items()
+        }
+        if upstream_proxy is not None:
+            target_slugs["mlflow-upstream"] = upstream_proxy
+
+        allowed_by_profile: set[str] | None = None
+        if profile:
+            prof_entry = next((p for p in profile_inventory if p["name"] == profile), None)
+            if prof_entry is None:
+                return {"totalTools": 0, "profileCounts": {}, "tools": []}
+            allowed_by_profile = set(prof_entry["servers"])
+            if prof_entry.get("includesUpstreamMcp"):
+                allowed_by_profile.add("mlflow-upstream")
+
+        per_server_tools: dict[str, list[dict[str, Any]]] = {}
+        for slug, srv in target_slugs.items():
+            per_server_tools[slug] = await _collect_tools_for_server(slug, srv)
+
+        profile_counts: dict[str, int] = {}
+        for prof in profile_inventory:
+            total = sum(len(per_server_tools.get(s, [])) for s in prof["servers"])
+            if prof.get("includesUpstreamMcp"):
+                total += len(per_server_tools.get("mlflow-upstream", []))
+            profile_counts[str(prof["name"])] = total
+
+        needle = (q or "").strip().lower()
+        srv_filter = (server or "").strip().replace("_", "-").lower()
+
+        filtered: list[dict[str, Any]] = []
+        for slug, items in per_server_tools.items():
+            if srv_filter and slug.lower() != srv_filter:
+                continue
+            if allowed_by_profile is not None and slug not in allowed_by_profile:
+                continue
+            for item in items:
+                if needle:
+                    hay = f"{item['name']} {item['description']} {slug}".lower()
+                    if needle not in hay:
+                        continue
+                filtered.append(item)
+
+        return {
+            "totalTools": len(filtered),
+            "profileCounts": profile_counts,
+            "tools": filtered,
+        }
+
+    @app.get("/api/v1/watchdog")
+    async def watchdog_status_api() -> dict[str, Any]:
+        state = await asyncio.to_thread(_load_state, DEFAULT_STATE_PATH)
+        recent_events: list[dict[str, Any]] = []
+        try:
+            if DEFAULT_LOG_PATH.exists():
+                raw_lines = DEFAULT_LOG_PATH.read_text(encoding="utf-8").splitlines()[-25:]
+                for line in reversed(raw_lines):
+                    if not line.strip():
+                        continue
+                    try:
+                        recent_events.append(json.loads(line))
+                    except Exception:
+                        recent_events.append({"raw": line})
+        except Exception as exc:
+            recent_events.append({"error": str(exc)})
+        return {
+            "statePath": str(DEFAULT_STATE_PATH),
+            "logPath": str(DEFAULT_LOG_PATH),
+            "lastRunAt": state.get("last_run_at"),
+            "lastActions": state.get("last_actions") or {},
+            "components": state.get("components") or {},
+            "recentEvents": recent_events,
+        }
+
+    @app.get("/api/v1/traces")
+    async def recent_traces_api(limit: int = 20) -> dict[str, Any]:
+        clamped = max(1, min(limit, 100))
+
+        def _fetch() -> dict[str, Any]:
+            import mlflow
+
+            client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+            exp = client.get_experiment_by_name(settings.mlflow.experiment_name)
+            if exp is None:
+                return {
+                    "available": True,
+                    "experiment": settings.mlflow.experiment_name,
+                    "traces": [],
+                    "latestEvalRun": None,
+                }
+            traces = client.search_traces(
+                locations=[exp.experiment_id],
+                max_results=clamped,
+                order_by=["timestamp_ms DESC"],
+            )
+            trace_rows: list[dict[str, Any]] = []
+            for tr in traces:
+                info = getattr(tr, "info", tr)
+                spans = getattr(getattr(tr, "data", None), "spans", None) or []
+                root_name = getattr(spans[0], "name", "") if spans else ""
+                trace_rows.append(
+                    {
+                        "traceId": getattr(info, "trace_id", None)
+                        or getattr(info, "request_id", None),
+                        "name": root_name,
+                        "state": str(getattr(info, "state", "")),
+                        "policyRefusal": is_expected_policy_refusal(tr),
+                        "durationMs": round(_trace_duration_ms(tr), 1),
+                    }
+                )
+            latest_eval: dict[str, Any] | None = None
+            try:
+                runs = client.search_runs(
+                    [exp.experiment_id],
+                    order_by=["attributes.start_time DESC"],
+                    max_results=10,
+                )
+                for run in runs:
+                    metrics = {
+                        k: round(float(v), 4)
+                        for k, v in (run.data.metrics or {}).items()
+                        if "/" in k or "tool_" in k or "policy_" in k
+                    }
+                    if metrics:
+                        latest_eval = {
+                            "run_id": run.info.run_id,
+                            "metrics": metrics,
+                        }
+                        break
+            except Exception:
+                pass
+            return {
+                "available": True,
+                "experiment": settings.mlflow.experiment_name,
+                "experimentId": exp.experiment_id,
+                "traces": trace_rows,
+                "latestEvalRun": latest_eval,
+            }
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception as exc:
+            return {
+                "available": False,
+                "experiment": settings.mlflow.experiment_name,
+                "error": str(exc),
+                "traces": [],
+                "latestEvalRun": None,
+            }
+
+    @app.post("/api/v1/actions/refresh-uc")
+    async def action_refresh_uc() -> dict[str, Any]:
+        if "unity_catalog" not in servers or uc_adapter is None:
+            return {"status": "skipped", "reason": "unity_catalog server is not enabled"}
+        return await sync_uc_function_tools(servers["unity_catalog"], uc_adapter, settings)
+
+    @app.post("/api/v1/actions/watchdog")
+    async def action_watchdog(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
+        dry_run = True if not isinstance(payload, dict) else bool(payload.get("dry_run", True))
+        return await asyncio.to_thread(run_watchdog_once, settings, dry_run=dry_run)
+
+    @app.post("/api/v1/actions/eval")
+    async def action_eval(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+        raw_limit = 20 if not isinstance(payload, dict) else int(payload.get("limit", 20))
+        clamped = max(1, min(raw_limit, 100))
+        return await asyncio.to_thread(run_trace_evaluation, settings, limit=clamped)
 
     @app.get("/metrics")
     async def metrics() -> Response:

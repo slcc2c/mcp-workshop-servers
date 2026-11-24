@@ -29,9 +29,9 @@ DEFAULT_LOG_PATH = LOG_DIR / "watchdog.log"
 
 
 def _load_state(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"components": {}}
     try:
+        if not path.exists():
+            return {"components": {}}
         loaded = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict) and isinstance(loaded.get("components"), dict):
             return loaded

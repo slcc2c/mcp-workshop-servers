@@ -64,6 +64,7 @@ markers = [
   "integration: In-process ASGI and subprocess integration tests",
   "live: Live probes requiring running MLflow and/or Unity Catalog services",
   "databricks: Opt-in read-only Databricks UC smoke tests",
+  "tier2: Live integration tests requiring --profile tier2 Docker databases",
 ]
 
 [tool.ruff]

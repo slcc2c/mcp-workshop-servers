@@ -18,7 +18,7 @@ from mcp_stack.core.logging import get_logger
 caller_uc_token_var: ContextVar[str | None] = ContextVar("caller_uc_token", default=None)
 caller_client_id_var: ContextVar[str | None] = ContextVar("caller_client_id", default=None)
 
-_EXEMPT_PATHS = frozenset({"/", "/health", "/ready", "/metrics"})
+_EXEMPT_PATHS = frozenset({"/", "/health", "/ready", "/metrics", "/ui"})
 _SERVER_PATH_RE = re.compile(r"^/servers/([^/]+)/")
 _PROFILE_PATH_RE = re.compile(r"^/profiles/([^/]+)/")
 

@@ -523,9 +523,20 @@ class MemoryStore:
             raise ToolError(f"Snapshot file not found: {target}")
 
         raw = json.loads(target.read_text(encoding="utf-8"))
+        return self.import_snapshot_payload(raw, source_label=str(target), merge_mode=merge_mode)
+
+    def import_snapshot_payload(
+        self,
+        raw: Any,
+        *,
+        source_label: str,
+        merge_mode: Literal["upsert", "skip_existing"] = "upsert",
+    ) -> dict[str, Any]:
+        """Import a parsed JSON snapshot object into SQLite + FTS5."""
+        self.initialize()
         entries = raw.get("entries") if isinstance(raw, dict) else None
         if not isinstance(entries, list):
-            raise ToolError(f"Invalid snapshot payload in {target}: missing 'entries' list")
+            raise ToolError(f"Invalid snapshot payload in {source_label}: missing 'entries' list")
 
         imported = 0
         skipped = 0
@@ -595,7 +606,7 @@ class MemoryStore:
             conn.commit()
 
         return {
-            "importedFile": str(target),
+            "importedFile": source_label,
             "importedCount": imported,
             "skippedCount": skipped,
             "mergeMode": merge_mode,
@@ -698,7 +709,32 @@ def create_memory_server(
         uc_volume_path: str | None = None,
         uc_volume_name: str | None = None,
     ) -> dict[str, Any]:
-        """Export memory graph as JSON or CSV (local path or catalog.schema.volume)."""
+        """Export memory graph as JSON or CSV (local path, OSS UC Volume, or Databricks Volume)."""
+        if uc_volume_name and settings.unity_catalog.mode == "databricks":
+            from mcp_stack.servers.unity_catalog import UCClientAdapter
+
+            result = await asyncio.to_thread(
+                mem_store.export,
+                format=format,
+                uc_volume_path=None,
+                default_volume=None,
+            )
+            serialized = (
+                str(result["csv"])
+                if format == "csv"
+                else json.dumps(result["data"], indent=2)
+            )
+            ext = "csv" if format == "csv" else "json"
+            filename = f"memory-export-{int(time.time())}.{ext}"
+            adapter = uc_adapter or UCClientAdapter(settings)
+            upload_res = await adapter.upload_volume_file(
+                uc_volume_name, filename, serialized.encode("utf-8")
+            )
+            result["exportedFile"] = upload_res["filePath"]
+            result["ucVolume"] = uc_volume_name
+            result["ucVolumeMode"] = "databricks_files_api"
+            return result
+
         resolved_path = uc_volume_path
         if uc_volume_name:
             from mcp_stack.servers.unity_catalog import (
@@ -718,6 +754,7 @@ def create_memory_server(
         )
         if uc_volume_name:
             result["ucVolume"] = uc_volume_name
+            result["ucVolumeMode"] = "oss_local_map"
         return result
 
     @mcp.tool()
@@ -727,7 +764,30 @@ def create_memory_server(
         filename: str | None = None,
         merge_mode: Literal["upsert", "skip_existing"] = "upsert",
     ) -> dict[str, Any]:
-        """Import a memory JSON snapshot from a local path or UC Volume into SQLite."""
+        """Import a memory JSON snapshot from a local path, OSS UC Volume, or Databricks Volume."""
+        if uc_volume_name and settings.unity_catalog.mode == "databricks":
+            from mcp_stack.servers.unity_catalog import UCClientAdapter
+
+            adapter = uc_adapter or UCClientAdapter(settings)
+            file_path, raw_bytes = await adapter.download_volume_file(
+                uc_volume_name, filename=filename
+            )
+            try:
+                raw_payload = json.loads(raw_bytes.decode("utf-8"))
+            except Exception as exc:
+                raise ToolError(
+                    f"Failed to parse JSON snapshot '{file_path}': {exc}"
+                ) from exc
+            result = await asyncio.to_thread(
+                mem_store.import_snapshot_payload,
+                raw_payload,
+                source_label=file_path,
+                merge_mode=merge_mode,
+            )
+            result["ucVolume"] = uc_volume_name
+            result["ucVolumeMode"] = "databricks_files_api"
+            return result
+
         volume_dir: Path | None = None
         if uc_volume_name:
             from mcp_stack.servers.unity_catalog import (
@@ -747,6 +807,7 @@ def create_memory_server(
         )
         if uc_volume_name:
             result["ucVolume"] = uc_volume_name
+            result["ucVolumeMode"] = "oss_local_map"
         return result
 
     return mcp

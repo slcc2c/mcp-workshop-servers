@@ -128,10 +128,91 @@ services:
     networks:
       - atelier-core
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: mcp-tier2-postgres
+    profiles: ["tier2"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${TIER2_POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${TIER2_POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_DB: "${TIER2_POSTGRES_DB:-mcp_workshop}"
+    ports:
+      - "127.0.0.1:${TIER2_POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - tier2-postgres-data:/var/lib/postgresql/data
+    networks:
+      - atelier-core
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mcp_workshop"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: mcp-tier2-redis
+    profiles: ["tier2"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TIER2_REDIS_PORT:-16379}:6379"
+    networks:
+      - atelier-core
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mongodb:
+    image: mongo:7
+    container_name: mcp-tier2-mongodb
+    profiles: ["tier2"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TIER2_MONGODB_PORT:-27018}:27017"
+    volumes:
+      - tier2-mongodb-data:/data/db
+    networks:
+      - atelier-core
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: mcp-tier2-neo4j
+    profiles: ["tier2"]
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "${TIER2_NEO4J_AUTH:-neo4j/mcpworkshop123}"
+    ports:
+      - "127.0.0.1:${TIER2_NEO4J_HTTP_PORT:-17474}:7474"
+      - "127.0.0.1:${TIER2_NEO4J_BOLT_PORT:-17687}:7687"
+    volumes:
+      - tier2-neo4j-data:/data
+    networks:
+      - atelier-core
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cypher-shell -u neo4j -p mcpworkshop123 'RETURN 1' >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
 volumes:
   mcp-memory-data:
   uc-data:
   mlflow-data:
+  tier2-postgres-data:
+  tier2-mongodb-data:
+  tier2-neo4j-data:
 
 networks:
   atelier-core:

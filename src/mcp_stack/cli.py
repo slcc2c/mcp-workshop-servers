@@ -22,7 +22,13 @@ from mcp_stack.client_configs import (
 )
 from mcp_stack.core.config import load_settings
 from mcp_stack.core.logging import configure_logging
-from mcp_stack.evals import run_trace_evaluation
+from mcp_stack.evals import (
+    GOLDEN_DATASET_NAME,
+    register_experiment_scorers,
+    run_golden_benchmark,
+    run_trace_evaluation,
+    sync_golden_dataset,
+)
 from mcp_stack.gateway.app import build_gateway_app, build_server_instance
 from mcp_stack.registry import sync_mcp_registry
 from mcp_stack.servers.mlflow_server import probe_mcp_http_endpoint
@@ -367,10 +373,12 @@ def eval_run(
     limit: int = typer.Option(20, "--limit", help="Max recent traces to evaluate"),
     latency_sla_ms: float = typer.Option(5000.0, "--latency-sla-ms", help="Latency threshold ms"),
     with_llm_judge: bool = typer.Option(
-        False, "--with-llm-judge", help="Include MLflow Guidelines LLM judge"
+        False, "--with-llm-judge", help="Include local Ollama / MLflow judge scorer"
     ),
     judge_model: str | None = typer.Option(
-        None, "--judge-model", help="Optional judge model URI (e.g. openai:/gpt-4o-mini)"
+        None,
+        "--judge-model",
+        help="Optional judge model URI (default: ollama:/qwen3.8:27b)",
     ),
 ) -> None:
     """Evaluate recent gateway traces with mlflow.genai.evaluate() and @scorers."""
@@ -380,6 +388,61 @@ def eval_run(
         settings,
         experiment_name=experiment,
         limit=limit,
+        latency_sla_ms=latency_sla_ms,
+        with_llm_judge=with_llm_judge,
+        judge_model=judge_model,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@eval_app.command("sync-dataset")
+def eval_sync_dataset(
+    experiment: str | None = typer.Option(None, "--experiment", help="MLflow experiment name"),
+    dataset_name: str = typer.Option(
+        GOLDEN_DATASET_NAME, "--dataset", help="MLflow GenAI evaluation dataset name"
+    ),
+) -> None:
+    """Create or update the golden MCP benchmark dataset in MLflow 3.x."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = sync_golden_dataset(settings, experiment_name=experiment, dataset_name=dataset_name)
+    typer.echo(json.dumps(res, indent=2))
+
+
+@eval_app.command("sync-scorers")
+def eval_sync_scorers(
+    experiment: str | None = typer.Option(None, "--experiment", help="MLflow experiment name"),
+) -> None:
+    """Register deterministic scorers on the target MLflow experiment."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = register_experiment_scorers(settings, experiment_name=experiment)
+    typer.echo(json.dumps(res, indent=2))
+
+
+@eval_app.command("benchmark")
+def eval_benchmark(
+    experiment: str | None = typer.Option(None, "--experiment", help="MLflow experiment name"),
+    dataset_name: str = typer.Option(
+        GOLDEN_DATASET_NAME, "--dataset", help="MLflow GenAI evaluation dataset name"
+    ),
+    latency_sla_ms: float = typer.Option(5000.0, "--latency-sla-ms", help="Latency threshold ms"),
+    with_llm_judge: bool = typer.Option(
+        False, "--with-llm-judge", help="Include local Ollama / MLflow judge scorer"
+    ),
+    judge_model: str | None = typer.Option(
+        None,
+        "--judge-model",
+        help="Optional judge model URI (default: ollama:/qwen3.8:27b)",
+    ),
+) -> None:
+    """Run the executable golden dataset benchmark via mlflow.genai.evaluate()."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = run_golden_benchmark(
+        settings,
+        experiment_name=experiment,
+        dataset_name=dataset_name,
         latency_sla_ms=latency_sla_ms,
         with_llm_judge=with_llm_judge,
         judge_model=judge_model,

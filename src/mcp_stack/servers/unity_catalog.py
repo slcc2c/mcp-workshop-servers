@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -225,8 +226,21 @@ class UCClientAdapter:
             "error": getattr(exec_res, "error", None),
         }
 
-    async def databricks_probe(self, profile: str | None = None) -> dict[str, Any]:
-        """Perform a read-only Databricks UC catalog listing probe."""
+    @staticmethod
+    def validate_volume_filename(filename: str) -> str:
+        """Validate a single-segment filename for UC Volume upload/download."""
+        clean = filename.strip()
+        if (
+            not clean
+            or "/" in clean
+            or "\\" in clean
+            or clean in {".", ".."}
+            or ".." in Path(clean).parts
+        ):
+            raise ToolError(f"Invalid UC Volume filename '{filename}': must be a flat file name")
+        return clean
+
+    def _build_databricks_workspace_client(self, profile: str | None = None) -> Any:
         try:
             from databricks.sdk import WorkspaceClient
         except ImportError as exc:
@@ -234,21 +248,118 @@ class UCClientAdapter:
                 "Databricks SDK requires extra 'databricks': uv sync --extra databricks"
             ) from exc
 
-        prof = profile or self._uc.databricks_profile
+        kwargs: dict[str, Any] = {}
         host = self._uc.databricks_host
-
-        def _probe() -> dict[str, Any]:
-            kwargs: dict[str, Any] = {}
+        if host:
+            kwargs["host"] = host
+        token = self._resolve_token()
+        if token:
+            kwargs["token"] = token
+        else:
+            prof = profile or self._uc.databricks_profile
             if prof:
                 kwargs["profile"] = prof
-            if host:
-                kwargs["host"] = host
-            ws = WorkspaceClient(**kwargs)
+        return WorkspaceClient(**kwargs)
+
+    async def upload_volume_file(
+        self,
+        full_volume_name: str,
+        filename: str,
+        content: bytes,
+        *,
+        overwrite: bool = True,
+        workspace_client: Any = None,
+    ) -> dict[str, Any]:
+        """Upload bytes to a Databricks UC Volume via WorkspaceClient.files.upload."""
+        cat, schema, vol = _split_full_name(full_volume_name, 3)
+        safe_name = self.validate_volume_filename(filename)
+        volume_path = f"/Volumes/{cat}/{schema}/{vol}/{safe_name}"
+
+        def _upload() -> None:
+            ws = workspace_client or self._build_databricks_workspace_client()
+            ws.files.upload(volume_path, io.BytesIO(content), overwrite=overwrite)
+
+        try:
+            await asyncio.to_thread(_upload)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(
+                f"Databricks UC Volume upload failed for '{volume_path}': {exc}"
+            ) from exc
+
+        return {
+            "volume": full_volume_name,
+            "filePath": volume_path,
+            "bytes": len(content),
+            "overwrite": overwrite,
+        }
+
+    async def download_volume_file(
+        self,
+        full_volume_name: str,
+        filename: str | None = None,
+        *,
+        prefix: str = "memory-export-",
+        suffix: str = ".json",
+        workspace_client: Any = None,
+    ) -> tuple[str, bytes]:
+        """Download a file (or newest matching snapshot) from a Databricks UC Volume."""
+        cat, schema, vol = _split_full_name(full_volume_name, 3)
+        volume_dir = f"/Volumes/{cat}/{schema}/{vol}"
+        chosen_name = self.validate_volume_filename(filename) if filename else None
+
+        def _download() -> tuple[str, bytes]:
+            ws = workspace_client or self._build_databricks_workspace_client()
+            target_name = chosen_name
+            if target_name is None:
+                entries = list(ws.files.list_directory_contents(volume_dir))
+                candidates = []
+                for entry in entries:
+                    if getattr(entry, "is_directory", False):
+                        continue
+                    name = str(getattr(entry, "name", "") or "")
+                    if not name and getattr(entry, "path", None):
+                        name = str(entry.path).rsplit("/", 1)[-1]
+                    if name.startswith(prefix) and name.endswith(suffix):
+                        modified = int(getattr(entry, "last_modified", 0) or 0)
+                        candidates.append((modified, name))
+                if not candidates:
+                    raise ToolError(
+                        f"No {prefix}*{suffix} snapshots found in '{volume_dir}'"
+                    )
+                candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                target_name = self.validate_volume_filename(candidates[0][1])
+
+            file_path = f"{volume_dir}/{target_name}"
+            resp = ws.files.download(file_path)
+            stream = getattr(resp, "contents", resp)
+            raw = stream.read() if hasattr(stream, "read") else stream
+            data = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+            return file_path, data
+
+        try:
+            return await asyncio.to_thread(_download)
+        except ToolError:
+            raise
+        except Exception as exc:
+            raise ToolError(
+                f"Databricks UC Volume download failed for '{volume_dir}': {exc}"
+            ) from exc
+
+    async def databricks_probe(self, profile: str | None = None) -> dict[str, Any]:
+        """Perform a read-only Databricks UC catalog listing probe."""
+        prof = profile or self._uc.databricks_profile
+
+        def _probe() -> dict[str, Any]:
+            ws = self._build_databricks_workspace_client(profile=prof)
             catalogs = [c.name for c in ws.catalogs.list()][:20]
             return {"ok": True, "profile": prof, "catalogs": catalogs}
 
         try:
             return await asyncio.to_thread(_probe)
+        except ToolError as exc:
+            return {"ok": False, "profile": prof, "error": str(exc)}
         except Exception as exc:
             return {"ok": False, "profile": prof, "error": str(exc)}
 

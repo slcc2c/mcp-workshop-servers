@@ -122,3 +122,89 @@ async def test_memory_uc_volume_export_and_import_roundtrip(make_settings, tmp_p
 
             restored = await client.call_tool("memory_get", {"id": entry_id})
             assert "UC Volume persisted note" in restored.content[0].text
+
+
+async def test_databricks_files_api_volume_sync_and_traversal_guard(
+    make_settings, tmp_path: Path
+) -> None:
+    import io
+    import types
+
+    settings = make_settings()
+    settings.unity_catalog.mode = "databricks"
+    settings.unity_catalog.databricks_host = "https://adb-example.azuredatabricks.net"
+
+    stored_blobs: dict[str, bytes] = {}
+
+    class FakeFilesAPI:
+        def upload(self, file_path: str, contents, *, overwrite: bool | None = None) -> None:
+            assert overwrite is True
+            stored_blobs[file_path] = contents.read()
+
+        def list_directory_contents(self, directory_path: str):
+            prefix = directory_path.rstrip("/") + "/"
+            out = []
+            for idx, (fp, _data) in enumerate(sorted(stored_blobs.items()), 1):
+                if fp.startswith(prefix):
+                    out.append(
+                        types.SimpleNamespace(
+                            name=fp.removeprefix(prefix),
+                            path=fp,
+                            is_directory=False,
+                            last_modified=idx * 1000,
+                        )
+                    )
+            return out
+
+        def download(self, file_path: str):
+            return types.SimpleNamespace(contents=io.BytesIO(stored_blobs[file_path]))
+
+    fake_ws = types.SimpleNamespace(files=FakeFilesAPI())
+    adapter = UCClientAdapter(settings)
+
+    with pytest.raises(ToolError, match="Invalid UC Volume filename"):
+        await adapter.upload_volume_file(
+            "workshop.default.memory_snapshots",
+            "../../etc/passwd",
+            b"bad",
+            workspace_client=fake_ws,
+        )
+
+    adapter._build_databricks_workspace_client = lambda profile=None: fake_ws  # type: ignore[method-assign]
+    srv = create_memory_server(settings, uc_adapter=adapter)
+    async with Client(srv) as client:
+        created = await client.call_tool(
+            "memory_store",
+            {"content": "Databricks FilesAPI snapshot", "tags": ["databricks"]},
+        )
+        entry_id = json.loads(created.content[0].text)["id"]
+
+        exported = await client.call_tool(
+            "memory_export",
+            {"format": "json", "uc_volume_name": "workshop.default.memory_snapshots"},
+        )
+        exp = json.loads(exported.content[0].text)
+        assert exp["ucVolumeMode"] == "databricks_files_api"
+        assert exp["exportedFile"].startswith("/Volumes/workshop/default/memory_snapshots/")
+
+        await client.call_tool("memory_delete", {"id": entry_id})
+
+        with pytest.raises(ToolError, match="Invalid UC Volume filename"):
+            await client.call_tool(
+                "memory_import",
+                {
+                    "uc_volume_name": "workshop.default.memory_snapshots",
+                    "filename": "../secret.json",
+                },
+            )
+
+        imported = await client.call_tool(
+            "memory_import",
+            {"uc_volume_name": "workshop.default.memory_snapshots"},
+        )
+        imp = json.loads(imported.content[0].text)
+        assert imp["ucVolumeMode"] == "databricks_files_api"
+        assert imp["importedCount"] == 1
+
+        restored = await client.call_tool("memory_get", {"id": entry_id})
+        assert "Databricks FilesAPI snapshot" in restored.content[0].text

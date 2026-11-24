@@ -28,7 +28,7 @@ jobs:
         run: uv run mypy src
 
       - name: Run offline unit and integration tests
-        run: uv run pytest -m "not live and not databricks" -v
+        run: uv run pytest -m "not live and not databricks and not tier2" -v
 
   manifests-and-configs:
     runs-on: ubuntu-latest
