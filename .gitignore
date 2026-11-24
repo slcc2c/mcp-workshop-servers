@@ -65,3 +65,4 @@ legacy/ts/test-github-token.sh
 legacy/ts/CLEAN_HISTORY_STEPS.md
 legacy/ts/SECURITY_FIX.md
 legacy/ts/clean-git-history.sh
+external/XcodeBuildMCP/
