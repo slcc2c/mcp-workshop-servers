@@ -26,6 +26,13 @@ from mcp_stack.service import (
 
 DEFAULT_STATE_PATH = Path.home() / ".local/share/mcp-workshop-stack/watchdog-state.json"
 DEFAULT_LOG_PATH = LOG_DIR / "watchdog.log"
+_EVAL_SCORE_KEYS = (
+    "tool_execution_success/mean",
+    "policy_governance_compliance/mean",
+    "tool_latency_sla/mean",
+    "secret_redaction_hygiene/mean",
+    "structured_error_hygiene/mean",
+)
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -135,6 +142,93 @@ def _default_recover(component: str) -> dict[str, Any]:
     }
 
 
+def _default_eval_regression_probe(
+    settings: MCPStackSettings,
+    *,
+    threshold: float | None = None,
+    timeout: float = 2.0,
+) -> dict[str, Any]:
+    """Read latest MLflow eval run metrics via lightweight REST call and flag regressions."""
+    eff_threshold = float(
+        threshold if threshold is not None else settings.gateway.eval_regression_threshold
+    )
+    checked_at = datetime.now(UTC).isoformat()
+    base_url = settings.mlflow.tracking_uri.rstrip("/")
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            exp_resp = client.get(
+                f"{base_url}/api/2.0/mlflow/experiments/get-by-name",
+                params={"experiment_name": settings.mlflow.experiment_name},
+            )
+            if exp_resp.status_code != 200:
+                return {
+                    "status": "unavailable",
+                    "threshold": eff_threshold,
+                    "detail": f"experiment lookup HTTP {exp_resp.status_code}",
+                    "checked_at": checked_at,
+                }
+            exp_id = str((exp_resp.json().get("experiment") or {}).get("experiment_id") or "")
+            if not exp_id:
+                return {
+                    "status": "no_eval_runs",
+                    "threshold": eff_threshold,
+                    "checked_at": checked_at,
+                }
+            runs_resp = client.post(
+                f"{base_url}/api/2.0/mlflow/runs/search",
+                json={
+                    "experiment_ids": [exp_id],
+                    "order_by": ["attributes.start_time DESC"],
+                    "max_results": 10,
+                },
+            )
+            if runs_resp.status_code != 200:
+                return {
+                    "status": "unavailable",
+                    "threshold": eff_threshold,
+                    "detail": f"runs search HTTP {runs_resp.status_code}",
+                    "checked_at": checked_at,
+                }
+            runs = runs_resp.json().get("runs") or []
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "threshold": eff_threshold,
+            "detail": str(exc)[:200],
+            "checked_at": checked_at,
+        }
+
+    for run in runs:
+        info = run.get("info") or {}
+        raw_metrics = (run.get("data") or {}).get("metrics") or []
+        metrics = {
+            str(m.get("key")): round(float(m.get("value")), 4)
+            for m in raw_metrics
+            if m.get("key") in _EVAL_SCORE_KEYS and m.get("value") is not None
+        }
+        if not metrics:
+            continue
+        failing = {k: v for k, v in metrics.items() if v < eff_threshold}
+        min_score = round(min(metrics.values()), 4)
+        return {
+            "status": "regression" if failing else "ok",
+            "threshold": eff_threshold,
+            "run_id": info.get("run_id"),
+            "run_name": info.get("run_name"),
+            "timestamp_ms": info.get("start_time"),
+            "min_score": min_score,
+            "metrics": metrics,
+            "failing_metrics": failing,
+            "checked_at": checked_at,
+        }
+
+    return {
+        "status": "no_eval_runs",
+        "threshold": eff_threshold,
+        "checked_at": checked_at,
+    }
+
+
 def run_watchdog_once(
     settings: MCPStackSettings,
     *,
@@ -145,6 +239,7 @@ def run_watchdog_once(
     dry_run: bool = False,
     probe_fn: Callable[[MCPStackSettings], dict[str, dict[str, Any]]] | None = None,
     recover_fn: Callable[[str], dict[str, Any]] | None = None,
+    eval_probe_fn: Callable[[MCPStackSettings], dict[str, Any]] | None = None,
     clock: Callable[[], float] = time.time,
 ) -> dict[str, Any]:
     """Run one watchdog probe + cooldown-guarded recovery pass and persist state."""
@@ -198,6 +293,20 @@ def run_watchdog_once(
 
     state["last_run_at"] = iso_now
     state["last_actions"] = actions
+    prev_eval_status = str((state.get("eval_regression") or {}).get("status") or "")
+    eval_probe_impl = eval_probe_fn or _default_eval_regression_probe
+    try:
+        eval_regression = eval_probe_impl(settings)
+    except Exception as exc:
+        eval_regression = {
+            "status": "unavailable",
+            "threshold": settings.gateway.eval_regression_threshold,
+            "detail": str(exc)[:200],
+            "checked_at": iso_now,
+        }
+    state["eval_regression"] = eval_regression
+    if eval_regression.get("status") == "regression" and prev_eval_status != "regression":
+        should_log = True
     _save_state(state_path, state)
 
     summary: dict[str, Any] = {
@@ -205,6 +314,7 @@ def run_watchdog_once(
         "overall": "healthy" if all(v.get("healthy") for v in probes.values()) else "degraded",
         "actions": actions,
         "components": components_state,
+        "eval_regression": eval_regression,
     }
     if recovery_details:
         summary["recoveries"] = recovery_details
@@ -217,6 +327,7 @@ def run_watchdog_once(
                 "overall": summary["overall"],
                 "actions": actions,
                 "recoveries": recovery_details,
+                "eval_regression": eval_regression,
             },
         )
 

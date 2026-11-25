@@ -10,10 +10,15 @@ import pytest
 from fastmcp import Client, FastMCP
 
 from mcp_stack.core.auth import (
+    UI_SESSION_COOKIE,
     GatewayAuthMiddleware,
+    LoginNonceStore,
+    caller_auth_method_var,
     caller_profile_var,
     caller_session_id_var,
     caller_uc_token_var,
+    sign_ui_session,
+    verify_ui_session,
 )
 from mcp_stack.core.config import ClientPolicy
 from mcp_stack.core.metrics import mcp_mlflow_trace_failures_total, mcp_tool_calls_total
@@ -205,3 +210,81 @@ def test_logged_model_resolution_is_idempotent_and_fail_open(
     assert len(created_calls) == 1
     assert not any(ch in created_calls[0]["name"] for ch in "/:.%'\"")
     _LOGGED_MODEL_CACHE.clear()
+
+
+async def test_ui_session_cookie_signing_nonce_csrf_and_route_isolation(make_settings) -> None:
+    tok = "tok_ui_cookie_owner"
+    settings = make_settings()
+    settings.gateway.auth_enabled = True
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+
+    signed = sign_ui_session("codex", settings, ttl_s=120, now=1000.0)
+    assert verify_ui_session(signed, settings, now=1050.0) == "codex"
+    assert verify_ui_session(signed, settings, now=1200.0) is None
+    assert verify_ui_session(signed + "tamper", settings, now=1050.0) is None
+
+    now = 10.0
+    nonces = LoginNonceStore(ttl_s=60.0, clock=lambda: now)
+    nonce = nonces.issue("codex")
+    assert nonces.consume(nonce) == "codex"
+    assert nonces.consume(nonce) is None
+
+    nonce_exp = nonces.issue("codex")
+    now += 61.0
+    assert nonces.consume(nonce_exp) is None
+
+    from fastapi import FastAPI
+
+    api = FastAPI()
+
+    @api.get("/api/v1/ping")
+    async def ping():
+        return {"ok": True, "method": caller_auth_method_var.get()}
+
+    @api.post("/api/v1/mutate")
+    async def mutate():
+        return {"mutated": True, "method": caller_auth_method_var.get()}
+
+    @api.post("/mcp")
+    async def mcp_ep():
+        return {"mcp": True}
+
+    api.add_middleware(GatewayAuthMiddleware, settings=settings)
+
+    cookie_val = sign_ui_session("codex", settings)
+    cookie_hdr = {"Cookie": f"{UI_SESSION_COOKIE}={cookie_val}"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api), base_url="http://testserver"
+    ) as client:
+        # Cookie grants GET on /api/v1/*
+        r_get = await client.get("/api/v1/ping", headers=cookie_hdr)
+        assert r_get.status_code == 200
+        assert r_get.json()["method"] == "cookie"
+
+        # Cookie-authenticated POST without X-Requested-With -> 403 CSRF_REQUIRED
+        r_csrf = await client.post("/api/v1/mutate", headers=cookie_hdr)
+        assert r_csrf.status_code == 403
+        assert r_csrf.json()["error"]["code"] == "CSRF_REQUIRED"
+
+        # Cookie + X-Requested-With -> 200
+        r_post = await client.post(
+            "/api/v1/mutate",
+            headers={**cookie_hdr, "X-Requested-With": "mcp-ui"},
+        )
+        assert r_post.status_code == 200
+
+        # Bearer works on POST without X-Requested-With
+        r_bearer = await client.post(
+            "/api/v1/mutate", headers={"Authorization": f"Bearer {tok}"}
+        )
+        assert r_bearer.status_code == 200
+        assert r_bearer.json()["method"] == "bearer"
+
+        # Cookies MUST be rejected on /mcp endpoints
+        r_mcp = await client.post(
+            "/mcp",
+            headers={**cookie_hdr, "X-Requested-With": "mcp-ui"},
+        )
+        assert r_mcp.status_code == 401

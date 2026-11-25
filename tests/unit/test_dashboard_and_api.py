@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import types
 
 import httpx
+from typer.testing import CliRunner
 
+from mcp_stack.cli import app as cli_app
+from mcp_stack.core.auth import UI_SESSION_COOKIE
 from mcp_stack.core.config import ClientPolicy
 from mcp_stack.gateway.app import build_gateway_app
 
@@ -375,3 +379,319 @@ async def test_trace_feedback_expectation_tag_and_dataset_promotion(
         assert promoted_body["record"]["inputs"]["server"] == "memory"
         assert promoted_body["record"]["inputs"]["tool"] == "memory_store"
         assert logged["dataset"][0][0] == "mcp-workshop-golden-v1"
+
+
+async def test_ui_cookie_auth_flow_login_link_session_logout_and_csrf(make_settings) -> None:
+    secret_tok = "tok_ui_flow_999"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.clients = {
+        secret_tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+
+    app = build_gateway_app(settings)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as cli:
+        # /ui must not embed sessionStorage token storage or secrets
+        ui = await cli.get("/ui")
+        assert ui.status_code == 200
+        assert "sessionStorage" not in ui.text
+        markers = (
+            "tab-overview",
+            "tab-playground",
+            "tab-traces",
+            "tab-registry",
+            "regression-banner",
+        )
+        for marker in markers:
+            assert marker in ui.text
+
+        # Unauthenticated /api/v1/auth/me returns authenticated=False cleanly
+        me_unauth = await cli.get("/api/v1/auth/me")
+        assert me_unauth.status_code == 200
+        assert me_unauth.json()["authenticated"] is False
+
+        # Mint 60s login link with Bearer
+        link = await cli.post(
+            "/api/v1/auth/login-link", headers={"Authorization": f"Bearer {secret_tok}"}
+        )
+        assert link.status_code == 200
+        login_url = link.json()["url"]
+        nonce = login_url.split("nonce=", 1)[1]
+
+        # Consume nonce -> 303 redirect setting HttpOnly session cookie
+        consumed = await cli.get(f"/ui/login?nonce={nonce}", follow_redirects=False)
+        assert consumed.status_code == 303
+        assert UI_SESSION_COOKIE in consumed.cookies
+
+        # Replay of single-use nonce fails cleanly with redirect auth_error
+        replay = await cli.get(f"/ui/login?nonce={nonce}", follow_redirects=False)
+        assert replay.status_code == 303
+        assert "auth_error=invalid_link" in replay.headers["location"]
+
+        # Cookie authenticates /api/v1/auth/me and /api/v1/profiles
+        me_cookie = await cli.get("/api/v1/auth/me")
+        assert me_cookie.json()["authenticated"] is True
+        assert me_cookie.json()["authMethod"] == "cookie"
+        assert (await cli.get("/api/v1/profiles")).status_code == 200
+
+        # Cookie cannot mint another login link (Bearer-only)
+        link_from_cookie = await cli.post(
+            "/api/v1/auth/login-link", headers={"X-Requested-With": "mcp-ui"}
+        )
+        assert link_from_cookie.status_code == 403
+
+        # Logout clears cookie
+        out = await cli.post("/api/v1/auth/logout", headers={"X-Requested-With": "mcp-ui"})
+        assert out.status_code == 200
+        assert (await cli.get("/api/v1/auth/me")).json()["authenticated"] is False
+
+
+async def test_traces_filtering_facets_eval_history_and_registry_api(
+    make_settings, monkeypatch
+) -> None:
+    tok = "tok_registry_and_filter"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.mlflow.allow_mutations = False
+    settings.unity_catalog.dynamic_function_tools = False
+
+    fake_traces = [
+        types.SimpleNamespace(
+            info=types.SimpleNamespace(
+                trace_id="tr-mem",
+                state="OK",
+                execution_duration=12.0,
+                timestamp_ms=2000,
+                tags={"mcp.server": "memory", "mcp.tool": "memory_store", "mcp.profile": "core"},
+                trace_metadata={"mlflow.trace.user": "codex", "mlflow.modelId": "m-1"},
+                assessments=[],
+            ),
+            data=types.SimpleNamespace(
+                spans=[types.SimpleNamespace(name="memory.memory_store", events=[])]
+            ),
+        ),
+        types.SimpleNamespace(
+            info=types.SimpleNamespace(
+                trace_id="tr-uc",
+                state="ERROR",
+                execution_duration=5.0,
+                timestamp_ms=1000,
+                tags={
+                    "mcp.server": "unity_catalog",
+                    "mcp.tool": "uc_create_catalog",
+                    "mcp.policy_refusal": "true",
+                },
+                trace_metadata={"mlflow.trace.user": "claude", "mlflow.modelId": "m-2"},
+                assessments=[],
+            ),
+            data=types.SimpleNamespace(
+                spans=[
+                    types.SimpleNamespace(
+                        name="unity_catalog.uc_create_catalog", events=[]
+                    )
+                ]
+            ),
+        ),
+    ]
+    fake_runs = [
+        types.SimpleNamespace(
+            info=types.SimpleNamespace(run_id="r-new", run_name="eval-new", start_time=2000),
+            data=types.SimpleNamespace(
+                metrics={"tool_execution_success/mean": 0.5, "tool_latency_sla/mean": 1.0}
+            ),
+        ),
+        types.SimpleNamespace(
+            info=types.SimpleNamespace(run_id="r-old", run_name="eval-old", start_time=1000),
+            data=types.SimpleNamespace(
+                metrics={"tool_execution_success/mean": 1.0, "tool_latency_sla/mean": 1.0}
+            ),
+        ),
+    ]
+    alias_calls: list[tuple[str, str, str, object]] = []
+
+    class FakeClient:
+        def __init__(self, tracking_uri: str, registry_uri: str | None = None) -> None:
+            self.tracking_uri = tracking_uri
+
+        def get_experiment_by_name(self, _name: str):
+            return types.SimpleNamespace(experiment_id="52")
+
+        def search_traces(self, **_kwargs):
+            return fake_traces
+
+        def search_runs(self, *_args, **_kwargs):
+            return fake_runs
+
+        def search_mcp_servers(self, **_kwargs):
+            return [
+                types.SimpleNamespace(
+                    name="io.github.slcc2c/mcp-memory",
+                    url="http://127.0.0.1:8090/servers/memory/mcp",
+                    version="2.0.0",
+                    description="Memory server",
+                    aliases={"production": "2.0.0"},
+                    tags={"scope": "server"},
+                )
+            ]
+
+        def search_prompt_versions(self, name: str, **_kwargs):
+            return [types.SimpleNamespace(version=2, aliases=["production"], commit_message="init")]
+
+        def search_registered_models(self, **_kwargs):
+            return [
+                types.SimpleNamespace(
+                    name="demo-model",
+                    description="Demo",
+                    aliases={"champion": "1"},
+                    tags={},
+                    latest_versions=[
+                        types.SimpleNamespace(version="2", current_stage="None", aliases=[])
+                    ],
+                )
+            ]
+
+        def search_logged_models(self, **_kwargs):
+            return [
+                types.SimpleNamespace(
+                    model_id="m-1",
+                    name="mcp-workshop-gateway-2-0-0-c1f6301",
+                    status="READY",
+                    tags={"git_sha": "c1f6301"},
+                    metrics=[],
+                )
+            ]
+
+        def set_registered_model_alias(self, name: str, alias: str, version: str):
+            alias_calls.append(("model", name, alias, version))
+
+    import mlflow
+    import mlflow.genai
+
+    monkeypatch.setattr(mlflow, "MlflowClient", FakeClient)
+    monkeypatch.setattr(mlflow, "set_tracking_uri", lambda _u: None)
+    monkeypatch.setattr(
+        mlflow.genai,
+        "search_prompts",
+        lambda **_kw: [types.SimpleNamespace(name="ai-assist", description="Assist", tags={})],
+    )
+    monkeypatch.setattr(
+        mlflow.genai,
+        "load_prompt",
+        lambda _uri, **_kw: types.SimpleNamespace(
+            name="ai-assist",
+            version=2,
+            template="Be concise.",
+            commit_message="v2",
+            tags={},
+            uri="prompts:/ai-assist/2",
+        ),
+    )
+    monkeypatch.setattr(
+        mlflow.genai,
+        "set_prompt_alias",
+        lambda name, alias, version: alias_calls.append(("prompt", name, alias, version)),
+    )
+
+    headers = {"Authorization": f"Bearer {tok}"}
+    app = build_gateway_app(settings)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as cli:
+        filtered = await cli.get(
+            "/api/v1/traces?user=codex&policy_refusal=exclude", headers=headers
+        )
+        assert filtered.status_code == 200
+        body = filtered.json()
+        assert [t["traceId"] for t in body["traces"]] == ["tr-mem"]
+        assert body["facets"]["servers"] == ["memory", "unity_catalog"]
+        assert len(body["evalHistory"]) == 2
+        assert body["evalRegression"]["status"] == "regression"
+
+        reg = await cli.get("/api/v1/mlflow/registry", headers=headers)
+        assert reg.status_code == 200
+        reg_json = reg.json()
+        assert reg_json["mutationsEnabled"] is False
+        assert reg_json["mcpServers"][0]["aliases"]["production"] == "2.0.0"
+        assert reg_json["prompts"][0]["name"] == "ai-assist"
+        assert reg_json["loggedModels"][0]["modelId"] == "m-1"
+
+        p_det = await cli.get(
+            "/api/v1/mlflow/prompts/ai-assist?version_or_alias=2", headers=headers
+        )
+        assert p_det.status_code == 200
+        assert p_det.json()["template"] == "Be concise."
+
+        # Read-only blocks alias promotion
+        denied = await cli.post(
+            "/api/v1/mlflow/prompts/ai-assist/alias",
+            json={"alias": "production", "version": 2},
+            headers=headers,
+        )
+        assert denied.status_code == 403
+
+    # Mutations enabled allows prompt + model alias updates
+    settings.mlflow.allow_mutations = True
+    app_mut = build_gateway_app(settings)
+    async with app_mut.router.lifespan_context(app_mut), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app_mut), base_url="http://testserver"
+    ) as cli_mut:
+        ok_p = await cli_mut.post(
+            "/api/v1/mlflow/prompts/ai-assist/alias",
+            json={"alias": "production", "version": 2},
+            headers=headers,
+        )
+        assert ok_p.status_code == 200
+        ok_m = await cli_mut.post(
+            "/api/v1/mlflow/models/demo-model/alias",
+            json={"alias": "production", "version": "2"},
+            headers=headers,
+        )
+        assert ok_m.status_code == 200
+    assert alias_calls == [
+        ("prompt", "ai-assist", "production", 2),
+        ("model", "demo-model", "production", "2"),
+    ]
+
+
+def test_cli_ui_open_mints_login_link_without_printing_token(make_settings, monkeypatch) -> None:
+    tok = "tok_secret_never_echo"
+    settings = make_settings()
+    settings.gateway.auth_enabled = True
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    monkeypatch.setattr("mcp_stack.cli.load_settings", lambda: settings)
+
+    def fake_post(url: str, *, headers: dict, timeout: float):
+        assert url.endswith("/api/v1/auth/login-link")
+        assert headers["Authorization"] == f"Bearer {tok}"
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "url": "http://127.0.0.1:8090/ui/login?nonce=abc123",
+                "expiresInSeconds": 60,
+                "clientId": "codex",
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    result = CliRunner().invoke(cli_app, ["ui", "open", "--no-browser"])
+    assert result.exit_code == 0, result.stdout
+    parsed = json.loads(result.stdout)
+    assert parsed["url"] == "http://127.0.0.1:8090/ui/login?nonce=abc123"
+    assert tok not in result.stdout

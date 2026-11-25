@@ -11,6 +11,7 @@ import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
+from mcp_stack import __version__
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.core.tracing import MLflowTracingMiddleware
 
@@ -34,7 +35,7 @@ async def probe_mcp_http_endpoint(url: str, timeout: float = 2.0) -> dict[str, A
         "params": {
             "protocolVersion": "2025-03-26",
             "capabilities": {},
-            "clientInfo": {"name": "mcp-stack-probe", "version": "2.0.0"},
+            "clientInfo": {"name": "mcp-stack-probe", "version": __version__},
         },
     }
     headers = {
