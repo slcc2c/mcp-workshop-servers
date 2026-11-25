@@ -1169,8 +1169,9 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
               const aliases = (p.versions || []).flatMap((v) => v.aliases || []).map(
                 (a) => '<span class="pill ok">@' + esc(a) + "</span>"
               ).join(" ");
+              const verLabel = latestVer === "latest" ? "latest" : ("v" + esc(latestVer));
               return "<tr><td><code>" + esc(p.name) + "</code> " + aliases + "</td>" +
-                "<td>v" + esc(latestVer) + "</td>" +
+                "<td>" + verLabel + "</td>" +
                 "<td><button class='mini view-prompt-btn' data-name='" + esc(p.name) +
                 "' data-ver='" + esc(latestVer) + "' type='button'>View</button> " +
                 (mutEnabled && latestVer !== "latest"

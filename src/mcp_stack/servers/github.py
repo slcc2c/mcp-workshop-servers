@@ -9,6 +9,7 @@ import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
+from mcp_stack import __version__
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.core.secrets import SecretResolver
 from mcp_stack.core.tracing import MLflowTracingMiddleware
@@ -45,7 +46,7 @@ def create_github_server(
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
-            "User-Agent": "mcp-workshop-stack/2.0.0",
+            "User-Agent": f"mcp-workshop-stack/{__version__}",
             "X-GitHub-Api-Version": "2022-11-28",
         }
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
