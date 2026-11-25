@@ -1,0 +1,33 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.slcc2c/mcp-photos",
+  "title": "MCP Photos Server",
+  "description": "macOS host-only Apple Photos library discovery and sandboxed export server",
+  "version": "2.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcp-workshop-stack",
+      "version": "2.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "uv",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        },
+        {
+          "type": "positional",
+          "value": "photos"
+        },
+        {
+          "type": "named",
+          "name": "--transport",
+          "value": "stdio"
+        }
+      ]
+    }
+  ]
+}

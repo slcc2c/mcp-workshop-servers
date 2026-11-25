@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.slcc2c/mcp-workshop-gateway",
+  "title": "MCP Workshop Stack Gateway",
+  "description": "Unified FastMCP + FastAPI gateway composing MLflow, Unity Catalog, and core MCP tools",
+  "version": "2.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8090/mcp"
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcp-workshop-stack",
+      "version": "2.0.0",
+      "transport": {
+        "type": "streamable-http"
+      }
+    }
+  ]
+}

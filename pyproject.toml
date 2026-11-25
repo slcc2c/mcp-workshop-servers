@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-workshop-stack"
+version = "2.0.0"
+description = "Modern Python FastMCP + MLflow 3.x + Unity Catalog MCP Stack"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "CS Experimentation Workshop Team" }]
+dependencies = [
+  "fastmcp>=2.14",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.10",
+  "pydantic-settings>=2.7",
+  "httpx>=0.28",
+  "pyyaml>=6.0",
+  "structlog>=25.1",
+  "typer>=0.15",
+  "prometheus-client>=0.21",
+  "mlflow[mcp]>=3.5",
+  "unitycatalog-ai>=0.3",
+  "unitycatalog-client>=0.3",
+  "docker>=7.1",
+  "psycopg[binary]>=3.2",
+  "redis>=5.2",
+  "pymongo>=4.11",
+  "neo4j>=5.27",
+  "kubernetes>=32.0",
+  "nbformat>=5.10",
+  "jupyter-client>=8.6",
+  "ipykernel>=6.29",
+]
+
+[project.optional-dependencies]
+databricks = [
+  "databricks-sdk>=0.40",
+  "unitycatalog-ai[databricks]>=0.3",
+]
+evals = [
+  "litellm>=1.60",
+]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "respx>=0.22",
+  "ruff>=0.9",
+  "mypy>=1.14",
+  "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+mcp-stack = "mcp_stack.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_stack"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "unit: Fast deterministic unit tests",
+  "integration: In-process ASGI and subprocess integration tests",
+  "live: Live probes requiring running MLflow and/or Unity Catalog services",
+  "databricks: Opt-in read-only Databricks UC smoke tests",
+  "tier2: Live integration tests requiring --profile tier2 Docker databases",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+ignore_missing_imports = true
+mypy_path = "src"
+check_untyped_defs = true

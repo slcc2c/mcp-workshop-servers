@@ -1,0 +1,39 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.slcc2c/mcp-mlflow",
+  "title": "MCP Mlflow Server",
+  "description": "MLflow 3.x Prompt Registry, LoggedModels, UC Model Registry, and Eval Datasets server",
+  "version": "2.0.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcp-workshop-stack",
+      "version": "2.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "uv",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        },
+        {
+          "type": "positional",
+          "value": "mlflow"
+        },
+        {
+          "type": "named",
+          "name": "--transport",
+          "value": "stdio"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8090/servers/mlflow/mcp"
+    }
+  ]
+}

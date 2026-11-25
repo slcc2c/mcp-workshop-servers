@@ -1,0 +1,219 @@
+services:
+  mlflow-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-mlflow-mcp
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MLFLOW_TRACKING_URI: "${DOCKER_MLFLOW_TRACKING_URI:-http://host.docker.internal:5002}"
+      MLFLOW_DISABLE_AGENT_HINT: "1"
+    command:
+      [
+        "python",
+        "-c",
+        "from mlflow.mcp.server import create_mcp; create_mcp().run(transport='streamable-http', host='0.0.0.0', port=9012, show_banner=False)",
+      ]
+    ports:
+      - "127.0.0.1:${MLFLOW_MCP_PORT:-9012}:9012"
+    networks:
+      - atelier-core
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request, urllib.error; req = urllib.request.Request('http://127.0.0.1:9012/mcp', data=b'{\"jsonrpc\":\"2.0\",\"id\":\"hc\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"hc\",\"version\":\"1.0\"}}}', headers={'Content-Type':'application/json','Accept':'application/json, text/event-stream'}); urllib.request.urlopen(req, timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  mcp-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-workshop-gateway
+    restart: unless-stopped
+    depends_on:
+      mlflow-mcp:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MCP_GATEWAY_PORT:-8090}:8090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MCP_GATEWAY_HOST: "0.0.0.0"
+      MCP_GATEWAY_PORT: "8090"
+      MCP_AUTH_ENABLED: "${MCP_AUTH_ENABLED:-true}"
+      MCP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK: "${MCP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK:-false}"
+      MCP_CLAUDE_AUTH_TOKEN: "${MCP_CLAUDE_AUTH_TOKEN:-}"
+      MCP_CURSOR_AUTH_TOKEN: "${MCP_CURSOR_AUTH_TOKEN:-}"
+      MCP_CODEX_AUTH_TOKEN: "${MCP_CODEX_AUTH_TOKEN:-}"
+      MCP_OPENAI_AUTH_TOKEN: "${MCP_OPENAI_AUTH_TOKEN:-}"
+      MCP_DEFAULT_AUTH_TOKEN: "${MCP_DEFAULT_AUTH_TOKEN:-}"
+      MLFLOW_TRACKING_URI: "${DOCKER_MLFLOW_TRACKING_URI:-http://host.docker.internal:5002}"
+      MLFLOW_MCP_URL: "${DOCKER_MLFLOW_MCP_URL:-http://mlflow-mcp:9012/mcp}"
+      MLFLOW_EXPERIMENT_NAME: "${MLFLOW_EXPERIMENT_NAME:-mcp-workshop-servers}"
+      MLFLOW_TRACING_ENABLED: "${MLFLOW_TRACING_ENABLED:-true}"
+      MLFLOW_ALLOW_MUTATIONS: "${MLFLOW_ALLOW_MUTATIONS:-false}"
+      UC_MODE: "${UC_MODE:-oss}"
+      UC_BASE_URL: "${DOCKER_UC_BASE_URL:-http://unity-catalog:8080}"
+      UC_TOKEN: "${UC_TOKEN:-}"
+      UC_ALLOW_MUTATIONS: "${UC_ALLOW_MUTATIONS:-false}"
+      UC_FUNCTION_ALLOWLIST: "${UC_FUNCTION_ALLOWLIST:-unity.default}"
+      UC_EXECUTION_MODE: "${UC_EXECUTION_MODE:-sandbox}"
+      EXECUTOR_MAX_MEMORY_LIMIT: "${EXECUTOR_MAX_MEMORY_LIMIT:-4096}"
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      ALLOWED_PATHS: "/workspace"
+      MEMORY_DB_PATH: "/app/data/memory.db"
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+    volumes:
+      - mcp-memory-data:/app/data
+      - "${WORKSPACE_PATH:-.}:/workspace:rw"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - atelier-core
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  unity-catalog:
+    image: unitycatalog/unitycatalog:latest
+    container_name: mcp-unity-catalog
+    profiles: ["uc"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${UC_PORT:-8082}:8080"
+    volumes:
+      - uc-data:/home/unitycatalog/etc/data
+      - "./data/uc-volumes:/home/unitycatalog/etc/data/external/workshop:rw"
+    networks:
+      - atelier-core
+
+  mlflow-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-mlflow-server
+    profiles: ["mlflow"]
+    restart: unless-stopped
+    command:
+      [
+        "mlflow",
+        "server",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "5002",
+        "--allowed-hosts",
+        "localhost:*,127.0.0.1:*,mlflow-server:*,host.docker.internal:*",
+        "--backend-store-uri",
+        "sqlite:////app/data/mlflow.db",
+        "--default-artifact-root",
+        "/app/data/mlartifacts",
+      ]
+    ports:
+      - "127.0.0.1:${MLFLOW_SERVER_PORT:-5002}:5002"
+    volumes:
+      - mlflow-data:/app/data
+    networks:
+      - atelier-core
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: mcp-tier2-postgres
+    profiles: ["tier2"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${TIER2_POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${TIER2_POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_DB: "${TIER2_POSTGRES_DB:-mcp_workshop}"
+    ports:
+      - "127.0.0.1:${TIER2_POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - tier2-postgres-data:/var/lib/postgresql/data
+    networks:
+      - atelier-core
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mcp_workshop"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: mcp-tier2-redis
+    profiles: ["tier2"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TIER2_REDIS_PORT:-16379}:6379"
+    networks:
+      - atelier-core
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mongodb:
+    image: mongo:7
+    container_name: mcp-tier2-mongodb
+    profiles: ["tier2"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${TIER2_MONGODB_PORT:-27018}:27017"
+    volumes:
+      - tier2-mongodb-data:/data/db
+    networks:
+      - atelier-core
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: mcp-tier2-neo4j
+    profiles: ["tier2"]
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "${TIER2_NEO4J_AUTH:-neo4j/mcpworkshop123}"
+    ports:
+      - "127.0.0.1:${TIER2_NEO4J_HTTP_PORT:-17474}:7474"
+      - "127.0.0.1:${TIER2_NEO4J_BOLT_PORT:-17687}:7687"
+    volumes:
+      - tier2-neo4j-data:/data
+    networks:
+      - atelier-core
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "cypher-shell -u neo4j -p mcpworkshop123 'RETURN 1' >/dev/null 2>&1 || exit 1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  mcp-memory-data:
+  uc-data:
+  mlflow-data:
+  tier2-postgres-data:
+  tier2-mongodb-data:
+  tier2-neo4j-data:
+
+networks:
+  atelier-core:
+    external: true

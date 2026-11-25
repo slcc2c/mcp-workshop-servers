@@ -1,156 +1,136 @@
-# MCP Servers for CS Experimentation Workshop
+# MCP Workshop Stack (Modern Python FastMCP + MLflow 3.x + Unity Catalog)
 
-> Achieve "5-minute magic" - go from concept to working experiment in under 5 minutes using AI-collaborative development with Model Context Protocol servers.
+A modern Python 3.12 (`uv`) Model Context Protocol ecosystem built on **FastMCP 3.x**, **FastAPI**, **MLflow 3.x**, and **Unity Catalog**, aligned with the `Server-Configs` / Atelier stack.
 
-## Overview
-
-This project implements a comprehensive Model Context Protocol (MCP) server ecosystem designed specifically for rapid CS experimentation. Built for Mac Studio M3 Ultra optimization, it provides seamless integration between AI assistants and development tools.
-
-## Features
-
-- **Sub-5-minute Setup**: From zero to fully configured development environment
-- **Multi-Tier Architecture**: Essential, database, and AI collaboration servers
-- **Docker Isolation**: Secure, containerized environments for each experiment
-- **AI Memory**: Persistent context across sessions
-- **Multi-Database Support**: PostgreSQL, Redis, MongoDB, Neo4j out of the box
-- **GitHub Integration**: Automated repository management and CI/CD
-- **TypeScript Build**: Clean compilation with full type safety ✅
-
-## Quick Start
-
-### Option 1: MCP Starter Kit (Recommended for New Users)
-
-```bash
-# Get the starter kit for a 5-minute setup
-cd mcp-starter-kit/
-./setup.sh
-
-# Or with 1Password integration:
-./setup-with-1password.sh
-
-# Restart Claude Desktop and you're ready! 🚀
-```
-
-### Option 2: Full Workshop Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/slcc2c/mcp-workshop-servers.git
-cd mcp-workshop-servers
-
-# Install dependencies
-npm install
-
-# Set up 1Password integration (recommended)
-./scripts/add-database-connections.sh
-
-# Start all MCP servers
-npm run mcp:start
-```
-
-📚 **[Read the Quick Start Guide](./docs/quick-start.md)** for detailed setup instructions.
-
-## Attaching Your Project
-
-### Quick Attach (2 minutes)
-
-```bash
-# Run the interactive attachment script
-./scripts/attach-project.sh
-
-# Follow the prompts to:
-# 1. Select your project directory
-# 2. Choose a project name
-# 3. Configure filesystem + memory access
-
-# Restart Claude Desktop and start coding!
-```
-
-📎 **[Read the Project Attachment Guide](./docs/attach-project-guide.md)** for detailed instructions and advanced configurations.
-
-### Project Templates
-
-Use our pre-configured templates for common project types:
-
-- **Web App**: React + Node.js full-stack template
-- **API**: RESTful API with authentication and docs
-- **Data Science**: Python ML project with Jupyter
-- **Mobile**: React Native cross-platform template
-
-```bash
-# View available templates
-ls templates/
-
-# Use a template
-cp -r templates/web-app/* /path/to/your/project/
-```
+> [!NOTE]
+> The previous TypeScript/Node prototype has been recoverably quarantined under [`legacy/ts/`](./legacy/ts/).
 
 ## Architecture
 
-### Tier 1: Essential Foundation
-- **GitHub Server**: Repository management, issue tracking, PR automation
-- **Filesystem Server**: Secure file operations with configurable access
-- **Docker Server**: Container management and isolated environments
-- **Memory Server**: Persistent AI context and knowledge graphs
+- **Unified Gateway (`:8090`)**: FastAPI + FastMCP Streamable HTTP gateway exposing:
+  - `/mcp` — Full composed MCP endpoint across all enabled servers
+  - `/profiles/{core,data,ops,macos}/mcp` — Curated toolset profiles (`MCP_DEFAULT_CLIENT_PROFILE=core` default for Codex/Claude Code to keep context lean; override via `MCP_PROFILES_JSON`)
+  - `/servers/<slug>/mcp` — Isolated per-server Streamable HTTP endpoints
+  - Zero-`307` path normalization on `/mcp`, `/profiles/<name>/mcp`, and `/servers/<slug>/mcp`
+  - `/ui` self-contained interactive Gateway Dashboard + `/health`, `/ready`, `/api/v1/{servers,profiles,tools,watchdog,traces}`, `/api/v1/actions/*`, and `/metrics` (Prometheus)
+  - Pure ASGI Bearer auth (auto-enforced on non-loopback binds), client server allowlists, rate limiting, and `X-UC-Token` on-behalf-of passthrough
+  - Fail-open MLflow 3.x `SpanType.TOOL` tracing middleware with native `update_current_trace()` context (`user`, `session_id`, `mcp.policy_refusal`), `LoggedModel` git-commit versioning, sensitive-key redaction, and a 60s circuit breaker
+- **Modern Data & AI Governance Servers**:
+  - **`unity-catalog`**: OSS Unity Catalog REST API 2.1 (`localhost:8082`) + Databricks UC switch (`UC_MODE=databricks` with Databricks SDK Files API support for `/Volumes/...`), `unitycatalog-ai` function execution with schema allowlists (`UC_FUNCTION_ALLOWLIST`), dynamic UC function tools (`uc_fn_*`), UC Volume creation & mapping (`UC_VOLUME_LOCAL_PREFIX_MAP`), MLflow lineage cross-linking (`uc_get_model_lineage`), and opt-in mutations (`UC_ALLOW_MUTATIONS=true`).
+  - **`mlflow`**: Zero-overlap complementary MLflow 3.x tools (`LoggedModel`s, Prompt Registry + `mlflow_get_prompt_versions`, UC Model Registry aliases + metric-gated `mlflow_promote_model_alias`, Eval Datasets, `mlflow_compare_runs`) paired with official `mlflow[mcp]` (`localhost:9012/mcp`).
+- **Ported Tier-1, Tier-2 & Host Servers**:
+  - **`memory`**: SQLite + FTS5 persistent knowledge graph with `data/memory.json` auto-import and bidirectional UC Volume sync (`memory_export` + `memory_import`).
+  - **`filesystem`**: Strict `Path.resolve().is_relative_to()` sandboxing and symlink-escape protection.
+  - **`github`**: Async GitHub REST API v3 client with lazy token resolution (`env:` / optional 1Password `op://`).
+  - **`docker`**: Docker Engine container lifecycle management with image allowlists and default resource limits.
+  - **`postgresql`**, **`redis`**, **`mongodb`**, **`neo4j`**, **`kubernetes`**, **`jupyter`**: Lazy-connecting Phase 2 servers (all read-only / execution-disabled by default; `*_ALLOW_MUTATIONS=true` or `JUPYTER_ALLOW_EXECUTION=true` to write).
+  - **`photos`** & **`xcodebuild`** (macOS host-only): Apple Photos discovery/export (`PHOTOS_EXPORT_ROOT`) and Xcode/SwiftPM/CoreSimulator tools (`XCODE_ALLOW_MUTATIONS=true` for builds/launches).
 
-### Tier 2: Database & Services
-- **PostgreSQL/Supabase**: Full database management with real-time features
-- **Redis**: Caching, sessions, and real-time data structures
-- **MongoDB**: Document store with Atlas integration
-- **Neo4j**: Graph database for relationship-heavy experiments
-- **Kubernetes**: Service orchestration and deployment
+## Quick Start
 
-### Tier 3: AI Collaboration
-- **Jupyter Integration**: Live notebook execution
-- **FastMCP Framework**: Rapid tool creation
-- **Code Analysis**: Automated documentation and insights
+```bash
+# 1. Install Python 3.12 environment with uv (add --extra evals for native MLflow make_judge + litellm)
+uv sync --extra dev --extra evals
 
-## Configuration
+# 2. Configure environment
+cp .env.example .env
 
-Configure Claude Desktop by adding to `claude_config.json`:
+# 3. Check local Atelier MLflow, mlflow[mcp], Unity Catalog, and Docker readiness
+uv run mcp-stack doctor
 
-```json
-{
-  "mcpServers": {
-    "mcp-workshop": {
-      "command": "node",
-      "args": ["/path/to/mcp-workshop-servers/dist/index.js"],
-      "env": {
-        "GITHUB_TOKEN": "${GITHUB_TOKEN}",
-        "WORKSHOP_MODE": "true"
-      }
-    }
-  }
-}
+# 4. Start the unified Streamable HTTP gateway on http://127.0.0.1:8090
+uv run mcp-stack serve gateway
+
+# Or run any individual server over stdio (stdout stays 100% JSON-RPC clean)
+uv run mcp-stack serve unity-catalog --transport stdio
+uv run mcp-stack serve photos --transport stdio
 ```
 
-## Documentation
+## MLflow MCP Registry & Client Configs
 
-- [MCP Starter Kit](mcp-starter-kit/README.md) - Quick 5-minute setup guide
-- [Memory Segregation Guide](docs/memory-segregation.md) - Project isolation strategy
-- [Architecture Guide](docs/architecture.md)
-- [Server Setup](docs/setup.md)
-- [API Reference](docs/api.md)
-- [Workshop Examples](examples/README.md)
+```bash
+# Generate open MCP Registry server.json manifests under manifests/
+uv run mcp-stack registry sync --dry-run
 
-## Documentation
+# Sync manifests into MLflow 3.15+ MCP Registry
+uv run mcp-stack registry sync
 
-- 📖 **[Quick Start Guide](./docs/quick-start.md)** - Get up and running in 5 minutes
-- 🔧 **[Server Reference](./docs/server-reference.md)** - Comprehensive guide to all MCP servers
-- 💾 **[Database Servers](./docs/database-servers.md)** - PostgreSQL, Redis, MongoDB setup and usage
-- 🧠 **[Memory Segregation](./docs/memory-segregation.md)** - Managing multiple projects with the Memory server
-- 🔐 **[Secrets Management](./docs/guides/secrets-management.md)** - 1Password integration guide
-- 📦 **[MCP Starter Kit](./mcp-starter-kit/README.md)** - Standalone package for easy distribution
-- 🔨 **[TypeScript Patterns](./docs/typescript-patterns.md)** - Development patterns and best practices
+# Generate / update configs for Claude Code, Claude Desktop, Codex, and Cursor
+uv run mcp-stack config generate --target all --write
 
-## Contributing
+# Safely merge into live host client configs (creates .bak-<timestamp> backups; defaults to /profiles/core/mcp)
+uv run mcp-stack config install --client codex --client claude-code --client claude-desktop
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+# Install guarded silent token-autoload block into ~/.zshrc (creates backup)
+uv run mcp-stack config install-shell-hook
 
-## License
+# Manage LaunchAgents, 60s background watchdog & log rotation (~/Library/Logs/mcp-workshop-stack/)
+uv run mcp-stack service status
+uv run mcp-stack service install
+uv run mcp-stack service restart
+uv run mcp-stack service watchdog-once
+uv run mcp-stack service rotate-logs --max-mb 10
 
-MIT License - see [LICENSE](LICENSE) for details.
+# Bootstrap clean UC workshop catalog + external volume + sample UDFs
+uv run mcp-stack uc bootstrap
 
-## Acknowledgments
+# Evaluate recent gateway traces & run golden GenAI benchmark (optional local Ollama judge)
+uv run mcp-stack eval sync-dataset
+uv run mcp-stack eval sync-scorers
+uv run mcp-stack eval benchmark
+uv run mcp-stack eval run --experiment mcp-workshop-servers --limit 20
+# uv run mcp-stack eval run --with-llm-judge --judge-model ollama:/qwen3.8:27b
+```
 
-Built on the Model Context Protocol by Anthropic, leveraging the vibrant MCP ecosystem and community servers.
+> [!NOTE]
+> Visit `http://127.0.0.1:8090/ui` when the gateway is running for the interactive Web Dashboard (status cards, profile tool counts & copyable client snippets, searchable Tool Browser + live **Interactive Tool Playground**, Trace Span Drilldown with native MLflow human feedback/expectations/tags & golden-dataset promotion, watchdog history, and Bearer-protected operational & benchmark actions).
+
+> [!NOTE]
+> When `MCP_AUTH_ENABLED=true`, generated configs in [`.mcp.json`](file:///Users/spencer/repos/mcp-server/.mcp.json), [`cursor-mcp-config.json`](file:///Users/spencer/repos/mcp-server/cursor-mcp-config.json), and [`config/codex-mcp-snippet.toml`](file:///Users/spencer/repos/mcp-server/config/codex-mcp-snippet.toml) reference env-var Bearer tokens (`${MCP_CLAUDE_AUTH_TOKEN}`, `${env:MCP_CURSOR_AUTH_TOKEN}`, `MCP_CODEX_AUTH_TOKEN`) with zero plaintext secrets stored on disk.
+
+## Native macOS LaunchAgents (Recommended on macOS)
+
+For full host `mlflow[mcp]` composition, live MLflow `:5002` tracing, and macOS `photos_*` support alongside containerized OSS Unity Catalog (`:8082`), install the launchd wrappers from `deploy/launchd/`:
+
+```bash
+mkdir -p ~/Library/Logs/mcp-workshop-stack
+cp deploy/launchd/com.spencer.mcp-mlflow-mcp.plist ~/Library/LaunchAgents/
+cp deploy/launchd/com.spencer.mcp-workshop-gateway.plist ~/Library/LaunchAgents/
+```
+
+Logs are written to `~/Library/Logs/mcp-workshop-stack/`. Secrets remain in `.env` (gitignored), never inside `.plist` or wrapper files.
+
+## Docker Deployment
+
+```bash
+# Attach to existing atelier-core network (reaches host Atelier MLflow 5002/9012)
+docker compose up -d --build
+
+# Standalone mode with optional OSS Unity Catalog (:8082 if :8080 is busy)
+UC_PORT=8082 EXECUTOR_MAX_MEMORY_LIMIT=4096 docker compose -f docker-compose.yml -f docker-compose.standalone.yml --profile uc up -d
+
+# Optional Tier-2 dev databases (postgres:15432, redis:16379, mongodb:27018, neo4j:17474/17687)
+docker-compose -f docker-compose.yml -f docker-compose.standalone.yml --profile tier2 up -d postgres redis mongodb neo4j
+```
+
+> [!NOTE]
+> MLflow 3.x enables DNS-rebinding `Host` header validation (`--allowed-hosts`) by default, allowing only `localhost` and RFC-1918 private IPs. On macOS with OrbStack or Docker Desktop, `host.docker.internal` can trigger HTTP `403 Invalid Host header` when hitting a native host `:5002` MLflow server. Choose one of three supported topologies:
+> 1. **Native macOS gateway + Docker UC** *(full MLflow tracing + host-only `photos`)*: keep `unity-catalog` in Docker (`UC_PORT=8082`) and run `uv run mcp-stack serve gateway` directly on macOS against `http://localhost:5002`.
+> 2. **Containerized gateway + host MLflow**: start your host MLflow server with `--allowed-hosts "localhost:*,127.0.0.1:*,host.docker.internal:*"`.
+> 3. **Compose-managed MLflow**: run `--profile mlflow` with an alternate host port if `:5002` is in use (`MLFLOW_SERVER_PORT=5003 DOCKER_MLFLOW_TRACKING_URI=http://mlflow-server:5002 docker compose -f docker-compose.yml -f docker-compose.standalone.yml --profile uc --profile mlflow up -d`).
+
+## Testing & Quality
+
+```bash
+uv run python scripts/secret_scan.py
+uv run ruff check src tests scripts
+uv run mypy src
+uv run pytest -m "not live and not databricks and not tier2" -v
+uv run pytest -m tier2 -v       # Live integration tests against --profile tier2 containers
+uv run pytest -m live -v         # Live probes against running MLflow & OSS UC
+uv run pytest -m databricks -v   # Opt-in read-only probe against UC_DATABRICKS_PROFILE
+```
+
+## Phase 4 Status
+
+- All Phase 1–4 deliverables are implemented: Python 3.12 FastMCP 3.x servers, curated profiles, 60s macOS watchdog, MLflow 3.x golden evals & local Ollama judge support, Databricks UC Files API volume sync, `--profile tier2` dev compose stack, and Gateway `/ui` dashboard.

@@ -1,52 +1,60 @@
-name: Documentation Pipeline
+name: Documentation & Manifest Validation
 
 on:
   push:
+    branches: [main, feat/*]
+    paths:
+      - "docs/**"
+      - "manifests/**"
+      - "deploy/launchd/**"
+      - "src/mcp_stack/**"
+      - "README.md"
+      - "CLAUDE.md"
+  pull_request:
     branches: [main]
     paths:
-      - 'docs/**'
-      - 'src/**'
-      - 'README.md'
-      - 'ARCHITECTURE.md'
+      - "docs/**"
+      - "manifests/**"
+      - "deploy/launchd/**"
+      - "src/mcp_stack/**"
+      - "README.md"
+      - "CLAUDE.md"
 
 jobs:
-  generate-docs:
-    runs-on: self-hosted
-    
+  validate-docs-and-manifests:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.4.0
         with:
-          node-version: '20.x'
-          
-      - name: Install documentation tools
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Validate manifests, launchd XML, and docs server inventory
         run: |
-          npm install -g typedoc
-          npm install -g @mermaid-js/mermaid-cli
-          brew install vale
-          
-      - name: Generate API documentation
-        run: |
-          typedoc --out docs/api src
-          
-      - name: Generate architecture diagrams
-        run: |
-          mmdc -i docs/diagrams/architecture.mmd -o docs/assets/architecture.png
-          mmdc -i docs/diagrams/data-flow.mmd -o docs/assets/data-flow.png
-          
-      - name: Validate documentation quality
-        run: |
-          vale docs/
-          
-      - name: Build documentation site
-        run: |
-          npm run docs:build
-          
-      - name: Deploy to GitHub Pages
-        if: github.ref == 'refs/heads/main'
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./docs/_site
+          uv run python -c "
+          import json, xml.etree.ElementTree as ET
+          from pathlib import Path
+          from mcp_stack.core.config import load_settings
+          from mcp_stack.registry import build_server_manifests
+
+          expected = build_server_manifests(load_settings(load_dotenv=False))
+          for slug in expected:
+              p = Path('manifests') / f'{slug}.server.json'
+              assert p.exists(), f'Missing manifest: {p}'
+              json.loads(p.read_text(encoding='utf-8'))
+
+          for plist in Path('deploy/launchd').glob('*.plist'):
+              ET.parse(plist)
+
+          readme = Path('README.md').read_text(encoding='utf-8')
+          claude_md = Path('CLAUDE.md').read_text(encoding='utf-8')
+          for key in ('postgresql', 'redis', 'mongodb', 'neo4j', 'kubernetes', 'jupyter', 'xcodebuild', '/profiles/'):
+              assert key in readme, f'{key} missing in README.md'
+              assert key in claude_md, f'{key} missing in CLAUDE.md'
+          "

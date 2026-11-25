@@ -1,0 +1,69 @@
+"""Unit tests for live client config installer backups and non-destructive merges."""
+
+from __future__ import annotations
+
+import json
+import tomllib
+from pathlib import Path
+
+from mcp_stack.client_configs import install_client_configs
+from mcp_stack.core.config import ClientPolicy
+
+
+def test_install_client_configs_preserves_existing_entries_and_creates_backups(
+    make_settings, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    codex_path = home / ".codex/config.toml"
+    codex_path.parent.mkdir(parents=True, exist_ok=True)
+    codex_path.write_text(
+        'model = "gpt-5"\n\n[mcp_servers.music-brain]\nurl = "http://localhost:7777/mcp"\n',
+        encoding="utf-8",
+    )
+
+    claude_path = home / ".claude.json"
+    claude_path.write_text(
+        json.dumps({"mcpServers": {"music-brain": {"url": "http://localhost:7777"}}}),
+        encoding="utf-8",
+    )
+
+    desk_path = home / "Library/Application Support/Claude/claude_desktop_config.json"
+    desk_path.parent.mkdir(parents=True, exist_ok=True)
+    desk_path.write_text(
+        json.dumps({"mcpServers": {"printer": {"command": "uv"}}}),
+        encoding="utf-8",
+    )
+
+    settings = make_settings()
+    settings.gateway.auth_enabled = True
+    settings.gateway.clients = {
+        "super-secret-live-token": ClientPolicy(client_id="codex", client_name="Codex CLI")
+    }
+
+    res = install_client_configs(
+        settings,
+        tmp_path,
+        ["codex", "claude-code", "claude-desktop"],
+        home_dir=home,
+    )
+
+    assert res["results"]["codex"]["backup"]
+    assert Path(res["results"]["codex"]["backup"]).exists()
+    parsed_toml = tomllib.loads(codex_path.read_text(encoding="utf-8"))
+    assert "music-brain" in parsed_toml["mcp_servers"]
+    assert parsed_toml["mcp_servers"]["mcp_workshop_gateway"]["bearer_token_env_var"] == (
+        "MCP_CODEX_AUTH_TOKEN"
+    )
+
+    cc_doc = json.loads(claude_path.read_text(encoding="utf-8"))
+    assert "music-brain" in cc_doc["mcpServers"]
+    assert cc_doc["mcpServers"]["mcp-workshop-gateway"]["headers"] == {
+        "Authorization": "Bearer ${MCP_CLAUDE_AUTH_TOKEN}"
+    }
+
+    cd_doc = json.loads(desk_path.read_text(encoding="utf-8"))
+    assert "printer" in cd_doc["mcpServers"]
+    assert "mcp-postgresql" in cd_doc["mcpServers"]
+
+    for p in (codex_path, claude_path, desk_path):
+        assert "super-secret-live-token" not in p.read_text(encoding="utf-8")
