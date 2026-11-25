@@ -33,6 +33,9 @@ class GatewaySettings(BaseModel):
     log_json: bool = False
     auth_enabled: bool = False
     allow_unauthenticated_non_loopback: bool = False
+    ui_session_ttl_s: int = 43200
+    ui_session_secret: SecretStr | None = None
+    eval_regression_threshold: float = 1.0
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:*", "http://127.0.0.1:*"]
     )
@@ -422,6 +425,12 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         env_overrides["gateway"]["auth_enabled"] = b
     if (b := _parse_bool(os.getenv("MCP_ALLOW_UNAUTHENTICATED_NON_LOOPBACK"))) is not None:
         env_overrides["gateway"]["allow_unauthenticated_non_loopback"] = b
+    if val := os.getenv("GATEWAY_UI_SESSION_TTL_S"):
+        env_overrides["gateway"]["ui_session_ttl_s"] = int(val)
+    if val := os.getenv("GATEWAY_UI_SESSION_SECRET"):
+        env_overrides["gateway"]["ui_session_secret"] = val
+    if val := os.getenv("GATEWAY_EVAL_REGRESSION_THRESHOLD"):
+        env_overrides["gateway"]["eval_regression_threshold"] = float(val)
     if (items := _split_csv(os.getenv("MCP_ENABLED_SERVERS"))) is not None:
         env_overrides["gateway"]["enabled_servers"] = items
     if (items := _split_csv(os.getenv("MCP_CORS_ORIGINS"))) is not None:

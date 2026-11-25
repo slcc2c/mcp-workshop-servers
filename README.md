@@ -83,7 +83,7 @@ uv run mcp-stack eval run --experiment mcp-workshop-servers --limit 20
 ```
 
 > [!NOTE]
-> Visit `http://127.0.0.1:8090/ui` when the gateway is running for the interactive Web Dashboard (status cards, profile tool counts & copyable client snippets, searchable Tool Browser + live **Interactive Tool Playground**, Trace Span Drilldown with native MLflow human feedback/expectations/tags & golden-dataset promotion, watchdog history, and Bearer-protected operational & benchmark actions).
+> Open the Control Plane with zero token copy-paste using `uv run mcp-stack ui open` (mints a single-use 60s login link that sets an `HttpOnly; SameSite=Strict` session cookie scoped only to `/api/v1/*`, or visit `http://127.0.0.1:8090/ui`). Features 4 tabs (**Overview**, **Playground**, **Traces & Evals** with facet filters + SVG score trendline + Span Drilldown curation, and **MLflow Registry** with gated `@production` alias promotion) plus automatic Watchdog eval-regression alerts (`GATEWAY_EVAL_REGRESSION_THRESHOLD`).
 
 > [!NOTE]
 > When `MCP_AUTH_ENABLED=true`, generated configs in [`.mcp.json`](file:///Users/spencer/repos/mcp-server/.mcp.json), [`cursor-mcp-config.json`](file:///Users/spencer/repos/mcp-server/cursor-mcp-config.json), and [`config/codex-mcp-snippet.toml`](file:///Users/spencer/repos/mcp-server/config/codex-mcp-snippet.toml) reference env-var Bearer tokens (`${MCP_CLAUDE_AUTH_TOKEN}`, `${env:MCP_CURSOR_AUTH_TOKEN}`, `MCP_CODEX_AUTH_TOKEN`) with zero plaintext secrets stored on disk.

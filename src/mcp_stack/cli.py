@@ -6,6 +6,7 @@ import asyncio
 import json
 import shutil
 import sys
+import webbrowser
 from pathlib import Path
 from typing import Literal
 
@@ -53,11 +54,13 @@ config_app = typer.Typer(help="Generate and install AI client configurations.")
 service_app = typer.Typer(help="Manage macOS LaunchAgents and log rotation.")
 eval_app = typer.Typer(help="Run MLflow 3.x GenAI trace evaluations.")
 uc_app = typer.Typer(help="Unity Catalog bootstrap and helper commands.")
+ui_app = typer.Typer(help="Open and manage the Gateway Web Dashboard.")
 app.add_typer(registry_app, name="registry")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
 app.add_typer(eval_app, name="eval")
 app.add_typer(uc_app, name="uc")
+app.add_typer(ui_app, name="ui")
 
 
 @app.command("serve")
@@ -457,6 +460,69 @@ def uc_bootstrap() -> None:
     configure_logging("WARNING")
     res = asyncio.run(bootstrap_oss_unity_catalog(settings))
     typer.echo(json.dumps(res, indent=2))
+
+
+@ui_app.command("open")
+def ui_open(
+    client: str | None = typer.Option(
+        None, "--client", help="Client ID whose Gateway policy should sign into /ui (e.g. codex)"
+    ),
+    no_browser: bool = typer.Option(
+        False, "--no-browser", help="Print one-time login URL without opening system browser"
+    ),
+) -> None:
+    """Mint a 60s single-use cookie login URL for /ui without copying Bearer tokens."""
+    settings = load_settings()
+    configure_logging("WARNING")
+
+    target_host = "127.0.0.1" if settings.gateway.host == "0.0.0.0" else settings.gateway.host
+    base_url = f"http://{target_host}:{settings.gateway.port}"
+    req_headers: dict[str, str] = {}
+    chosen_id = "local"
+
+    if settings.gateway.effective_auth_enabled:
+        selected: tuple[str, str] | None = None
+        if client:
+            for tok, pol in settings.gateway.clients.items():
+                if pol.client_id == client:
+                    selected = (tok, pol.client_id)
+                    break
+            if selected is None:
+                typer.echo(f"Unknown client_id '{client}'", err=True)
+                raise typer.Exit(code=1)
+        else:
+            for tok, pol in settings.gateway.clients.items():
+                if pol.client_id == "codex":
+                    selected = (tok, pol.client_id)
+                    break
+            if selected is None and settings.gateway.clients:
+                tok, pol = next(iter(settings.gateway.clients.items()))
+                selected = (tok, pol.client_id)
+        if selected is None:
+            typer.echo("No Gateway client tokens configured", err=True)
+            raise typer.Exit(code=1)
+        req_headers["Authorization"] = f"Bearer {selected[0]}"
+        chosen_id = selected[1]
+
+    resp = httpx.post(f"{base_url}/api/v1/auth/login-link", headers=req_headers, timeout=5.0)
+    resp.raise_for_status()
+    data = resp.json()
+    login_url = str(data["url"])
+    opened = False
+    if not no_browser:
+        opened = bool(webbrowser.open(login_url))
+
+    typer.echo(
+        json.dumps(
+            {
+                "opened": opened,
+                "url": login_url,
+                "client_id": data.get("clientId", chosen_id),
+                "expires_in_seconds": data.get("expiresInSeconds", 60),
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

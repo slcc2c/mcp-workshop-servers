@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Body, FastAPI, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -23,12 +23,18 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from mcp_stack import __version__
 from mcp_stack.client_configs import generate_client_configs
 from mcp_stack.core.auth import (
+    UI_SESSION_COOKIE,
     GatewayAuthMiddleware,
+    LoginNonceStore,
+    caller_auth_method_var,
     caller_client_id_var,
     caller_client_policy_var,
+    find_client_by_id,
     is_server_allowed,
+    sign_ui_session,
+    verify_ui_session,
 )
-from mcp_stack.core.config import MCPStackSettings
+from mcp_stack.core.config import ClientPolicy, MCPStackSettings
 from mcp_stack.core.logging import get_logger
 from mcp_stack.core.metrics import render_metrics
 from mcp_stack.evals import (
@@ -64,8 +70,10 @@ from mcp_stack.servers.unity_catalog import (
 )
 from mcp_stack.servers.xcodebuild import create_xcodebuild_server
 from mcp_stack.watchdog import (
+    _EVAL_SCORE_KEYS,
     DEFAULT_LOG_PATH,
     DEFAULT_STATE_PATH,
+    _default_eval_regression_probe,
     _load_state,
     run_watchdog_once,
 )
@@ -278,6 +286,34 @@ def build_gateway_app(
         version=__version__,
         lifespan=lifespan,
     )
+    login_nonces = LoginNonceStore()
+    app.state.login_nonces = login_nonces
+
+    def _set_session_cookie(response: Response, cookie_token: str, request: Request) -> None:
+        fwd_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+        is_https = request.url.scheme == "https" or fwd_proto == "https"
+        response.set_cookie(
+            key=UI_SESSION_COOKIE,
+            value=cookie_token,
+            max_age=settings.gateway.ui_session_ttl_s,
+            path="/",
+            httponly=True,
+            samesite="strict",
+            secure=is_https,
+        )
+
+    def _resolve_auth_identity(request: Request) -> tuple[ClientPolicy | None, str]:
+        if not settings.gateway.effective_auth_enabled:
+            return None, "open"
+        auth_header = request.headers.get("authorization", "")
+        bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        if bearer:
+            return settings.gateway.clients.get(bearer), "bearer"
+        cookie_val = request.cookies.get(UI_SESSION_COOKIE)
+        cid = verify_ui_session(cookie_val, settings)
+        if cid:
+            return find_client_by_id(settings, cid), "cookie"
+        return None, "anonymous"
 
     server_inventory = [
         {
@@ -384,6 +420,124 @@ def build_gateway_app(
     async def dashboard_ui() -> HTMLResponse:
         return HTMLResponse(content=render_dashboard_html(__version__))
 
+    @app.post("/api/v1/auth/login-link", response_model=None)
+    async def ui_login_link_api(request: Request) -> dict[str, Any] | JSONResponse:
+        if settings.gateway.effective_auth_enabled and caller_auth_method_var.get() != "bearer":
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "BEARER_REQUIRED",
+                        "message": "Minting a /ui login link requires Authorization: Bearer auth",
+                    }
+                },
+            )
+        client_id = caller_client_id_var.get() or "codex"
+        if client_id == "anonymous":
+            first = next(iter(settings.gateway.clients.values()), None)
+            client_id = first.client_id if first is not None else "local"
+        nonce = login_nonces.issue(client_id)
+        origin = str(request.base_url).rstrip("/")
+        return {
+            "url": f"{origin}/ui/login?nonce={nonce}",
+            "expiresInSeconds": 60,
+            "clientId": client_id,
+        }
+
+    @app.get("/ui/login")
+    async def ui_login_consume(request: Request, nonce: str = "") -> RedirectResponse:
+        client_id = login_nonces.consume(nonce)
+        if not client_id:
+            return RedirectResponse(url="/ui?auth_error=invalid_link", status_code=303)
+        session_val = sign_ui_session(client_id, settings)
+        resp = RedirectResponse(url="/ui", status_code=303)
+        _set_session_cookie(resp, session_val, request)
+        return resp
+
+    @app.post("/api/v1/auth/session", response_model=None)
+    async def ui_session_create(
+        request: Request,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> Response:
+        auth_header = request.headers.get("authorization", "")
+        token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        if not token and isinstance(payload, dict):
+            token = str(payload.get("token") or "").strip()
+
+        if not settings.gateway.effective_auth_enabled:
+            session_val = sign_ui_session("local", settings)
+            resp = JSONResponse(
+                {
+                    "authenticated": True,
+                    "authEnabled": False,
+                    "clientId": "local",
+                    "clientName": "Local (Auth Disabled)",
+                    "allowedServers": ["*"],
+                    "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+                }
+            )
+            _set_session_cookie(resp, session_val, request)
+            return resp
+
+        policy = settings.gateway.clients.get(token) if token else None
+        if policy is None:
+            return JSONResponse(
+                status_code=401,
+                content={"error": {"code": "AUTH_FAILED", "message": "Invalid Bearer token"}},
+            )
+        session_val = sign_ui_session(policy.client_id, settings)
+        resp = JSONResponse(
+            {
+                "authenticated": True,
+                "authEnabled": True,
+                "clientId": policy.client_id,
+                "clientName": policy.client_name,
+                "allowedServers": list(policy.allowed_servers),
+                "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+            }
+        )
+        _set_session_cookie(resp, session_val, request)
+        return resp
+
+    @app.get("/api/v1/auth/me")
+    async def ui_session_me(request: Request) -> dict[str, Any]:
+        policy, method = _resolve_auth_identity(request)
+        if not settings.gateway.effective_auth_enabled:
+            return {
+                "authenticated": True,
+                "authEnabled": False,
+                "clientId": "local",
+                "clientName": "Local (Auth Disabled)",
+                "allowedServers": ["*"],
+                "authMethod": "open",
+                "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+            }
+        if policy is None:
+            return {
+                "authenticated": False,
+                "authEnabled": True,
+                "clientId": None,
+                "clientName": None,
+                "allowedServers": [],
+                "authMethod": "anonymous",
+                "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+            }
+        return {
+            "authenticated": True,
+            "authEnabled": True,
+            "clientId": policy.client_id,
+            "clientName": policy.client_name,
+            "allowedServers": list(policy.allowed_servers),
+            "authMethod": method,
+            "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+        }
+
+    @app.post("/api/v1/auth/logout")
+    async def ui_session_logout() -> Response:
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(key=UI_SESSION_COOKIE, path="/")
+        return resp
+
     async def _collect_tools_for_server(slug: str, srv: FastMCP) -> list[dict[str, Any]]:
         try:
             items = await asyncio.wait_for(srv.list_tools(), timeout=2.0)
@@ -475,17 +629,31 @@ def build_gateway_app(
                         recent_events.append({"raw": line})
         except Exception as exc:
             recent_events.append({"error": str(exc)})
+        eval_regression = state.get("eval_regression")
+        if eval_regression is None:
+            eval_regression = await asyncio.to_thread(
+                _default_eval_regression_probe, settings, timeout=0.6
+            )
         return {
             "statePath": str(DEFAULT_STATE_PATH),
             "logPath": str(DEFAULT_LOG_PATH),
             "lastRunAt": state.get("last_run_at"),
             "lastActions": state.get("last_actions") or {},
             "components": state.get("components") or {},
+            "evalRegression": eval_regression,
             "recentEvents": recent_events,
         }
 
     @app.get("/api/v1/traces")
-    async def recent_traces_api(limit: int = 20) -> dict[str, Any]:
+    async def recent_traces_api(
+        limit: int = 25,
+        server: str = "",
+        user: str = "",
+        model_id: str = "",
+        state: str = "",
+        policy_refusal: str = "all",
+        q: str = "",
+    ) -> dict[str, Any]:
         clamped = max(1, min(limit, 100))
 
         def _fetch() -> dict[str, Any]:
@@ -498,19 +666,49 @@ def build_gateway_app(
                     "available": True,
                     "experiment": settings.mlflow.experiment_name,
                     "traces": [],
+                    "facets": {"servers": [], "users": [], "modelIds": []},
                     "latestEvalRun": None,
+                    "evalHistory": [],
+                    "evalRegression": {
+                        "status": "no_eval_runs",
+                        "threshold": settings.gateway.eval_regression_threshold,
+                    },
                 }
+            search_limit = max(clamped * 3, 60)
             traces = client.search_traces(
                 locations=[exp.experiment_id],
-                max_results=clamped,
+                max_results=search_limit,
                 order_by=["timestamp_ms DESC"],
             )
-            trace_rows: list[dict[str, Any]] = []
+            all_rows: list[dict[str, Any]] = []
+            facet_servers: set[str] = set()
+            facet_users: set[str] = set()
+            facet_models: set[str] = set()
             for tr in traces:
                 info = getattr(tr, "info", tr)
                 spans = getattr(getattr(tr, "data", None), "spans", None) or []
                 root_name = getattr(spans[0], "name", "") if spans else ""
-                trace_rows.append(
+                tags = dict(getattr(info, "tags", None) or {})
+                meta = dict(getattr(info, "trace_metadata", None) or {})
+                srv_val = str(
+                    tags.get("mcp.server")
+                    or (root_name.split(".", 1)[0] if "." in root_name else "")
+                ).strip()
+                tool_val = str(
+                    tags.get("mcp.tool")
+                    or (root_name.split(".", 1)[1] if "." in root_name else "")
+                ).strip()
+                user_val = str(meta.get("mlflow.trace.user") or tags.get("mcp.user") or "").strip()
+                model_val = str(
+                    getattr(info, "model_id", None) or meta.get("mlflow.modelId") or ""
+                ).strip()
+                if srv_val:
+                    facet_servers.add(srv_val)
+                if user_val:
+                    facet_users.add(user_val)
+                if model_val:
+                    facet_models.add(model_val)
+                all_rows.append(
                     {
                         "traceId": getattr(info, "trace_id", None)
                         or getattr(info, "request_id", None),
@@ -518,14 +716,55 @@ def build_gateway_app(
                         "state": str(getattr(info, "state", "")),
                         "policyRefusal": is_expected_policy_refusal(tr),
                         "durationMs": round(_trace_duration_ms(tr), 1),
+                        "timestampMs": getattr(info, "timestamp_ms", None),
+                        "user": user_val or None,
+                        "sessionId": meta.get("mlflow.trace.session"),
+                        "modelId": model_val or None,
+                        "server": srv_val or None,
+                        "tool": tool_val or None,
+                        "profile": tags.get("mcp.profile"),
+                        "assessmentCount": len(getattr(info, "assessments", None) or []),
                     }
                 )
-            latest_eval: dict[str, Any] | None = None
+
+            srv_f = server.strip().lower()
+            usr_f = user.strip().lower()
+            mdl_f = model_id.strip()
+            st_f = state.strip().upper()
+            pr_f = policy_refusal.strip().lower()
+            q_f = q.strip().lower()
+
+            filtered: list[dict[str, Any]] = []
+            for row in all_rows:
+                if srv_f and str(row.get("server") or "").lower() != srv_f:
+                    continue
+                if usr_f and str(row.get("user") or "").lower() != usr_f:
+                    continue
+                if mdl_f and str(row.get("modelId") or "") != mdl_f:
+                    continue
+                if st_f and st_f not in str(row.get("state") or "").upper():
+                    continue
+                if pr_f == "only" and not row["policyRefusal"]:
+                    continue
+                if pr_f == "exclude" and row["policyRefusal"]:
+                    continue
+                if q_f:
+                    hay = (
+                        f"{row.get('traceId', '')} {row.get('name', '')} "
+                        f"{row.get('server', '')} {row.get('tool', '')} {row.get('user', '')}"
+                    ).lower()
+                    if q_f not in hay:
+                        continue
+                filtered.append(row)
+                if len(filtered) >= clamped:
+                    break
+
+            eval_history: list[dict[str, Any]] = []
             try:
                 runs = client.search_runs(
                     [exp.experiment_id],
                     order_by=["attributes.start_time DESC"],
-                    max_results=10,
+                    max_results=25,
                 )
                 for run in runs:
                     metrics = {
@@ -534,19 +773,59 @@ def build_gateway_app(
                         if "/" in k or "tool_" in k or "policy_" in k
                     }
                     if metrics:
-                        latest_eval = {
-                            "run_id": run.info.run_id,
-                            "metrics": metrics,
-                        }
-                        break
+                        core_vals = [
+                            metrics[k] for k in _EVAL_SCORE_KEYS if k in metrics
+                        ] or list(metrics.values())
+                        min_score = round(min(core_vals), 4)
+                        eval_history.append(
+                            {
+                                "run_id": run.info.run_id,
+                                "run_name": getattr(run.info, "run_name", None),
+                                "timestamp_ms": getattr(run.info, "start_time", None),
+                                "min_score": min_score,
+                                "metrics": metrics,
+                            }
+                        )
+                        if len(eval_history) >= 10:
+                            break
             except Exception:
                 pass
+
+            latest_eval = eval_history[0] if eval_history else None
+            threshold = settings.gateway.eval_regression_threshold
+            if latest_eval is None:
+                eval_regression: dict[str, Any] = {
+                    "status": "no_eval_runs",
+                    "threshold": threshold,
+                }
+            else:
+                failing = {
+                    k: v
+                    for k, v in latest_eval["metrics"].items()
+                    if k in _EVAL_SCORE_KEYS and v < threshold
+                }
+                eval_regression = {
+                    "status": "regression" if failing else "ok",
+                    "threshold": threshold,
+                    "run_id": latest_eval["run_id"],
+                    "run_name": latest_eval.get("run_name"),
+                    "min_score": latest_eval["min_score"],
+                    "failing_metrics": failing,
+                }
+
             return {
                 "available": True,
                 "experiment": settings.mlflow.experiment_name,
                 "experimentId": exp.experiment_id,
-                "traces": trace_rows,
+                "traces": filtered,
+                "facets": {
+                    "servers": sorted(facet_servers),
+                    "users": sorted(facet_users),
+                    "modelIds": sorted(facet_models),
+                },
                 "latestEvalRun": latest_eval,
+                "evalHistory": eval_history,
+                "evalRegression": eval_regression,
             }
 
         try:
@@ -557,7 +836,13 @@ def build_gateway_app(
                 "experiment": settings.mlflow.experiment_name,
                 "error": str(exc),
                 "traces": [],
+                "facets": {"servers": [], "users": [], "modelIds": []},
                 "latestEvalRun": None,
+                "evalHistory": [],
+                "evalRegression": {
+                    "status": "unavailable",
+                    "threshold": settings.gateway.eval_regression_threshold,
+                },
             }
 
     @app.get("/api/v1/traces/{trace_id}", response_model=None)
@@ -866,6 +1151,260 @@ def build_gateway_app(
                 status_code=400,
                 content={"error": {"code": "INVALID_TRACE", "message": str(exc)}},
             )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
+            )
+
+    @app.get("/api/v1/mlflow/registry")
+    async def mlflow_registry_api() -> dict[str, Any]:
+        def _load_registry() -> dict[str, Any]:
+            import mlflow
+            import mlflow.genai
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            client = mlflow.MlflowClient(
+                tracking_uri=settings.mlflow.tracking_uri,
+                registry_uri=settings.effective_mlflow_registry_uri,
+            )
+
+            mcp_servers_out: list[dict[str, Any]] = []
+            try:
+                for srv in client.search_mcp_servers(max_results=50):
+                    mcp_servers_out.append(
+                        {
+                            "name": getattr(srv, "name", None),
+                            "url": getattr(srv, "url", None),
+                            "version": getattr(srv, "version", None),
+                            "description": getattr(srv, "description", None),
+                            "aliases": dict(getattr(srv, "aliases", None) or {}),
+                            "tags": dict(getattr(srv, "tags", None) or {}),
+                        }
+                    )
+            except Exception:
+                pass
+
+            prompts_out: list[dict[str, Any]] = []
+            try:
+                prompts = mlflow.genai.search_prompts(max_results=30)
+                for p in prompts[:20]:
+                    p_name = str(getattr(p, "name", ""))
+                    versions_out: list[dict[str, Any]] = []
+                    try:
+                        vers = client.search_prompt_versions(name=p_name, max_results=10)
+                        for v in vers:
+                            versions_out.append(
+                                {
+                                    "version": getattr(v, "version", None),
+                                    "aliases": list(getattr(v, "aliases", None) or []),
+                                    "commitMessage": getattr(v, "commit_message", None),
+                                }
+                            )
+                    except Exception:
+                        pass
+                    prompts_out.append(
+                        {
+                            "name": p_name,
+                            "description": getattr(p, "description", None),
+                            "tags": dict(getattr(p, "tags", None) or {}),
+                            "versions": versions_out,
+                        }
+                    )
+            except Exception:
+                pass
+
+            reg_models_out: list[dict[str, Any]] = []
+            try:
+                for m in client.search_registered_models(max_results=30):
+                    latest = [
+                        {
+                            "version": getattr(lv, "version", None),
+                            "currentStage": getattr(lv, "current_stage", None),
+                            "aliases": list(getattr(lv, "aliases", None) or []),
+                        }
+                        for lv in (getattr(m, "latest_versions", None) or [])
+                    ]
+                    reg_models_out.append(
+                        {
+                            "name": getattr(m, "name", None),
+                            "description": getattr(m, "description", None),
+                            "aliases": dict(getattr(m, "aliases", None) or {}),
+                            "tags": dict(getattr(m, "tags", None) or {}),
+                            "latestVersions": latest,
+                        }
+                    )
+            except Exception:
+                pass
+
+            logged_models_out: list[dict[str, Any]] = []
+            try:
+                exp = client.get_experiment_by_name(settings.mlflow.experiment_name)
+                if exp is not None:
+                    for lm in client.search_logged_models(
+                        experiment_ids=[exp.experiment_id], max_results=20
+                    ):
+                        logged_models_out.append(
+                            {
+                                "modelId": getattr(lm, "model_id", None),
+                                "name": getattr(lm, "name", None),
+                                "status": str(getattr(lm, "status", "")),
+                                "tags": dict(getattr(lm, "tags", None) or {}),
+                                "metrics": [
+                                    {
+                                        "key": getattr(met, "key", None),
+                                        "value": getattr(met, "value", None),
+                                    }
+                                    for met in (getattr(lm, "metrics", None) or [])
+                                ],
+                            }
+                        )
+            except Exception:
+                pass
+
+            return {
+                "available": True,
+                "mutationsEnabled": settings.mlflow.allow_mutations,
+                "experiment": settings.mlflow.experiment_name,
+                "mcpServers": mcp_servers_out,
+                "prompts": prompts_out,
+                "registeredModels": reg_models_out,
+                "loggedModels": logged_models_out,
+            }
+
+        try:
+            return await asyncio.to_thread(_load_registry)
+        except Exception as exc:
+            return {
+                "available": False,
+                "mutationsEnabled": settings.mlflow.allow_mutations,
+                "experiment": settings.mlflow.experiment_name,
+                "error": str(exc),
+                "mcpServers": [],
+                "prompts": [],
+                "registeredModels": [],
+                "loggedModels": [],
+            }
+
+    @app.get("/api/v1/mlflow/prompts/{name}", response_model=None)
+    async def mlflow_prompt_detail_api(
+        name: str,
+        version_or_alias: str = "latest",
+    ) -> dict[str, Any] | JSONResponse:
+        def _load() -> dict[str, Any]:
+            import mlflow
+            import mlflow.genai
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            if version_or_alias.isdigit():
+                pv = mlflow.genai.load_prompt(name, version=int(version_or_alias))
+            else:
+                pv = mlflow.genai.load_prompt(f"prompts:/{name}@{version_or_alias}")
+            return {
+                "name": getattr(pv, "name", name),
+                "version": getattr(pv, "version", None),
+                "template": getattr(pv, "template", None),
+                "commitMessage": getattr(pv, "commit_message", None),
+                "tags": dict(getattr(pv, "tags", None) or {}),
+                "uri": getattr(pv, "uri", None),
+            }
+
+        try:
+            return await asyncio.to_thread(_load)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "PROMPT_NOT_FOUND", "message": str(exc)}},
+            )
+
+    @app.post("/api/v1/mlflow/prompts/{name}/alias", response_model=None)
+    async def mlflow_prompt_alias_api(
+        name: str,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        if not settings.mlflow.allow_mutations:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "MLFLOW_MUTATIONS_DISABLED",
+                        "message": "Set MLFLOW_ALLOW_MUTATIONS=true to update prompt aliases",
+                    }
+                },
+            )
+        body = payload if isinstance(payload, dict) else {}
+        alias = str(body.get("alias") or "").strip()
+        raw_ver = body.get("version")
+        if not alias or raw_ver is None:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "INVALID_REQUEST",
+                        "message": "Provide 'alias' and integer 'version'",
+                    }
+                },
+            )
+        version_int = int(raw_ver)
+
+        def _set() -> dict[str, Any]:
+            import mlflow
+            import mlflow.genai
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            mlflow.genai.set_prompt_alias(name=name, alias=alias, version=version_int)
+            return {"updated": True, "name": name, "alias": alias, "version": version_int}
+
+        try:
+            return await asyncio.to_thread(_set)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
+            )
+
+    @app.post("/api/v1/mlflow/models/{name}/alias", response_model=None)
+    async def mlflow_model_alias_api(
+        name: str,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        if not settings.mlflow.allow_mutations:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "MLFLOW_MUTATIONS_DISABLED",
+                        "message": "Set MLFLOW_ALLOW_MUTATIONS=true to update model aliases",
+                    }
+                },
+            )
+        body = payload if isinstance(payload, dict) else {}
+        alias = str(body.get("alias") or "").strip()
+        raw_ver = body.get("version")
+        if not alias or raw_ver is None:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "INVALID_REQUEST",
+                        "message": "Provide 'alias' and 'version'",
+                    }
+                },
+            )
+        ver_str = str(raw_ver).strip()
+
+        def _set() -> dict[str, Any]:
+            import mlflow
+
+            client = mlflow.MlflowClient(
+                tracking_uri=settings.mlflow.tracking_uri,
+                registry_uri=settings.effective_mlflow_registry_uri,
+            )
+            client.set_registered_model_alias(name=name, alias=alias, version=ver_str)
+            return {"updated": True, "name": name, "alias": alias, "version": ver_str}
+
+        try:
+            return await asyncio.to_thread(_set)
         except Exception as exc:
             return JSONResponse(
                 status_code=503,
