@@ -10,7 +10,8 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from mcp_stack.registry import sync_mcp_registry
+from mcp_stack.core.config import UpstreamServerConfig
+from mcp_stack.registry import sync_mcp_registry, sync_upstream_registry
 from mcp_stack.servers.mlflow_server import create_mlflow_server
 
 pytestmark = pytest.mark.unit
@@ -199,3 +200,76 @@ def test_registry_sync_dry_run_and_mlflow_versions(make_settings, tmp_path: Path
     assert refresh_calls[0]["mcp_server_access_headers"] == {
         "Authorization": "Bearer tok-claude-test"
     }
+
+
+def test_sync_upstream_registry_repairs_tags_and_aliases(make_settings) -> None:
+    settings = make_settings()
+    settings.gateway.upstream_servers = {
+        "printer": UpstreamServerConfig(
+            transport="http",
+            url="https://studio.example.invalid/mcp",
+            registry_name="io.github.slcc2c/printer",
+            governance="preview-before-print",
+        ),
+        "music-brain": UpstreamServerConfig(
+            transport="stdio",
+            command="echo",
+            registry_name="io.github.spencer-cook/music-brain-private",
+            governance="read-only-default",
+        ),
+        "tonverk-studio": UpstreamServerConfig(
+            transport="stdio",
+            command="echo",
+            registry_name="io.github.slcc2c/tonverk-studio",
+            governance="external-proxy",
+        ),
+    }
+
+    aliases_set: list[tuple[str, str, str]] = []
+    tags_set: list[tuple[str, str, str]] = []
+    registered: list[str] = []
+
+    class FakeTrackingClient:
+        @staticmethod
+        def search_mcp_servers(**_kw):
+            return [
+                types.SimpleNamespace(
+                    name="io.github.slcc2c/printer",
+                    aliases={"production": "1.20261015.323+92595bfe1"},
+                ),
+                types.SimpleNamespace(
+                    name="io.github.spencer-cook/music-brain-private",
+                    aliases={"observed-local": "0.1.2+private.abc"},
+                ),
+            ]
+
+    class FakeGenAI:
+        @staticmethod
+        def register_mcp_server(*, server_json, **_kw):
+            registered.append(server_json["name"])
+            return types.SimpleNamespace(version=server_json["version"])
+
+        @staticmethod
+        def set_mcp_server_alias(*, name: str, alias: str, version: str):
+            aliases_set.append((name, alias, version))
+
+        @staticmethod
+        def set_mcp_server_tag(*, name: str, key: str, value: str):
+            tags_set.append((name, key, value))
+
+    res = sync_upstream_registry(
+        settings, genai_module=FakeGenAI(), tracking_client=FakeTrackingClient()
+    )
+    assert res["printer"]["status"] == "updated_existing"
+    assert res["printer"]["version"] == "1.20261015.323+92595bfe1"
+    assert (
+        "io.github.spencer-cook/music-brain-private",
+        "production",
+        "0.1.2+private.abc",
+    ) in aliases_set
+    assert "io.github.slcc2c/tonverk-studio" in registered
+    assert (
+        "io.github.slcc2c/printer",
+        "gateway_route",
+        "http://127.0.0.1:8090/servers/printer/mcp",
+    ) in tags_set

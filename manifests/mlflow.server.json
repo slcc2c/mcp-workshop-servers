@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-mlflow",
   "title": "MCP Mlflow Server",
   "description": "MLflow 3.x Prompt Registry, LoggedModels, UC Model Registry, and Eval Datasets server",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "transport": {
         "type": "stdio"
       },

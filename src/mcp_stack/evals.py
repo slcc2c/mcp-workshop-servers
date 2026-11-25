@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import os
@@ -657,6 +658,15 @@ def run_golden_benchmark(
 
         @mlflow.trace(name="mcp_golden_tool_call", span_type="TOOL")
         def predict_fn(server: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            with contextlib.suppress(Exception):
+                mlflow.update_current_trace(
+                    user="golden-benchmark",
+                    tags={
+                        "mcp.server": str(server),
+                        "mcp.tool": str(tool),
+                        "mcp.profile": "benchmark",
+                    },
+                )
             return invoke_benchmark_tool(
                 settings,
                 workspace_dir=workspace,

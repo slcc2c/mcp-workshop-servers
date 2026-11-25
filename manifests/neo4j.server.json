@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-neo4j",
   "title": "MCP Neo4J Server",
   "description": "Neo4j graph database Cypher server with READ routing defaults",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "transport": {
         "type": "stdio"
       },

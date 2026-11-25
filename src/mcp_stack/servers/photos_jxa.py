@@ -14,7 +14,7 @@ from typing import Any, Literal, Protocol
 
 PhotosOperation = Literal["list_albums", "search_assets", "get_asset", "export_assets"]
 
-PHOTOS_JXA_SCRIPT = """
+PHOTOS_JXA_SCRIPT = r"""
 ObjC.import('Foundation');
 ObjC.import('stdlib');
 

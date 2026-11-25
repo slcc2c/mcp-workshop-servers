@@ -210,7 +210,13 @@ def sync_mcp_registry(
     alias_fn = getattr(genai_module, "set_mcp_server_alias", None)
     tag_fn = getattr(genai_module, "set_mcp_server_tag", None)
 
-    def _apply_alias_and_tags(slug_key: str, srv_name: str, srv_ver: str, has_rem: bool) -> dict:
+    def _apply_alias_and_tags(
+        slug_key: str,
+        srv_name: str,
+        srv_ver: str,
+        has_rem: bool,
+        gateway_route: str = "",
+    ) -> dict[str, Any]:
         meta: dict[str, Any] = {}
         if callable(alias_fn):
             try:
@@ -224,11 +230,13 @@ def sync_mcp_registry(
                 if slug_key == "gateway"
                 else ("profile" if slug_key.startswith("profile-") else "server")
             )
-            desired_tags = {
+            desired_tags: dict[str, str] = {
                 "scope": scope,
                 "governance": "read-only-default",
                 "transport": "streamable-http" if has_rem else "stdio",
             }
+            if gateway_route:
+                desired_tags["gateway_route"] = gateway_route
             applied_tags: dict[str, str] = {}
             for tk, tv in desired_tags.items():
                 try:
@@ -240,7 +248,15 @@ def sync_mcp_registry(
                 meta["tags"] = applied_tags
         return meta
 
+    base_http = f"http://{settings.gateway.host}:{settings.gateway.port}"
     for slug, payload in manifests.items():
+        if slug == "gateway":
+            gw_route = f"{base_http}/mcp"
+        elif slug.startswith("profile-"):
+            prof_name = slug.removeprefix("profile-")
+            gw_route = f"{base_http}/profiles/{prof_name}/mcp"
+        else:
+            gw_route = f"{base_http}/servers/{slug}/mcp"
         has_remotes = bool(payload.get("remotes"))
         register_kwargs: dict[str, Any] = {
             "server_json": payload,
@@ -257,7 +273,9 @@ def sync_mcp_registry(
                 "name": payload["name"],
                 "version": ver_str,
             }
-            entry_ok.update(_apply_alias_and_tags(slug, payload["name"], ver_str, has_remotes))
+            entry_ok.update(
+                _apply_alias_and_tags(slug, payload["name"], ver_str, has_remotes, gw_route)
+            )
             results[slug] = entry_ok
         except Exception as exc:
             err_msg = str(exc)
@@ -283,7 +301,9 @@ def sync_mcp_registry(
                     "version": payload["version"],
                 }
                 entry.update(
-                    _apply_alias_and_tags(slug, payload["name"], payload["version"], has_remotes)
+                    _apply_alias_and_tags(
+                        slug, payload["name"], payload["version"], has_remotes, gw_route
+                    )
                 )
                 if refresh_error is not None:
                     entry["refresh_error"] = refresh_error
@@ -295,9 +315,130 @@ def sync_mcp_registry(
                     "error": err_msg,
                 }
 
-    return {
+    upstream_results: dict[str, Any] = {}
+    if settings.gateway.upstream_servers:
+        upstream_results = sync_upstream_registry(settings, genai_module=genai_module)
+
+    out_payload: dict[str, Any] = {
         "dry_run": False,
         "tracking_uri": settings.mlflow.tracking_uri,
         "manifest_files": [str(p) for p in written],
         "results": results,
     }
+    if upstream_results:
+        out_payload["upstream_results"] = upstream_results
+    return out_payload
+
+
+def sync_upstream_registry(
+    settings: MCPStackSettings,
+    *,
+    genai_module: Any = None,
+    tracking_client: Any = None,
+) -> dict[str, Any]:
+    """Repair or register federated external MCP servers with tags, gateway_route, & @production."""
+    if not settings.gateway.upstream_servers:
+        return {}
+
+    if genai_module is None:
+        import mlflow
+        import mlflow.genai
+
+        mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+        genai_module = mlflow.genai
+    if tracking_client is None:
+        import mlflow
+
+        tracking_client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+
+    register_fn = getattr(genai_module, "register_mcp_server", None)
+    alias_fn = getattr(genai_module, "set_mcp_server_alias", None)
+    tag_fn = getattr(genai_module, "set_mcp_server_tag", None)
+    search_vers_fn = getattr(genai_module, "search_mcp_server_versions", None)
+
+    base_http = f"http://{settings.gateway.host}:{settings.gateway.port}"
+    existing_map: dict[str, Any] = {}
+    try:
+        for srv in tracking_client.search_mcp_servers(max_results=100):
+            existing_map[str(srv.name)] = srv
+    except Exception:
+        pass
+
+    results: dict[str, Any] = {}
+    for raw_name, cfg in settings.gateway.upstream_servers.items():
+        slug = raw_name.strip().replace("_", "-").lower()
+        reg_name = cfg.registry_name or f"io.github.slcc2c/{slug}"
+        route = f"/servers/{slug}/mcp"
+        full_gw_url = f"{base_http}{route}"
+        entry: dict[str, Any] = {"name": reg_name, "gateway_route": full_gw_url}
+
+        existing = existing_map.get(reg_name)
+        target_ver = __version__
+        if existing is not None:
+            entry["status"] = "updated_existing"
+            aliases = dict(getattr(existing, "aliases", None) or {})
+            if "production" in aliases:
+                target_ver = str(aliases["production"])
+            elif aliases:
+                target_ver = str(next(iter(aliases.values())))
+            elif callable(search_vers_fn):
+                try:
+                    vers = search_vers_fn(reg_name)
+                    if vers:
+                        target_ver = str(getattr(vers[0], "version", __version__))
+                except Exception:
+                    pass
+        elif callable(register_fn):
+            remote_url = cfg.url if (cfg.transport == "http" and cfg.url) else full_gw_url
+            payload = {
+                "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+                "name": reg_name,
+                "title": slug.replace("-", " ").title(),
+                "description": cfg.description or f"Federated MCP server '{slug}'",
+                "version": __version__,
+                "remotes": [{"type": "streamable-http", "url": remote_url}],
+            }
+            try:
+                ver_obj = register_fn(
+                    server_json=payload,
+                    status="active",
+                    create_access_endpoints_from_remotes=False,
+                )
+                target_ver = str(getattr(ver_obj, "version", __version__))
+                entry["status"] = "registered"
+            except Exception as exc:
+                entry["status"] = "error"
+                entry["error"] = str(exc)[:200]
+                results[slug] = entry
+                continue
+        else:
+            entry["status"] = "skipped"
+            results[slug] = entry
+            continue
+
+        entry["version"] = target_ver
+        if callable(alias_fn):
+            try:
+                alias_fn(name=reg_name, alias="production", version=target_ver)
+                entry["alias"] = "production"
+            except Exception as exc:
+                entry["alias_error"] = str(exc)[:160]
+
+        if callable(tag_fn):
+            desired = {
+                "scope": "external",
+                "governance": cfg.governance or "external-proxy",
+                "transport": "streamable-http" if cfg.transport == "http" else "stdio-proxy",
+                "gateway_route": full_gw_url,
+            }
+            applied: dict[str, str] = {}
+            for k, v in desired.items():
+                try:
+                    tag_fn(name=reg_name, key=k, value=v)
+                    applied[k] = v
+                except Exception:
+                    pass
+            entry["tags"] = applied
+        results[slug] = entry
+
+    return results
