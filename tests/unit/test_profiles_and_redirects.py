@@ -56,7 +56,8 @@ async def test_zero_307_redirects_and_curated_profile_tool_counts(
         ) as core_cli:
             core_tools = {t.name for t in await core_cli.list_tools()}
             assert "uc_list_catalogs" in core_tools
-            assert "mlflow_list_experiments" in core_tools
+            assert "mlflow_search_logged_models" in core_tools
+            assert "mlflow_list_experiments" not in core_tools
             assert "memory_store" in core_tools
             assert "postgres_query" not in core_tools
             assert "k8s_list_pods" not in core_tools

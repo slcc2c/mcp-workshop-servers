@@ -1,9 +1,10 @@
-"""Fail-open MLflow 3.x tracing + Prometheus instrumentation middleware for FastMCP."""
+"""Fail-open MLflow 3.x tracing + LoggedModel versioning + Prometheus metrics for FastMCP."""
 
 from __future__ import annotations
 
 import os
 import re
+import subprocess
 import time
 from collections.abc import Callable
 from typing import Any
@@ -12,6 +13,12 @@ import mcp.types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.tool import ToolResult
 
+from mcp_stack import __version__
+from mcp_stack.core.auth import (
+    caller_client_id_var,
+    caller_profile_var,
+    caller_session_id_var,
+)
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.core.logging import get_logger
 from mcp_stack.core.metrics import (
@@ -27,7 +34,83 @@ _SENSITIVE_KEY_RE = re.compile(
     r"(token|secret|password|passwd|authorization|api_key|apikey|credential|private_key)",
     re.IGNORECASE,
 )
+_POLICY_REFUSAL_MARKERS = (
+    "disabled by policy",
+    "read-only",
+    "escapes allowed",
+    "not allowed to access",
+    "allow_mutations",
+    "allow_execution",
+    "resolves outside allowed directories",
+    "targets blocked path",
+    "permission denied",
+)
 _MAX_STR_LEN = 4000
+_GIT_SHA_CACHE: str | None = None
+_LOGGED_MODEL_CACHE: dict[tuple[str, str, str], str] = {}
+
+
+def _short_git_sha() -> str:
+    global _GIT_SHA_CACHE
+    if _GIT_SHA_CACHE is not None:
+        return _GIT_SHA_CACHE
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        ).strip()
+        _GIT_SHA_CACHE = sha or "nogit"
+    except Exception:
+        _GIT_SHA_CACHE = "nogit"
+    return _GIT_SHA_CACHE
+
+
+def get_or_create_gateway_logged_model(
+    settings: MCPStackSettings,
+    *,
+    experiment_name: str | None = None,
+) -> str | None:
+    """Resolve or lazily create an MLflow 3.x LoggedModel for the gateway version + git SHA."""
+    exp_target = experiment_name or settings.mlflow.experiment_name
+    git_sha = _short_git_sha()
+    # MLflow rejects '/', ':', '.', '%', quotes in LoggedModel names.
+    safe_version = re.sub(r"[/.:%'\"]+", "-", __version__).strip("-") or "0"
+    safe_sha = re.sub(r"[/.:%'\"]+", "-", git_sha).strip("-") or "nogit"
+    model_name = f"mcp-workshop-gateway-{safe_version}-{safe_sha}"
+    cache_key = (settings.mlflow.tracking_uri, exp_target, model_name)
+    if cache_key in _LOGGED_MODEL_CACHE:
+        return _LOGGED_MODEL_CACHE[cache_key]
+
+    try:
+        import mlflow
+
+        mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+        exp = mlflow.set_experiment(exp_target)
+        client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+        existing = client.search_logged_models(
+            experiment_ids=[exp.experiment_id],
+            filter_string=f"name = '{model_name}'",
+            max_results=1,
+        )
+        if existing:
+            model_id = str(existing[0].model_id)
+        else:
+            created = mlflow.create_external_model(
+                name=model_name,
+                experiment_id=exp.experiment_id,
+                tags={
+                    "component": "mcp-workshop-gateway",
+                    "version": __version__,
+                    "git_sha": git_sha,
+                },
+            )
+            model_id = str(created.model_id)
+        _LOGGED_MODEL_CACHE[cache_key] = model_id
+        return model_id
+    except Exception:
+        return None
 
 
 def redact_payload(value: Any, *, depth: int = 0) -> Any:
@@ -116,11 +199,12 @@ class MLflowTracingMiddleware(Middleware):
 
             span_ctx = None
             span = None
+            mlflow_mod: Any = None
             try:
-                mlflow = self._configure_mlflow()
+                mlflow_mod = self._configure_mlflow()
                 from mlflow.entities import SpanType
 
-                span_ctx = mlflow.start_span(
+                span_ctx = mlflow_mod.start_span(
                     name=f"{self.server_name}.{tool_name}",
                     span_type=SpanType.TOOL,
                 )
@@ -132,6 +216,22 @@ class MLflowTracingMiddleware(Middleware):
                         "mcp.tool": tool_name,
                     }
                 )
+                model_id = get_or_create_gateway_logged_model(self._settings)
+                update_fn = getattr(mlflow_mod, "update_current_trace", None)
+                if callable(update_fn):
+                    update_kwargs: dict[str, Any] = {
+                        "user": caller_client_id_var.get() or "anonymous",
+                        "tags": {
+                            "mcp.server": self.server_name,
+                            "mcp.tool": tool_name,
+                            "mcp.profile": caller_profile_var.get() or "direct",
+                        },
+                    }
+                    if session_id := caller_session_id_var.get():
+                        update_kwargs["session_id"] = session_id
+                    if model_id:
+                        update_kwargs["model_id"] = model_id
+                    update_fn(**update_kwargs)
             except Exception as exc:
                 self._trip_circuit("span_start", exc)
                 span_ctx = None
@@ -143,8 +243,16 @@ class MLflowTracingMiddleware(Middleware):
                 status = "error"
                 if span is not None and span_ctx is not None:
                     try:
+                        err_msg = str(tool_exc)
+                        is_refusal = any(
+                            marker in err_msg.lower() for marker in _POLICY_REFUSAL_MARKERS
+                        )
                         span.set_attribute("error.type", type(tool_exc).__name__)
-                        span.set_attribute("error.message", str(tool_exc)[:500])
+                        span.set_attribute("error.message", err_msg[:500])
+                        update_fn = getattr(mlflow_mod, "update_current_trace", None)
+                        if callable(update_fn):
+                            refusal_flag = "true" if is_refusal else "false"
+                            update_fn(tags={"mcp.policy_refusal": refusal_flag})
                         span_ctx.__exit__(type(tool_exc), tool_exc, tool_exc.__traceback__)
                     except Exception as ml_exc:
                         self._trip_circuit("span_end_error", ml_exc)
@@ -157,6 +265,9 @@ class MLflowTracingMiddleware(Middleware):
                         for block in (getattr(result, "content", None) or [])
                     ]
                     span.set_outputs(redact_payload({"content": preview}))
+                    update_fn = getattr(mlflow_mod, "update_current_trace", None)
+                    if callable(update_fn):
+                        update_fn(tags={"mcp.policy_refusal": "false"})
                     span_ctx.__exit__(None, None, None)
                 except Exception as ml_exc:
                     self._trip_circuit("span_end", ml_exc)

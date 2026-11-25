@@ -9,10 +9,20 @@ import httpx
 import pytest
 from fastmcp import Client, FastMCP
 
-from mcp_stack.core.auth import GatewayAuthMiddleware, caller_uc_token_var
+from mcp_stack.core.auth import (
+    GatewayAuthMiddleware,
+    caller_profile_var,
+    caller_session_id_var,
+    caller_uc_token_var,
+)
 from mcp_stack.core.config import ClientPolicy
 from mcp_stack.core.metrics import mcp_mlflow_trace_failures_total, mcp_tool_calls_total
-from mcp_stack.core.tracing import MLflowTracingMiddleware, redact_payload
+from mcp_stack.core.tracing import (
+    _LOGGED_MODEL_CACHE,
+    MLflowTracingMiddleware,
+    get_or_create_gateway_logged_model,
+    redact_payload,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -48,7 +58,9 @@ async def test_gateway_auth_middleware_enforces_tokens_allowlist_and_rate_limit(
 
     async def inner_app(scope, receive, send) -> None:
         token = caller_uc_token_var.get()
-        body = f'{{"ok":true,"uc":"{token or ""}"}}'.encode()
+        sess = caller_session_id_var.get() or ""
+        prof = caller_profile_var.get() or ""
+        body = f'{{"ok":true,"uc":"{token or ""}","sess":"{sess}","prof":"{prof}"}}'.encode()
         await send(
             {
                 "type": "http.response.start",
@@ -78,13 +90,19 @@ async def test_gateway_auth_middleware_enforces_tokens_allowlist_and_rate_limit(
                 headers={"Authorization": "Bearer tok-limited"},
             )
         ).status_code == 403
-        # Allowed server + OBO X-UC-Token -> 200
+        # Allowed server + OBO X-UC-Token + Mcp-Session-Id -> 200
         r1 = await client.post(
             "/servers/memory/mcp",
-            headers={"Authorization": "Bearer tok-limited", "X-UC-Token": "uc-obo-123"},
+            headers={
+                "Authorization": "Bearer tok-limited",
+                "X-UC-Token": "uc-obo-123",
+                "Mcp-Session-Id": "sess-xyz",
+            },
         )
         assert r1.status_code == 200
         assert r1.json()["uc"] == "uc-obo-123"
+        assert r1.json()["sess"] == "sess-xyz"
+        assert r1.json()["prof"] == "server:memory"
         # Second allowed call -> 200
         assert (
             await client.post(
@@ -150,3 +168,40 @@ async def test_mlflow_tracing_middleware_fail_open_circuit_breaker(
         mcp_tool_calls_total.labels(server="test_srv", tool="echo", status="success")._value.get()
         == before_calls + 2
     )
+
+
+def test_logged_model_resolution_is_idempotent_and_fail_open(
+    make_settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _LOGGED_MODEL_CACHE.clear()
+    settings = make_settings()
+    settings.mlflow.experiment_name = "logged-model-unit"
+
+    created_calls: list[dict] = []
+    fake_mlflow = types.ModuleType("mlflow")
+    fake_mlflow.set_tracking_uri = lambda _u: None  # type: ignore[attr-defined]
+    fake_mlflow.set_experiment = lambda _n: types.SimpleNamespace(experiment_id="52")  # type: ignore[attr-defined]
+
+    class FakeClient:
+        def __init__(self, tracking_uri: str) -> None:
+            self.tracking_uri = tracking_uri
+
+        def search_logged_models(self, **_kwargs):
+            return []
+
+    fake_mlflow.MlflowClient = FakeClient  # type: ignore[attr-defined]
+
+    def fake_create_external_model(**kwargs):
+        created_calls.append(kwargs)
+        return types.SimpleNamespace(model_id="m-unit-001")
+
+    fake_mlflow.create_external_model = fake_create_external_model  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+
+    first = get_or_create_gateway_logged_model(settings)
+    second = get_or_create_gateway_logged_model(settings)
+    assert first == "m-unit-001"
+    assert second == "m-unit-001"
+    assert len(created_calls) == 1
+    assert not any(ch in created_calls[0]["name"] for ch in "/:.%'\"")
+    _LOGGED_MODEL_CACHE.clear()

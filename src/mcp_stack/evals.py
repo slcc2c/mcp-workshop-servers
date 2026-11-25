@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp_stack.core.config import MCPStackSettings
+from mcp_stack.core.tracing import get_or_create_gateway_logged_model
 
 # Configure MLflow client env vars BEFORE importing mlflow so session pools match worker counts.
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
@@ -231,6 +233,40 @@ def _build_ollama_clarity_scorer(judge_model: str) -> Any:
     return tool_response_clarity
 
 
+def normalize_judge_model_uri(judge_model: str | None = None) -> str:
+    """Normalize local Ollama / cloud judge URIs for LiteLLM + MLflow make_judge()."""
+    raw = (
+        judge_model
+        or os.getenv("MCP_EVAL_OLLAMA_MODEL")
+        or "ollama:/qwen3.8:27b"
+    ).strip()
+    if raw.startswith("ollama:/"):
+        return "ollama_chat:/" + raw.removeprefix("ollama:/").lstrip("/")
+    if raw.startswith("ollama:"):
+        return "ollama_chat:/" + raw.removeprefix("ollama:").lstrip("/")
+    return raw
+
+
+def build_native_clarity_judge(judge_model: str | None = None) -> Any:
+    """Build a native MLflow 3.x LLM judge using mlflow.genai.judges.make_judge()."""
+    from mlflow.genai.judges import make_judge
+
+    ollama_url = os.getenv("MCP_EVAL_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    os.environ.setdefault("OLLAMA_API_BASE", ollama_url)
+    normalized = normalize_judge_model_uri(judge_model)
+    return make_judge(
+        name="tool_response_clarity_judge",
+        instructions=(
+            "Evaluate the MCP tool execution trace in {{ trace }}. "
+            "Return 'yes' if outputs or intentional read-only/sandbox policy refusals are "
+            "structured, concise, actionable, and free of exposed secrets or Python tracebacks; "
+            "otherwise return 'no'."
+        ),
+        model=normalized,
+        feedback_value_type=Literal["yes", "no"],
+    )
+
+
 def build_trace_scorers(
     *,
     latency_sla_ms: float = 5000.0,
@@ -353,21 +389,12 @@ def build_trace_scorers(
             or os.getenv("MCP_EVAL_OLLAMA_MODEL")
             or "ollama:/qwen3.8:27b"
         )
-        if effective_model.startswith("ollama:/"):
-            scorers.append(_build_ollama_clarity_scorer(effective_model))
+        has_litellm = importlib.util.find_spec("litellm") is not None
+        is_ollama = effective_model.startswith(("ollama:/", "ollama:", "ollama_chat:/"))
+        if has_litellm or not is_ollama:
+            scorers.append(build_native_clarity_judge(effective_model))
         else:
-            from mlflow.genai.scorers import Guidelines
-
-            scorers.append(
-                Guidelines(
-                    name="tool_response_clarity",
-                    guidelines=(
-                        "Tool calls should produce structured, concise JSON/text results "
-                        "and actionable error messages without exposing secrets."
-                    ),
-                    model=effective_model,
-                )
-            )
+            scorers.append(_build_ollama_clarity_scorer(effective_model))
 
     return scorers
 
@@ -419,27 +446,78 @@ def register_experiment_scorers(
     settings: MCPStackSettings,
     *,
     experiment_name: str | None = None,
+    judge_model: str | None = None,
+    online_sample_rate: float = 1.0,
 ) -> dict[str, Any]:
-    """Register built-in and deterministic scorers on the target MLflow experiment."""
+    """Register built-in online guards, native make_judge(), and deterministic scorers."""
     import mlflow
     from mlflow.exceptions import MlflowException
     from mlflow.genai import list_scorers
-    from mlflow.genai.scorers import RegexMatch
+    from mlflow.genai.scorers import RegexMatch, ScorerSamplingConfig
 
     exp_target = experiment_name or settings.mlflow.experiment_name
     mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
     exp = mlflow.set_experiment(exp_target)
 
-    existing_names = {s.name for s in list_scorers(experiment_id=exp.experiment_id)}
+    existing_map = {s.name: s for s in list_scorers(experiment_id=exp.experiment_id)}
     no_traceback_guard = RegexMatch(
         name="no_traceback_guard",
         pattern=r"^(?![\s\S]*Traceback \(most recent call last\):)[\s\S]*$",
     )
-    candidates: list[Any] = [no_traceback_guard, *build_trace_scorers()]
+    no_secret_leak_guard = RegexMatch(
+        name="no_secret_leak_guard",
+        pattern=(
+            r"^(?![\s\S]*(?:ghp_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9_]{20,}|"
+            r"github_pat_[A-Za-z0-9_]{16,}|sk-[A-Za-z0-9\-_]{20,}|"
+            r"Bearer\s+[A-Za-z0-9._\-]{16,}))[\s\S]*$"
+        ),
+    )
+    builtin_guards = [no_traceback_guard, no_secret_leak_guard]
+    clarity_judge = build_native_clarity_judge(judge_model)
+    custom_scorers = build_trace_scorers()
 
-    results: dict[str, dict[str, str]] = {}
-    for item in candidates:
-        if item.name in existing_names:
+    results: dict[str, dict[str, Any]] = {}
+
+    for guard in builtin_guards:
+        reg_status = "already_registered"
+        target_scorer = existing_map.get(guard.name)
+        if target_scorer is None:
+            try:
+                target_scorer = guard.register(name=guard.name, experiment_id=exp.experiment_id)
+                reg_status = "registered"
+            except Exception as exc:
+                results[guard.name] = {"status": "error", "detail": str(exc)[:250]}
+                continue
+        entry: dict[str, Any] = {"status": reg_status}
+        if online_sample_rate > 0:
+            try:
+                started = target_scorer.start(
+                    name=guard.name,
+                    experiment_id=exp.experiment_id,
+                    sampling_config=ScorerSamplingConfig(sample_rate=online_sample_rate),
+                )
+                entry["online_sampling_rate"] = getattr(started, "sample_rate", online_sample_rate)
+            except Exception as exc:
+                msg = str(exc)
+                if "gateway model" in msg.lower():
+                    entry["online_mode"] = "unsupported_without_gateway_model"
+                    entry["online_detail"] = msg[:200]
+                else:
+                    entry["online_error"] = msg[:200]
+        results[guard.name] = entry
+
+    # Register native LLM judge on-demand (sample_rate=None; no automatic background LLM calls)
+    if clarity_judge.name in existing_map:
+        results[clarity_judge.name] = {"status": "already_registered", "mode": "on_demand"}
+    else:
+        try:
+            clarity_judge.register(name=clarity_judge.name, experiment_id=exp.experiment_id)
+            results[clarity_judge.name] = {"status": "registered", "mode": "on_demand"}
+        except Exception as exc:
+            results[clarity_judge.name] = {"status": "error", "detail": str(exc)[:250]}
+
+    for item in custom_scorers:
+        if item.name in existing_map:
             results[item.name] = {"status": "already_registered"}
             continue
         try:
@@ -593,7 +671,15 @@ def run_golden_benchmark(
             with_llm_judge=with_llm_judge,
             judge_model=judge_model,
         )
-        result = mlflow.genai.evaluate(data=dataset, predict_fn=predict_fn, scorers=scorers)
+        model_id = get_or_create_gateway_logged_model(settings, experiment_name=exp_target)
+        eval_kwargs: dict[str, Any] = {
+            "data": dataset,
+            "predict_fn": predict_fn,
+            "scorers": scorers,
+        }
+        if model_id:
+            eval_kwargs["model_id"] = model_id
+        result = mlflow.genai.evaluate(**eval_kwargs)
 
     return {
         "status": "completed",
@@ -601,6 +687,7 @@ def run_golden_benchmark(
         "dataset_id": sync_info.get("dataset_id"),
         "experiment": exp_target,
         "experiment_id": exp_id,
+        "model_id": model_id,
         "run_id": getattr(result, "run_id", None),
         "record_count": sync_info.get("record_count"),
         "metrics": dict(getattr(result, "metrics", {}) or {}),

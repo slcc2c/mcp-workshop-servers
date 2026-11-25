@@ -14,10 +14,10 @@ A modern Python 3.12 (`uv`) Model Context Protocol ecosystem built on **FastMCP 
   - Zero-`307` path normalization on `/mcp`, `/profiles/<name>/mcp`, and `/servers/<slug>/mcp`
   - `/ui` self-contained interactive Gateway Dashboard + `/health`, `/ready`, `/api/v1/{servers,profiles,tools,watchdog,traces}`, `/api/v1/actions/*`, and `/metrics` (Prometheus)
   - Pure ASGI Bearer auth (auto-enforced on non-loopback binds), client server allowlists, rate limiting, and `X-UC-Token` on-behalf-of passthrough
-  - Fail-open MLflow 3.x `SpanType.TOOL` tracing middleware with sensitive-key redaction and a 60s circuit breaker
+  - Fail-open MLflow 3.x `SpanType.TOOL` tracing middleware with native `update_current_trace()` context (`user`, `session_id`, `mcp.policy_refusal`), `LoggedModel` git-commit versioning, sensitive-key redaction, and a 60s circuit breaker
 - **Modern Data & AI Governance Servers**:
   - **`unity-catalog`**: OSS Unity Catalog REST API 2.1 (`localhost:8082`) + Databricks UC switch (`UC_MODE=databricks` with Databricks SDK Files API support for `/Volumes/...`), `unitycatalog-ai` function execution with schema allowlists (`UC_FUNCTION_ALLOWLIST`), dynamic UC function tools (`uc_fn_*`), UC Volume creation & mapping (`UC_VOLUME_LOCAL_PREFIX_MAP`), MLflow lineage cross-linking (`uc_get_model_lineage`), and opt-in mutations (`UC_ALLOW_MUTATIONS=true`).
-  - **`mlflow`**: Complementary MLflow 3.x tools (experiments, runs, `mlflow_compare_runs`, `LoggedModel`s, Prompt Registry + `mlflow_get_prompt_versions`, UC Model Registry aliases + metric-gated `mlflow_promote_model_alias`, Eval Datasets) + resilient proxy to `mlflow[mcp]` (`localhost:9012/mcp`).
+  - **`mlflow`**: Zero-overlap complementary MLflow 3.x tools (`LoggedModel`s, Prompt Registry + `mlflow_get_prompt_versions`, UC Model Registry aliases + metric-gated `mlflow_promote_model_alias`, Eval Datasets, `mlflow_compare_runs`) paired with official `mlflow[mcp]` (`localhost:9012/mcp`).
 - **Ported Tier-1, Tier-2 & Host Servers**:
   - **`memory`**: SQLite + FTS5 persistent knowledge graph with `data/memory.json` auto-import and bidirectional UC Volume sync (`memory_export` + `memory_import`).
   - **`filesystem`**: Strict `Path.resolve().is_relative_to()` sandboxing and symlink-escape protection.
@@ -29,8 +29,8 @@ A modern Python 3.12 (`uv`) Model Context Protocol ecosystem built on **FastMCP 
 ## Quick Start
 
 ```bash
-# 1. Install Python 3.12 environment with uv
-uv sync --extra dev
+# 1. Install Python 3.12 environment with uv (add --extra evals for native MLflow make_judge + litellm)
+uv sync --extra dev --extra evals
 
 # 2. Configure environment
 cp .env.example .env
@@ -83,7 +83,7 @@ uv run mcp-stack eval run --experiment mcp-workshop-servers --limit 20
 ```
 
 > [!NOTE]
-> Visit `http://127.0.0.1:8090/ui` when the gateway is running for the interactive Web Dashboard (status cards, profile tool counts & copyable client snippets, searchable Tool Browser + live **Interactive Tool Playground**, Trace Span Drilldown, watchdog history, and Bearer-protected operational & benchmark actions).
+> Visit `http://127.0.0.1:8090/ui` when the gateway is running for the interactive Web Dashboard (status cards, profile tool counts & copyable client snippets, searchable Tool Browser + live **Interactive Tool Playground**, Trace Span Drilldown with native MLflow human feedback/expectations/tags & golden-dataset promotion, watchdog history, and Bearer-protected operational & benchmark actions).
 
 > [!NOTE]
 > When `MCP_AUTH_ENABLED=true`, generated configs in [`.mcp.json`](file:///Users/spencer/repos/mcp-server/.mcp.json), [`cursor-mcp-config.json`](file:///Users/spencer/repos/mcp-server/cursor-mcp-config.json), and [`config/codex-mcp-snippet.toml`](file:///Users/spencer/repos/mcp-server/config/codex-mcp-snippet.toml) reference env-var Bearer tokens (`${MCP_CLAUDE_AUTH_TOKEN}`, `${env:MCP_CURSOR_AUTH_TOKEN}`, `MCP_CODEX_AUTH_TOKEN`) with zero plaintext secrets stored on disk.

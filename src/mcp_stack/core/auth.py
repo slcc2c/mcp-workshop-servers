@@ -20,6 +20,8 @@ caller_client_id_var: ContextVar[str | None] = ContextVar("caller_client_id", de
 caller_client_policy_var: ContextVar[ClientPolicy | None] = ContextVar(
     "caller_client_policy", default=None
 )
+caller_session_id_var: ContextVar[str | None] = ContextVar("caller_session_id", default=None)
+caller_profile_var: ContextVar[str | None] = ContextVar("caller_profile", default=None)
 
 _EXEMPT_PATHS = frozenset({"/", "/health", "/ready", "/metrics", "/ui"})
 _SERVER_PATH_RE = re.compile(r"^/servers/([^/]+)/")
@@ -167,17 +169,30 @@ class GatewayAuthMiddleware:
         ):
             obo_token = bearer_token
 
+        session_id = headers.get("mcp-session-id", "").strip() or None
+        route_profile: str | None = None
+        if prof_m := _PROFILE_PATH_RE.match(path):
+            route_profile = prof_m.group(1)
+        elif srv_m := _SERVER_PATH_RE.match(path):
+            route_profile = f"server:{srv_m.group(1)}"
+        elif path.startswith("/mcp"):
+            route_profile = "full"
+
         uc_tok = caller_uc_token_var.set(obo_token)
         client_tok = caller_client_id_var.set(
             client_policy.client_id if client_policy else "anonymous"
         )
         policy_tok = caller_client_policy_var.set(client_policy)
+        session_tok = caller_session_id_var.set(session_id)
+        profile_tok = caller_profile_var.set(route_profile)
         try:
             await self.app(scope, receive, send)
         finally:
             caller_uc_token_var.reset(uc_tok)
             caller_client_id_var.reset(client_tok)
             caller_client_policy_var.reset(policy_tok)
+            caller_session_id_var.reset(session_tok)
+            caller_profile_var.reset(profile_tok)
 
     def _check_rate_limit(self, policy: ClientPolicy) -> bool:
         now = self._clock()

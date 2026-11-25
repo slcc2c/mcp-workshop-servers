@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import types
 from pathlib import Path
@@ -9,9 +10,11 @@ from pathlib import Path
 import httpx
 
 from mcp_stack.evals import (
+    build_native_clarity_judge,
     build_trace_scorers,
     invoke_benchmark_tool,
     is_expected_policy_refusal,
+    normalize_judge_model_uri,
 )
 from mcp_stack.service import rotate_log_file, rotate_service_logs
 
@@ -149,6 +152,7 @@ def test_ollama_judge_scorer_uses_local_chat_api(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
     scorers = {
         s.name: s
         for s in build_trace_scorers(
@@ -199,3 +203,12 @@ def test_invoke_benchmark_tool_runs_ok_and_policy_refusal(make_settings, tmp_pat
     )
     assert refusal["ok"] is False
     assert refusal["policy_refusal"] is True
+
+
+def test_native_judge_model_normalization_and_make_judge() -> None:
+    assert normalize_judge_model_uri("ollama:/qwen3.8:27b") == "ollama_chat:/qwen3.8:27b"
+    assert normalize_judge_model_uri("openai:/gpt-4o-mini") == "openai:/gpt-4o-mini"
+
+    judge = build_native_clarity_judge("ollama:/qwen3.8:27b")
+    assert judge.name == "tool_response_clarity_judge"
+    assert getattr(judge, "model", "") == "ollama_chat:/qwen3.8:27b"

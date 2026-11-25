@@ -40,6 +40,9 @@ databricks = [
   "databricks-sdk>=0.40",
   "unitycatalog-ai[databricks]>=0.3",
 ]
+evals = [
+  "litellm>=1.60",
+]
 dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.25",

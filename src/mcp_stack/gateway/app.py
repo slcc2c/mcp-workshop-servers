@@ -24,6 +24,7 @@ from mcp_stack import __version__
 from mcp_stack.client_configs import generate_client_configs
 from mcp_stack.core.auth import (
     GatewayAuthMiddleware,
+    caller_client_id_var,
     caller_client_policy_var,
     is_server_allowed,
 )
@@ -32,10 +33,12 @@ from mcp_stack.core.logging import get_logger
 from mcp_stack.core.metrics import render_metrics
 from mcp_stack.evals import (
     _POLICY_REFUSAL_MARKERS,
+    GOLDEN_DATASET_NAME,
     _trace_duration_ms,
     is_expected_policy_refusal,
     run_golden_benchmark,
     run_trace_evaluation,
+    sync_golden_dataset,
 )
 from mcp_stack.gateway.dashboard import render_dashboard_html
 from mcp_stack.servers.docker_server import create_docker_server
@@ -618,21 +621,37 @@ def build_gateway_app(
             assessments_out: list[dict[str, Any]] = []
             for item in getattr(info, "assessments", None) or []:
                 feedback = getattr(item, "feedback", None)
-                val = getattr(feedback, "value", None) if feedback else getattr(item, "value", None)
+                expectation = getattr(item, "expectation", None)
+                if feedback is not None:
+                    kind = "feedback"
+                    val = getattr(feedback, "value", None)
+                elif expectation is not None:
+                    kind = "expectation"
+                    val = getattr(expectation, "value", None)
+                else:
+                    kind = "assessment"
+                    val = getattr(item, "value", None)
                 assessments_out.append(
                     {
+                        "kind": kind,
                         "name": getattr(item, "name", None),
                         "value": _safe_json(val),
                         "rationale": getattr(item, "rationale", None),
                     }
                 )
 
+            tags = dict(getattr(info, "tags", None) or {})
+            meta = dict(getattr(info, "trace_metadata", None) or {})
             return {
                 "traceId": getattr(info, "trace_id", None) or trace_id,
                 "state": str(getattr(info, "state", "")),
                 "policyRefusal": is_expected_policy_refusal(trace),
                 "durationMs": round(_trace_duration_ms(trace), 2),
                 "timestampMs": getattr(info, "timestamp_ms", None),
+                "user": meta.get("mlflow.trace.user"),
+                "sessionId": meta.get("mlflow.trace.session"),
+                "modelId": meta.get("mlflow.modelId") or getattr(info, "model_id", None),
+                "tags": _safe_json(tags),
                 "spans": spans_out,
                 "assessments": assessments_out,
             }
@@ -647,6 +666,210 @@ def build_gateway_app(
             return JSONResponse(
                 status_code=status_code,
                 content={"error": {"code": code, "message": msg}},
+            )
+
+    @app.post("/api/v1/traces/{trace_id}/feedback", response_model=None)
+    async def trace_feedback_api(
+        trace_id: str,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        if not isinstance(payload, dict) or "value" not in payload:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_REQUEST", "message": "Provide 'value'"}},
+            )
+        name = str(payload.get("name") or "human_quality").strip() or "human_quality"
+        value = payload["value"]
+        rationale = (
+            str(payload["rationale"]).strip()
+            if payload.get("rationale") is not None
+            else None
+        )
+        caller_id = caller_client_id_var.get() or "dashboard"
+
+        def _log() -> dict[str, Any]:
+            import mlflow
+            from mlflow.entities.assessment_source import AssessmentSource, AssessmentSourceType
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            assessment = mlflow.log_feedback(
+                trace_id=trace_id,
+                name=name,
+                value=value,
+                rationale=rationale or None,
+                source=AssessmentSource(
+                    source_type=AssessmentSourceType.HUMAN,
+                    source_id=caller_id,
+                ),
+            )
+            return {
+                "logged": True,
+                "traceId": trace_id,
+                "assessmentId": getattr(assessment, "assessment_id", None),
+                "name": name,
+                "value": value,
+            }
+
+        try:
+            return await asyncio.to_thread(_log)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
+            )
+
+    @app.post("/api/v1/traces/{trace_id}/expectation", response_model=None)
+    async def trace_expectation_api(
+        trace_id: str,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        if not isinstance(payload, dict) or "value" not in payload:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_REQUEST", "message": "Provide 'value'"}},
+            )
+        name = str(payload.get("name") or "expected_outcome").strip() or "expected_outcome"
+        value = payload["value"]
+        caller_id = caller_client_id_var.get() or "dashboard"
+
+        def _log() -> dict[str, Any]:
+            import mlflow
+            from mlflow.entities.assessment_source import AssessmentSource, AssessmentSourceType
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            assessment = mlflow.log_expectation(
+                trace_id=trace_id,
+                name=name,
+                value=value,
+                source=AssessmentSource(
+                    source_type=AssessmentSourceType.HUMAN,
+                    source_id=caller_id,
+                ),
+            )
+            return {
+                "logged": True,
+                "traceId": trace_id,
+                "assessmentId": getattr(assessment, "assessment_id", None),
+                "name": name,
+                "value": value,
+            }
+
+        try:
+            return await asyncio.to_thread(_log)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
+            )
+
+    @app.post("/api/v1/traces/{trace_id}/tag", response_model=None)
+    async def trace_tag_api(
+        trace_id: str,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        key = str((payload or {}).get("key") or "").strip() if isinstance(payload, dict) else ""
+        val = str((payload or {}).get("value") or "").strip() if isinstance(payload, dict) else ""
+        if not key:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_REQUEST", "message": "Provide 'key'"}},
+            )
+
+        def _tag() -> dict[str, Any]:
+            import mlflow
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            mlflow.set_trace_tag(trace_id=trace_id, key=key, value=val)
+            return {"tagged": True, "traceId": trace_id, "key": key, "value": val}
+
+        try:
+            return await asyncio.to_thread(_tag)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
+            )
+
+    @app.post("/api/v1/traces/{trace_id}/promote-to-dataset", response_model=None)
+    async def trace_promote_to_dataset_api(
+        trace_id: str,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        body = payload if isinstance(payload, dict) else {}
+        dataset_name = str(body.get("dataset_name") or GOLDEN_DATASET_NAME).strip()
+        expected_outcome = str(body.get("expected_outcome") or "").strip()
+        must_contain = body.get("must_contain")
+
+        def _promote() -> dict[str, Any]:
+            import mlflow
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+            trace = client.get_trace(trace_id)
+            spans = getattr(getattr(trace, "data", None), "spans", None) or []
+            if not spans:
+                raise ValueError(f"Trace '{trace_id}' has no spans")
+            root = spans[0]
+            attrs = dict(getattr(root, "attributes", None) or {})
+            raw_inputs = getattr(root, "inputs", None)
+            inputs_dict = dict(raw_inputs) if isinstance(raw_inputs, dict) else {}
+
+            if {"server", "tool"} <= set(inputs_dict.keys()):
+                srv_name = str(inputs_dict["server"])
+                tool_name = str(inputs_dict["tool"])
+                args_dict = dict(inputs_dict.get("arguments") or {})
+            else:
+                srv_name = str(attrs.get("mcp.server") or "")
+                tool_name = str(attrs.get("mcp.tool") or "")
+                span_name = str(getattr(root, "name", "") or "")
+                if (not srv_name or not tool_name) and "." in span_name:
+                    p_srv, p_tool = span_name.split(".", 1)
+                    srv_name = srv_name or p_srv
+                    tool_name = tool_name or p_tool
+                args_dict = inputs_dict
+
+            if not srv_name or not tool_name:
+                raise ValueError("Could not determine 'server' and 'tool' from trace root span")
+
+            outcome = expected_outcome or (
+                "policy_refusal" if is_expected_policy_refusal(trace) else "ok"
+            )
+            expectations: dict[str, Any] = {"expected_outcome": outcome}
+            if isinstance(must_contain, str) and must_contain.strip():
+                expectations["must_contain"] = must_contain.strip()
+
+            record = {
+                "inputs": {
+                    "server": srv_name,
+                    "tool": tool_name,
+                    "arguments": args_dict,
+                },
+                "expectations": expectations,
+            }
+            sync_res = sync_golden_dataset(
+                settings,
+                dataset_name=dataset_name,
+                cases=[record],
+            )
+            mlflow.set_trace_tag(trace_id=trace_id, key="promoted_to_dataset", value=dataset_name)
+            return {
+                "promoted": True,
+                "traceId": trace_id,
+                "dataset": sync_res,
+                "record": record,
+            }
+
+        try:
+            return await asyncio.to_thread(_promote)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_TRACE", "message": str(exc)}},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
             )
 
     @app.post("/api/v1/actions/refresh-uc")

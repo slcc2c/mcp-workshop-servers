@@ -92,75 +92,6 @@ def create_mlflow_server(
         return mlflow.genai
 
     @mcp.tool()
-    async def mlflow_list_experiments(max_results: int = 50) -> list[dict[str, Any]]:
-        """List MLflow experiments on the configured tracking server."""
-
-        def _run() -> list[dict[str, Any]]:
-            client = _get_client()
-            exps = client.search_experiments(max_results=max_results)
-            return [
-                {
-                    "experiment_id": e.experiment_id,
-                    "name": e.name,
-                    "lifecycle_stage": e.lifecycle_stage,
-                    "artifact_location": e.artifact_location,
-                }
-                for e in exps
-            ]
-
-        return await asyncio.to_thread(_run)
-
-    @mcp.tool()
-    async def mlflow_search_runs(
-        experiment_ids: list[str],
-        filter_string: str = "",
-        max_results: int = 20,
-    ) -> list[dict[str, Any]]:
-        """Search MLflow runs across one or more experiment IDs."""
-
-        def _run() -> list[dict[str, Any]]:
-            client = _get_client()
-            runs = client.search_runs(
-                experiment_ids=experiment_ids,
-                filter_string=filter_string or "",
-                max_results=max_results,
-            )
-            return [
-                {
-                    "run_id": r.info.run_id,
-                    "run_name": r.info.run_name,
-                    "experiment_id": r.info.experiment_id,
-                    "status": r.info.status,
-                    "metrics": dict(r.data.metrics),
-                    "params": dict(r.data.params),
-                }
-                for r in runs
-            ]
-
-        return await asyncio.to_thread(_run)
-
-    @mcp.tool()
-    async def mlflow_get_run(run_id: str) -> dict[str, Any]:
-        """Get full details for a single MLflow run."""
-
-        def _run() -> dict[str, Any]:
-            client = _get_client()
-            r = client.get_run(run_id)
-            return {
-                "run_id": r.info.run_id,
-                "run_name": r.info.run_name,
-                "experiment_id": r.info.experiment_id,
-                "status": r.info.status,
-                "start_time": r.info.start_time,
-                "end_time": r.info.end_time,
-                "metrics": dict(r.data.metrics),
-                "params": dict(r.data.params),
-                "tags": dict(r.data.tags),
-            }
-
-        return await asyncio.to_thread(_run)
-
-    @mcp.tool()
     async def mlflow_search_logged_models(
         experiment_ids: list[str],
         filter_string: str = "",
@@ -477,7 +408,10 @@ def create_mlflow_server(
         tracking_status: int | None = None
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
-                r = await client.get(f"{settings.mlflow.tracking_uri.rstrip('/')}/health")
+                r = await client.get(
+                    f"{settings.mlflow.tracking_uri.rstrip('/')}/api/2.0/mlflow/experiments/search",
+                    params={"max_results": 1},
+                )
                 tracking_status = r.status_code
                 tracking_ok = r.status_code == 200
         except Exception:

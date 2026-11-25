@@ -585,6 +585,23 @@ def render_dashboard_html(version: str) -> str:
       }}
     }}
 
+    async function curateTrace(traceId, suffix, payload, statusEl) {{
+      statusEl.textContent = "Saving...";
+      try {{
+        await apiFetch(
+          "/api/v1/traces/" + encodeURIComponent(traceId) + suffix,
+          {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify(payload || {{}}),
+          }}
+        );
+        await inspectTrace(traceId);
+      }} catch (err) {{
+        statusEl.textContent = "Failed: " + err.message;
+      }}
+    }}
+
     async function inspectTrace(traceId) {{
       const detailBox = document.getElementById("trace-detail-box");
       detailBox.style.display = "block";
@@ -607,20 +624,79 @@ def render_dashboard_html(version: str) -> str:
             events: sp.events,
           }}, null, 2)) + "</pre></div>"
         )).join("");
+        const metaPills = [
+          tr.user ? "user=" + tr.user : null,
+          tr.sessionId ? "session=" + tr.sessionId : null,
+          tr.modelId ? "model=" + tr.modelId : null,
+        ].filter(Boolean).map((m) => '<span class="pill">' + esc(m) + "</span>").join(" ");
+        const tagsHtml = Object.entries(tr.tags || {{}})
+          .filter(([k]) => !k.startsWith("mlflow."))
+          .map(([k, v]) => '<span class="pill">' + esc(k) + "=" + esc(v) + "</span>")
+          .join(" ");
+        const metaRow = (metaPills || tagsHtml)
+          ? '<div style="margin-top:6px;">' + metaPills + " " + tagsHtml + "</div>"
+          : "";
         const assessHtml = (tr.assessments || []).length
           ? '<div style="margin-top:8px;"><strong>Assessments:</strong> ' +
             tr.assessments.map((a) => (
               '<span class="pill">' + esc(a.name) + "=" + esc(a.value) + "</span>"
             )).join(" ") + "</div>"
           : "";
+        const curationBar =
+          '<div id="curation-bar" style="margin-top:10px; padding:8px; ' +
+          'border:1px solid var(--border); border-radius:6px;">' +
+          '<div class="toolbar" style="margin-bottom:6px;">' +
+          '<input id="cur-rationale" type="text" placeholder="Feedback rationale..." ' +
+          'style="min-width:190px;" />' +
+          '<button id="cur-yes" class="mini" type="button">Helpful (yes)</button>' +
+          '<button id="cur-no" class="mini" type="button">Needs Work (no)</button>' +
+          '<select id="cur-exp"><option value="ok">ok</option>' +
+          '<option value="policy_refusal">policy_refusal</option></select>' +
+          '<button id="cur-log-exp" class="mini" type="button">Log Expectation</button>' +
+          '</div><div class="toolbar" style="margin-bottom:0;">' +
+          '<input id="cur-tag-k" type="text" placeholder="tag key" style="width:120px;" />' +
+          '<input id="cur-tag-v" type="text" placeholder="tag value" style="width:120px;" />' +
+          '<button id="cur-add-tag" class="mini" type="button">Add Tag</button>' +
+          '<button id="cur-promote" class="mini primary" type="button">' +
+          "Promote to Golden Dataset</button>" +
+          '<span id="cur-status" class="muted"></span></div></div>';
         detailBox.innerHTML =
           '<div class="kv"><div><strong>Trace:</strong> <code>' + esc(tr.traceId) +
           "</code> " + stPill + ' <span class="muted">' + esc(tr.durationMs) +
           ' ms</span></div><button id="close-trace-btn" class="mini" type="button">' +
-          "Close</button></div>" + assessHtml + spansHtml;
+          "Close</button></div>" + metaRow + assessHtml + curationBar + spansHtml;
+        const curStatus = document.getElementById("cur-status");
         document.getElementById("close-trace-btn").addEventListener("click", () => {{
           detailBox.style.display = "none";
         }});
+        document.getElementById("cur-yes").addEventListener("click", () => curateTrace(
+          tr.traceId, "/feedback",
+          {{ name: "human_quality", value: "yes",
+             rationale: document.getElementById("cur-rationale").value.trim() || null }},
+          curStatus
+        ));
+        document.getElementById("cur-no").addEventListener("click", () => curateTrace(
+          tr.traceId, "/feedback",
+          {{ name: "human_quality", value: "no",
+             rationale: document.getElementById("cur-rationale").value.trim() || null }},
+          curStatus
+        ));
+        document.getElementById("cur-log-exp").addEventListener("click", () => curateTrace(
+          tr.traceId, "/expectation",
+          {{ name: "expected_outcome", value: document.getElementById("cur-exp").value }},
+          curStatus
+        ));
+        document.getElementById("cur-add-tag").addEventListener("click", () => curateTrace(
+          tr.traceId, "/tag",
+          {{ key: document.getElementById("cur-tag-k").value.trim(),
+             value: document.getElementById("cur-tag-v").value.trim() }},
+          curStatus
+        ));
+        document.getElementById("cur-promote").addEventListener("click", () => curateTrace(
+          tr.traceId, "/promote-to-dataset",
+          {{ expected_outcome: document.getElementById("cur-exp").value }},
+          curStatus
+        ));
       }} catch (err) {{
         detailBox.textContent = "Failed to load trace details: " + err.message;
       }}

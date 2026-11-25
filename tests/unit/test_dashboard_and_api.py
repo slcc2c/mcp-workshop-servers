@@ -268,3 +268,110 @@ async def test_playground_call_tool_allowlist_execution_and_trace_detail(
         r_body = refusal.json()
         assert r_body["ok"] is False
         assert r_body["policyRefusal"] is True
+
+
+async def test_trace_feedback_expectation_tag_and_dataset_promotion(
+    make_settings, monkeypatch
+) -> None:
+    tok = "tok_curator_456"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+
+    logged: dict[str, list] = {"feedback": [], "expectation": [], "tag": [], "dataset": []}
+
+    import mlflow
+
+    monkeypatch.setattr(mlflow, "set_tracking_uri", lambda _u: None)
+    monkeypatch.setattr(
+        mlflow,
+        "log_feedback",
+        lambda **kw: logged["feedback"].append(kw) or types.SimpleNamespace(assessment_id="a-1"),
+    )
+    monkeypatch.setattr(
+        mlflow,
+        "log_expectation",
+        lambda **kw: logged["expectation"].append(kw)
+        or types.SimpleNamespace(assessment_id="a-2"),
+    )
+    monkeypatch.setattr(mlflow, "set_trace_tag", lambda **kw: logged["tag"].append(kw))
+
+    class FakeClient:
+        def __init__(self, tracking_uri: str) -> None:
+            self.tracking_uri = tracking_uri
+
+        def get_trace(self, trace_id: str):
+            return types.SimpleNamespace(
+                info=types.SimpleNamespace(state="OK", trace_id=trace_id),
+                data=types.SimpleNamespace(
+                    spans=[
+                        types.SimpleNamespace(
+                            name="memory.memory_store",
+                            attributes={"mcp.server": "memory", "mcp.tool": "memory_store"},
+                            inputs={"content": "promoted entry"},
+                            outputs={"stored": True},
+                            events=[],
+                        )
+                    ]
+                ),
+            )
+
+    monkeypatch.setattr(mlflow, "MlflowClient", FakeClient)
+    monkeypatch.setattr(
+        "mcp_stack.gateway.app.sync_golden_dataset",
+        lambda _s, dataset_name, cases: logged["dataset"].append((dataset_name, cases))
+        or {"status": "updated", "dataset_name": dataset_name, "record_count": len(cases)},
+    )
+
+    app = build_gateway_app(settings)
+    headers = {"Authorization": f"Bearer {tok}"}
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as cli:
+        # Requires Bearer auth
+        assert (
+            await cli.post("/api/v1/traces/tr-1/feedback", json={"value": "yes"})
+        ).status_code == 401
+
+        fb = await cli.post(
+            "/api/v1/traces/tr-1/feedback",
+            json={"name": "human_quality", "value": "yes", "rationale": "Clean output"},
+            headers=headers,
+        )
+        assert fb.status_code == 200
+        assert logged["feedback"][0]["source"].source_id == "codex"
+
+        ex = await cli.post(
+            "/api/v1/traces/tr-1/expectation",
+            json={"name": "expected_outcome", "value": "ok"},
+            headers=headers,
+        )
+        assert ex.status_code == 200
+        assert logged["expectation"][0]["value"] == "ok"
+
+        tg = await cli.post(
+            "/api/v1/traces/tr-1/tag",
+            json={"key": "reviewed", "value": "true"},
+            headers=headers,
+        )
+        assert tg.status_code == 200
+        assert logged["tag"][0]["key"] == "reviewed"
+
+        pr = await cli.post(
+            "/api/v1/traces/tr-1/promote-to-dataset",
+            json={"expected_outcome": "ok"},
+            headers=headers,
+        )
+        assert pr.status_code == 200
+        promoted_body = pr.json()
+        assert promoted_body["promoted"] is True
+        assert promoted_body["record"]["inputs"]["server"] == "memory"
+        assert promoted_body["record"]["inputs"]["tool"] == "memory_store"
+        assert logged["dataset"][0][0] == "mcp-workshop-golden-v1"

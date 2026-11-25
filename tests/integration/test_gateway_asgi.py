@@ -71,7 +71,8 @@ async def test_gateway_health_ready_metrics_and_streamable_http_mcp(make_setting
             tools = await client.list_tools()
             names = {t.name for t in tools}
             assert "uc_list_catalogs" in names
-            assert "mlflow_list_experiments" in names
+            assert "mlflow_search_logged_models" in names
+            assert "mlflow_list_experiments" not in names
             assert "memory_store" in names
             assert "fs_read_file" in names
             assert "github_get_repo" in names

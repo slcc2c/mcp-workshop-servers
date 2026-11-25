@@ -207,6 +207,39 @@ def sync_mcp_registry(
     access_headers = _resolve_gateway_access_headers(settings)
     results: dict[str, Any] = {}
     refresh_fn = getattr(genai_module, "refresh_mcp_server_version_tools", None)
+    alias_fn = getattr(genai_module, "set_mcp_server_alias", None)
+    tag_fn = getattr(genai_module, "set_mcp_server_tag", None)
+
+    def _apply_alias_and_tags(slug_key: str, srv_name: str, srv_ver: str, has_rem: bool) -> dict:
+        meta: dict[str, Any] = {}
+        if callable(alias_fn):
+            try:
+                alias_fn(name=srv_name, alias="production", version=srv_ver)
+                meta["alias"] = "production"
+            except Exception as alias_exc:
+                meta["alias_error"] = str(alias_exc)
+        if callable(tag_fn):
+            scope = (
+                "gateway"
+                if slug_key == "gateway"
+                else ("profile" if slug_key.startswith("profile-") else "server")
+            )
+            desired_tags = {
+                "scope": scope,
+                "governance": "read-only-default",
+                "transport": "streamable-http" if has_rem else "stdio",
+            }
+            applied_tags: dict[str, str] = {}
+            for tk, tv in desired_tags.items():
+                try:
+                    tag_fn(name=srv_name, key=tk, value=tv)
+                    applied_tags[tk] = tv
+                except Exception:
+                    pass
+            if applied_tags:
+                meta["tags"] = applied_tags
+        return meta
+
     for slug, payload in manifests.items():
         has_remotes = bool(payload.get("remotes"))
         register_kwargs: dict[str, Any] = {
@@ -218,11 +251,14 @@ def sync_mcp_registry(
             register_kwargs["mcp_server_access_headers"] = access_headers
         try:
             ver = register_fn(**register_kwargs)
-            results[slug] = {
+            ver_str = str(getattr(ver, "version", payload["version"]))
+            entry_ok: dict[str, Any] = {
                 "status": "registered",
                 "name": payload["name"],
-                "version": getattr(ver, "version", payload["version"]),
+                "version": ver_str,
             }
+            entry_ok.update(_apply_alias_and_tags(slug, payload["name"], ver_str, has_remotes))
+            results[slug] = entry_ok
         except Exception as exc:
             err_msg = str(exc)
             if "already exists" in err_msg.lower():
@@ -246,6 +282,9 @@ def sync_mcp_registry(
                     "name": payload["name"],
                     "version": payload["version"],
                 }
+                entry.update(
+                    _apply_alias_and_tags(slug, payload["name"], payload["version"], has_remotes)
+                )
                 if refresh_error is not None:
                     entry["refresh_error"] = refresh_error
                 results[slug] = entry
