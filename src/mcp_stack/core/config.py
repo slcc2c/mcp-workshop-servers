@@ -756,6 +756,8 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
 
     cleaned_overrides = {k: v for k, v in env_overrides.items() if v}
     merged = _deep_merge(raw, cleaned_overrides)
+    if "profiles" in env_overrides.get("gateway", {}):
+        merged.setdefault("gateway", {})["profiles"] = dict(env_overrides["gateway"]["profiles"])
 
     settings = MCPStackSettings(**merged)
     if not settings.gateway.clients:

@@ -16,7 +16,12 @@ from mcp_stack.evals import (
     is_expected_policy_refusal,
     normalize_judge_model_uri,
 )
-from mcp_stack.service import rotate_log_file, rotate_service_logs
+from mcp_stack.service import (
+    AGENT_LABEL,
+    rotate_log_file,
+    rotate_service_logs,
+    tail_service_logs,
+)
 
 
 def test_log_rotation_caps_size_and_keeps_three_archives(tmp_path: Path) -> None:
@@ -212,3 +217,18 @@ def test_native_judge_model_normalization_and_make_judge() -> None:
     judge = build_native_clarity_judge("ollama:/qwen3.8:27b")
     assert judge.name == "tool_response_clarity_judge"
     assert getattr(judge, "model", "") == "ollama_chat:/qwen3.8:27b"
+
+
+def test_agent_launchagent_plist_and_log_tailing(tmp_path: Path) -> None:
+    import plistlib
+
+    plist_path = Path("deploy/launchd") / f"{AGENT_LABEL}.plist"
+    assert plist_path.is_file()
+    parsed = plistlib.loads(plist_path.read_bytes())
+    assert parsed["Label"] == AGENT_LABEL
+    assert Path(parsed["ProgramArguments"][-1]).name == "run_agent.sh"
+    assert Path("deploy/launchd/run_agent.sh").is_file()
+
+    (tmp_path / "agent.log").write_text("agent ready\n", encoding="utf-8")
+    tailed = tail_service_logs(service="agent", log_dir=tmp_path)
+    assert "agent ready" in tailed["agent.log"]
