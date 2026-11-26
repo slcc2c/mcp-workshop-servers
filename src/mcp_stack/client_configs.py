@@ -1,9 +1,11 @@
-"""Client configuration generators for Claude Code, Claude Desktop, Codex, and Cursor."""
+"""Client configuration generators for Antigravity, Codex, Claude, Cursor, and Gemini CLI."""
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import time
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -156,11 +158,33 @@ def generate_client_configs(
         ]
     )
 
+    antigravity_entry: dict[str, Any] = {"serverUrl": gw_url}
+    if auth_enabled:
+        antigravity_entry["headers"] = {"Authorization": "Bearer ${MCP_ANTIGRAVITY_AUTH_TOKEN}"}
+    antigravity_payload = {
+        "mcpServers": {
+            "mcp-workshop-gateway": antigravity_entry,
+            "mlflow": {"serverUrl": settings.mlflow.mcp_url},
+        }
+    }
+
+    gemini_entry: dict[str, Any] = {"httpUrl": gw_url}
+    if auth_enabled:
+        gemini_entry["headers"] = {"Authorization": "Bearer ${MCP_GEMINI_AUTH_TOKEN}"}
+    gemini_payload = {
+        "mcpServers": {
+            "mcp-workshop-gateway": gemini_entry,
+            "mlflow": {"httpUrl": settings.mlflow.mcp_url},
+        }
+    }
+
     return {
+        "antigravity": json.dumps(antigravity_payload, indent=2) + "\n",
         "claude-code": json.dumps(claude_code_payload, indent=2) + "\n",
         "claude-desktop": json.dumps(claude_desktop_payload, indent=2) + "\n",
         "cursor": json.dumps(cursor_payload, indent=2) + "\n",
         "codex": codex_toml,
+        "gemini-cli": json.dumps(gemini_payload, indent=2) + "\n",
     }
 
 
@@ -310,10 +334,139 @@ def install_client_configs(
                 "status": "dry_run" if dry_run else "updated",
                 "entries": sorted(src_cd.keys()),
             }
+        elif key == "antigravity":
+            target = home / ".gemini/antigravity/mcp_config.json"
+            doc = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+            servers = dict(doc.get("mcpServers") or {})
+            src_ag = json.loads(rendered["antigravity"])["mcpServers"]
+            servers["mcp-workshop-gateway"] = src_ag["mcp-workshop-gateway"]
+            doc["mcpServers"] = servers
+            backup = None
+            if not dry_run:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                backup = _backup_file(target, stamp)
+                target.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            results["antigravity"] = {
+                "path": str(target),
+                "backup": backup,
+                "status": "dry_run" if dry_run else "updated",
+            }
+        elif key == "gemini-cli":
+            target = home / ".gemini/settings.json"
+            doc = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+            servers = dict(doc.get("mcpServers") or {})
+            src_gc = json.loads(rendered["gemini-cli"])["mcpServers"]
+            servers["mcp-workshop-gateway"] = src_gc["mcp-workshop-gateway"]
+            doc["mcpServers"] = servers
+            backup = None
+            if not dry_run:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                backup = _backup_file(target, stamp)
+                target.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            results["gemini-cli"] = {
+                "path": str(target),
+                "backup": backup,
+                "status": "dry_run" if dry_run else "updated",
+            }
+        elif key == "cursor":
+            target = home / ".cursor/mcp.json"
+            doc = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+            servers = dict(doc.get("mcpServers") or {})
+            src_cu = json.loads(rendered["cursor"])["mcpServers"]
+            servers["mcp-workshop-gateway"] = src_cu["mcp-workshop-gateway"]
+            doc["mcpServers"] = servers
+            backup = None
+            if not dry_run:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                backup = _backup_file(target, stamp)
+                target.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            results["cursor"] = {
+                "path": str(target),
+                "backup": backup,
+                "status": "dry_run" if dry_run else "updated",
+            }
         else:
             raise ValueError(f"Unsupported live install target: {client_name}")
 
     return {"dry_run": dry_run, "results": results}
+
+
+_CLIENT_TOKEN_ENV: dict[str, str] = {
+    "codex": "MCP_CODEX_AUTH_TOKEN",
+    "claude-code": "MCP_CLAUDE_AUTH_TOKEN",
+    "claude-desktop": "MCP_CLAUDE_AUTH_TOKEN",
+    "cursor": "MCP_CURSOR_AUTH_TOKEN",
+    "antigravity": "MCP_ANTIGRAVITY_AUTH_TOKEN",
+    "gemini-cli": "MCP_GEMINI_AUTH_TOKEN",
+}
+
+
+async def verify_client_connection(
+    settings: MCPStackSettings,
+    *,
+    client: str = "codex",
+    profile: str | None = None,
+    timeout_s: float = 5.0,
+) -> dict[str, Any]:
+    """Perform a live Streamable HTTP MCP initialize + tools/list probe for a client profile."""
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    clean_client = client.strip().lower()
+    gw_url = _gateway_mcp_url(settings, profile=profile)
+    selected_profile = (
+        profile if profile is not None else settings.gateway.default_client_profile
+    ).strip() or "full"
+    headers: dict[str, str] = {}
+    auth_status = "open"
+    if settings.gateway.effective_auth_enabled:
+        env_var = _CLIENT_TOKEN_ENV.get(clean_client, "MCP_DEFAULT_AUTH_TOKEN")
+        tok = os.getenv(env_var, "").strip()
+        if not tok:
+            for k, pol in settings.gateway.clients.items():
+                if pol.client_id == clean_client or clean_client.startswith(pol.client_id):
+                    tok = k
+                    break
+        if not tok:
+            for k, pol in settings.gateway.clients.items():
+                if "*" in pol.allowed_servers:
+                    tok = k
+                    break
+        if not tok and settings.gateway.clients:
+            tok = next(iter(settings.gateway.clients.keys()))
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+            auth_status = "bearer"
+        else:
+            auth_status = "missing_token"
+
+    t0 = time.monotonic()
+    try:
+        transport = StreamableHttpTransport(gw_url, headers=headers or None)
+        async with Client(transport, timeout=timeout_s) as mcp_cli:
+            tools = await mcp_cli.list_tools()
+            init_res = getattr(mcp_cli, "initialize_result", None)
+            proto = getattr(init_res, "protocolVersion", None) if init_res else None
+            return {
+                "ok": True,
+                "client": clean_client,
+                "profile": selected_profile,
+                "url": gw_url,
+                "authStatus": auth_status,
+                "protocolVersion": proto or "2025-11-25",
+                "toolCount": len(tools),
+                "latencyMs": round((time.monotonic() - t0) * 1000.0, 2),
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "client": clean_client,
+            "profile": selected_profile,
+            "url": gw_url,
+            "authStatus": auth_status,
+            "latencyMs": round((time.monotonic() - t0) * 1000.0, 2),
+            "error": str(exc),
+        }
 
 
 _HOOK_START = "# >>> mcp-workshop-stack tokens >>>"

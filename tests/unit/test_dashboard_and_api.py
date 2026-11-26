@@ -37,9 +37,8 @@ async def test_dashboard_ui_serves_html_without_secrets(make_settings) -> None:
         ui = await cli.get("/ui")
         assert ui.status_code == 200
         assert "text/html" in ui.headers["content-type"]
-        assert "MCP Workshop Stack Gateway" in ui.text
-        for marker in ("playground-card", "bench-btn", "auto-refresh-select", "trace-detail-box"):
-            assert marker in ui.text
+        assert "MCP Workshop Stack" in ui.text
+        assert ("id=\"root\"" in ui.text) or ("mcp-stack ui build" in ui.text)
         assert secret_tok not in ui.text
 
         for protected_get in (
@@ -405,15 +404,8 @@ async def test_ui_cookie_auth_flow_login_link_session_logout_and_csrf(make_setti
         ui = await cli.get("/ui")
         assert ui.status_code == 200
         assert "sessionStorage" not in ui.text
-        markers = (
-            "tab-overview",
-            "tab-playground",
-            "tab-traces",
-            "tab-registry",
-            "regression-banner",
-        )
-        for marker in markers:
-            assert marker in ui.text
+        assert "MCP Workshop Stack" in ui.text
+        assert secret_tok not in ui.text
 
         # Unauthenticated /api/v1/auth/me returns authenticated=False cleanly
         me_unauth = await cli.get("/api/v1/auth/me")

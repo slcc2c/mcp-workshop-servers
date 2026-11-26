@@ -47,7 +47,23 @@ async def test_zero_307_redirects_and_curated_profile_tool_counts(
             assert prof_resp.status_code == 200
             body = prof_resp.json()
             assert body["defaultProfile"] == "core"
-            assert {p["name"] for p in body["profiles"]} == {"core", "data", "ops", "macos"}
+            assert {p["name"] for p in body["profiles"]} == {
+                "discover",
+                "core",
+                "data",
+                "ops",
+                "macos",
+            }
+
+        async with Client(
+            StreamableHttpTransport(
+                "http://testserver/profiles/discover/mcp", httpx_client_factory=factory
+            )
+        ) as discover_cli:
+            discover_tools = {t.name for t in await discover_cli.list_tools()}
+            assert "gateway_search_tools" in discover_tools
+            assert "gateway_list_servers" in discover_tools
+            assert "uc_list_catalogs" not in discover_tools
 
         async with Client(
             StreamableHttpTransport(

@@ -66,4 +66,7 @@ legacy/ts/CLEAN_HISTORY_STEPS.md
 legacy/ts/SECURITY_FIX.md
 legacy/ts/clean-git-history.sh
 external/XcodeBuildMCP/
+# Gateway local federation & compiled SPA bundle
 config/gateway.local.yaml
+src/mcp_stack/gateway/static/
+web/node_modules/

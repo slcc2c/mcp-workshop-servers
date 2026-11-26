@@ -55,6 +55,7 @@ class GatewaySettings(BaseModel):
     ui_session_ttl_s: int = 43200
     ui_session_secret: SecretStr | None = None
     eval_regression_threshold: float = 1.0
+    admin_tools_enabled: bool = False
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:*", "http://127.0.0.1:*"]
     )
@@ -79,6 +80,7 @@ class GatewaySettings(BaseModel):
     default_client_profile: str = "core"
     profiles: dict[str, list[str]] = Field(
         default_factory=lambda: {
+            "discover": ["gateway"],
             "core": [
                 "unity_catalog",
                 "mlflow",
@@ -373,6 +375,8 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
 
 def _default_clients() -> dict[str, ClientPolicy]:
     specs = [
+        ("antigravity", "Antigravity IDE", "MCP_ANTIGRAVITY_AUTH_TOKEN", ["*"], 200),
+        ("gemini", "Gemini CLI", "MCP_GEMINI_AUTH_TOKEN", ["*"], 200),
         ("claude", "Claude Desktop / Code", "MCP_CLAUDE_AUTH_TOKEN", ["*"], 200),
         ("cursor", "Cursor IDE", "MCP_CURSOR_AUTH_TOKEN", ["*"], 150),
         ("codex", "Codex CLI", "MCP_CODEX_AUTH_TOKEN", ["*"], 200),
@@ -458,6 +462,8 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         env_overrides["gateway"]["ui_session_secret"] = val
     if val := os.getenv("GATEWAY_EVAL_REGRESSION_THRESHOLD"):
         env_overrides["gateway"]["eval_regression_threshold"] = float(val)
+    if (b := _parse_bool(os.getenv("MCP_GATEWAY_ADMIN_TOOLS_ENABLED"))) is not None:
+        env_overrides["gateway"]["admin_tools_enabled"] = b
     if (items := _split_csv(os.getenv("MCP_ENABLED_SERVERS"))) is not None:
         env_overrides["gateway"]["enabled_servers"] = items
     if (items := _split_csv(os.getenv("MCP_CORS_ORIGINS"))) is not None:
@@ -630,3 +636,98 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
     if not settings.gateway.clients:
         settings.gateway.clients = _default_clients()
     return settings
+
+
+_SENSITIVE_KEY_MARKERS = ("auth", "token", "secret", "key", "password")
+
+
+def _is_secret_reference(raw_value: str) -> bool:
+    stripped = raw_value.strip()
+    if stripped.lower().startswith("bearer "):
+        stripped = stripped[7:].strip()
+    return stripped.startswith(("env:", "op://"))
+
+
+def validate_upstream_secret_refs(cfg: UpstreamServerConfig) -> None:
+    """Reject raw secret literals in upstream headers and sensitive env vars."""
+    for h_key, h_val in cfg.headers.items():
+        if any(m in h_key.lower() for m in _SENSITIVE_KEY_MARKERS):
+            raw = h_val.get_secret_value()
+            if raw.strip() and not _is_secret_reference(raw):
+                raise ValueError(
+                    f"Header '{h_key}' must use env:VAR or op://vault/item/field, not a raw secret"
+                )
+    for e_key, e_val in cfg.env.items():
+        if any(m in e_key.lower() for m in _SENSITIVE_KEY_MARKERS):
+            raw = e_val.get_secret_value()
+            if raw.strip() and not _is_secret_reference(raw):
+                raise ValueError(
+                    f"Env '{e_key}' must use env:VAR or op://vault/item/field, not a raw secret"
+                )
+
+
+def serialize_upstream_config(cfg: UpstreamServerConfig) -> dict[str, Any]:
+    """Serialize an UpstreamServerConfig without exposing resolved secrets."""
+    validate_upstream_secret_refs(cfg)
+    payload: dict[str, Any] = {
+        "transport": cfg.transport,
+        "enabled": cfg.enabled,
+        "compose_into_full": cfg.compose_into_full,
+        "profiles": list(cfg.profiles),
+        "timeout_s": cfg.timeout_s,
+        "governance": cfg.governance,
+    }
+    if cfg.url:
+        payload["url"] = cfg.url
+    if cfg.headers:
+        payload["headers"] = {k: v.get_secret_value() for k, v in cfg.headers.items()}
+    if cfg.command:
+        payload["command"] = cfg.command
+    if cfg.args:
+        payload["args"] = list(cfg.args)
+    if cfg.cwd is not None:
+        payload["cwd"] = str(cfg.cwd)
+    if cfg.env:
+        payload["env"] = {k: v.get_secret_value() for k, v in cfg.env.items()}
+    if cfg.registry_name:
+        payload["registry_name"] = cfg.registry_name
+    if cfg.description:
+        payload["description"] = cfg.description
+    return payload
+
+
+def save_local_upstreams(
+    path: Path,
+    upstreams: dict[str, UpstreamServerConfig],
+) -> Path:
+    """Atomically write upstream_servers into gitignored local YAML config."""
+    import tempfile
+
+    raw: dict[str, Any] = {}
+    if path.exists():
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            raw = loaded
+    gw_sec = raw.setdefault("gateway", {})
+    if not isinstance(gw_sec, dict):
+        gw_sec = {}
+        raw["gateway"] = gw_sec
+
+    serialized: dict[str, Any] = {}
+    for slug, cfg in upstreams.items():
+        clean_slug = slug.strip().replace("_", "-").lower()
+        serialized[clean_slug] = serialize_upstream_config(cfg)
+    gw_sec["upstream_servers"] = serialized
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = yaml.safe_dump(raw, sort_keys=False)
+    fd, tmp_name = tempfile.mkstemp(prefix=".gateway-local-", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(rendered)
+        os.replace(tmp_name, path)
+    except Exception:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+        raise
+    return path
