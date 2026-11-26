@@ -1,26 +1,35 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowUpRight, Plus, Search, Sparkles } from "lucide-react";
+import { Plus, Search, Sparkles } from "lucide-react";
 import { api } from "../lib/api";
-import type { PromptDetailResponse, RegistryResponse } from "../types";
+import type { RegistryResponse } from "../types";
 import { CopyButton } from "../components/CopyButton";
-import { PromptRenderer } from "../components/PromptRenderer";
+import { PromptWorkbench } from "../components/PromptWorkbench";
 import { StatusBadge } from "../components/StatusDot";
 
 export function RegistryView({
   registry,
   initialPromptName,
+  initialPromptVersion,
+  mlflowUiBase,
+  onSelectPrompt,
   onReload,
 }: {
   registry: RegistryResponse | null;
   initialPromptName?: string | null;
+  initialPromptVersion?: string | null;
+  mlflowUiBase: string;
+  onSelectPrompt?: (name: string, version?: string | null) => void;
   onReload: () => Promise<void>;
 }) {
   const [subTab, setSubTab] = useState<"servers" | "prompts" | "models">("servers");
   const [search, setSearch] = useState("");
   const [selectedServerName, setSelectedServerName] = useState<string | null>(null);
-  const [selectedPromptName, setSelectedPromptName] = useState<string | null>(initialPromptName || null);
-  const [promptDetail, setPromptDetail] = useState<PromptDetailResponse | null>(null);
-  const [promptLoading, setPromptLoading] = useState(false);
+  const [selectedPromptName, setSelectedPromptName] = useState<string | null>(
+    initialPromptName || null,
+  );
+  const [selectedPromptVer, setSelectedPromptVer] = useState<string | null>(
+    initialPromptVersion || null,
+  );
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   const [showNewPrompt, setShowNewPrompt] = useState(false);
@@ -38,8 +47,9 @@ export function RegistryView({
     if (initialPromptName) {
       setSubTab("prompts");
       setSelectedPromptName(initialPromptName);
+      setSelectedPromptVer(initialPromptVersion || null);
     }
-  }, [initialPromptName]);
+  }, [initialPromptName, initialPromptVersion]);
 
   const filteredServers = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -67,17 +77,6 @@ export function RegistryView({
     return filteredPrompts[0] || prompts[0] || null;
   }, [prompts, filteredPrompts, selectedPromptName]);
 
-  useEffect(() => {
-    if (subTab !== "prompts" || !activePromptSummary) return;
-    const latestVer = activePromptSummary.versions?.[0]?.version ?? "latest";
-    setPromptLoading(true);
-    api
-      .promptDetail(activePromptSummary.name, String(latestVer))
-      .then((res) => setPromptDetail(res))
-      .catch((e) => setStatusMsg(e instanceof Error ? e.message : String(e)))
-      .finally(() => setPromptLoading(false));
-  }, [subTab, activePromptSummary]);
-
   async function handleSavePrompt(e: React.FormEvent) {
     e.preventDefault();
     if (!newName.trim() || !newTemplate.trim()) return;
@@ -93,6 +92,9 @@ export function RegistryView({
       setStatusMsg(`Saved prompt '${res.name}' v${res.version}`);
       setShowNewPrompt(false);
       setSelectedPromptName(res.name);
+      const nextVer = res.version ? String(res.version) : null;
+      setSelectedPromptVer(nextVer);
+      onSelectPrompt?.(res.name, nextVer);
       await onReload();
     } catch (err) {
       setStatusMsg(err instanceof Error ? err.message : String(err));
@@ -140,7 +142,7 @@ export function RegistryView({
               type="button"
               onClick={() => {
                 setNewName(activePromptSummary?.name || "");
-                setNewTemplate(promptDetail?.template || "");
+                setNewTemplate("");
                 setNewCommit("");
                 setShowNewPrompt((v) => !v);
               }}
@@ -174,10 +176,11 @@ export function RegistryView({
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-2.5 top-2.5" />
                 <input
+                  data-shortcut-search="true"
                   type="search"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Filter MCP servers..."
+                  placeholder="Filter MCP servers... (/)"
                   className="w-full rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] pl-8 pr-2.5 py-1.5 text-[12.5px]"
                 />
               </div>
@@ -249,7 +252,7 @@ export function RegistryView({
                   </div>
                 </div>
 
-                {/* Clean Metadata Table */}
+                {/* Metadata Table */}
                 <div className="space-y-1.5">
                   <div className="text-[11.5px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
                     Registry Tags
@@ -278,7 +281,7 @@ export function RegistryView({
         </div>
       )}
 
-      {/* Subtab 2: Prompt Registry Viewer & Authoring */}
+      {/* Subtab 2: Full Prompt Workbench */}
       {subTab === "prompts" && (
         <div className="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-4 items-start">
           <aside className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] overflow-hidden">
@@ -286,15 +289,16 @@ export function RegistryView({
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-2.5 top-2.5" />
                 <input
+                  data-shortcut-search="true"
                   type="search"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Filter prompts..."
+                  placeholder="Filter prompts... (/)"
                   className="w-full rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] pl-8 pr-2.5 py-1.5 text-[12.5px]"
                 />
               </div>
             </div>
-            <div className="divide-y divide-[var(--border-hairline)] max-h-[540px] overflow-y-auto">
+            <div className="divide-y divide-[var(--border-hairline)] max-h-[560px] overflow-y-auto">
               {filteredPrompts.map((p) => {
                 const ver = p.versions?.[0]?.version ?? "?";
                 const aliases = (p.versions || []).flatMap((v) => v.aliases || []);
@@ -303,7 +307,14 @@ export function RegistryView({
                   <button
                     key={p.name}
                     type="button"
-                    onClick={() => setSelectedPromptName(p.name)}
+                    onClick={() => {
+                      setSelectedPromptName(p.name);
+                      const nextVer = p.versions?.[0]?.version !== undefined
+                        ? String(p.versions[0].version)
+                        : null;
+                      setSelectedPromptVer(nextVer);
+                      onSelectPrompt?.(p.name, nextVer);
+                    }}
                     className={`w-full text-left px-3.5 py-2.5 cursor-pointer transition-colors ${
                       selected
                         ? "bg-[var(--accent-soft)] border-l-2 border-[var(--accent)]"
@@ -317,7 +328,7 @@ export function RegistryView({
                       </span>
                     </div>
                     {aliases.length > 0 && (
-                      <div className="text-[11px] font-mono text-[var(--ok)] mt-0.5">
+                      <div className="text-[11px] font-mono text-[var(--ok)] mt-0.5 truncate">
                         {aliases.map((a) => `@${a}`).join(" ")}
                       </div>
                     )}
@@ -390,45 +401,25 @@ export function RegistryView({
               </form>
             )}
 
-            <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-5">
-              {promptLoading ? (
-                <div className="text-[13px] text-[var(--text-muted)]">Loading prompt template...</div>
-              ) : !promptDetail ? (
-                <div className="text-[13px] text-[var(--text-muted)]">Select a prompt to inspect.</div>
-              ) : (
-                <div className="space-y-4">
-                  <PromptRenderer
-                    template={promptDetail.template}
-                    title={promptDetail.name}
-                    version={promptDetail.version}
-                    commitMessage={promptDetail.commitMessage}
-                  />
-                  <div className="flex items-center justify-between gap-2 pt-3 border-t border-[var(--border-hairline)] flex-wrap">
-                    <a
-                      href={`http://localhost:5002/#/prompts/${encodeURIComponent(promptDetail.name)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[12px] text-[var(--accent)] hover:underline"
-                    >
-                      Open in MLflow UI <ArrowUpRight className="w-3.5 h-3.5" />
-                    </a>
-                    {mutEnabled && promptDetail.version && (
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await api.promotePromptAlias(promptDetail.name, String(promptDetail.version), "production");
-                          setStatusMsg(`Set @production -> v${promptDetail.version} on ${promptDetail.name}`);
-                          await onReload();
-                        }}
-                        className="px-3 py-1.5 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:border-[var(--ok)] text-[12px] cursor-pointer"
-                      >
-                        Promote @production
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
+            <PromptWorkbench
+              promptSummary={activePromptSummary}
+              selectedVersion={selectedPromptVer}
+              onSelectVersion={(ver) => {
+                setSelectedPromptVer(ver);
+                if (activePromptSummary) {
+                  onSelectPrompt?.(activePromptSummary.name, ver);
+                }
+              }}
+              mutationsEnabled={mutEnabled}
+              mlflowUiBase={mlflowUiBase}
+              onStartNewVersion={(name, template) => {
+                setNewName(name);
+                setNewTemplate(template);
+                setNewCommit("");
+                setShowNewPrompt(true);
+              }}
+              onMutated={onReload}
+            />
           </section>
         </div>
       )}
@@ -454,7 +445,9 @@ export function RegistryView({
           <section className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-4 space-y-3">
             <h3 className="text-[13.5px] font-semibold m-0">Registered Models</h3>
             {(registry?.registeredModels || []).length === 0 ? (
-              <div className="text-[12.5px] text-[var(--text-muted)]">No Registered Models in tracking registry.</div>
+              <div className="text-[12.5px] text-[var(--text-muted)]">
+                No Registered Models in tracking registry.
+              </div>
             ) : (
               <div className="divide-y divide-[var(--border-hairline)]">
                 {(registry?.registeredModels || []).map((rm) => (
@@ -464,7 +457,11 @@ export function RegistryView({
                       <button
                         type="button"
                         onClick={async () => {
-                          await api.promoteModelAlias(rm.name, rm.latestVersions![0].version, "production");
+                          await api.promoteModelAlias(
+                            rm.name,
+                            rm.latestVersions![0].version,
+                            "production",
+                          );
                           setStatusMsg(`Set @production on model ${rm.name}`);
                           await onReload();
                         }}

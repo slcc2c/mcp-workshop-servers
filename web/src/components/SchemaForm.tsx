@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Play, Code2, SlidersHorizontal } from "lucide-react";
 import type { ToolItem } from "../types";
 import { resolveSchemaType } from "../lib/format";
@@ -11,6 +11,7 @@ export function SchemaForm({
   onChangeRawJson,
   onRun,
   running,
+  extraActions,
 }: {
   tool: ToolItem;
   argsObj: Record<string, unknown>;
@@ -19,6 +20,7 @@ export function SchemaForm({
   onChangeRawJson: (text: string) => void;
   onRun: () => void;
   running: boolean;
+  extraActions?: ReactNode;
 }) {
   const [mode, setMode] = useState<"form" | "json">("form");
   const props = tool.parameters?.properties || {};
@@ -72,18 +74,21 @@ export function SchemaForm({
           </button>
         </div>
 
-        <button
-          type="button"
-          disabled={running}
-          onClick={onRun}
-          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[var(--accent)] hover:brightness-110 disabled:opacity-50 text-white text-[12.5px] font-semibold cursor-pointer transition-all whitespace-nowrap shrink-0"
-        >
-          <Play className="w-3.5 h-3.5" />
-          {running ? "Running..." : "Run Tool"}
-          <kbd className="ml-1 hidden sm:inline px-1.5 py-0.2 rounded bg-white/15 text-[10.5px] font-mono">
-            ⌘↵
-          </kbd>
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          {extraActions}
+          <button
+            type="button"
+            disabled={running}
+            onClick={onRun}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[var(--accent)] hover:brightness-110 disabled:opacity-50 text-white text-[12.5px] font-semibold cursor-pointer transition-all whitespace-nowrap shrink-0"
+          >
+            <Play className="w-3.5 h-3.5" />
+            {running ? "Running..." : "Run Tool"}
+            <kbd className="ml-1 hidden sm:inline px-1.5 py-0.2 rounded bg-white/15 text-[10.5px] font-mono">
+              ⌘↵
+            </kbd>
+          </button>
+        </div>
       </div>
 
       {mode === "form" && propEntries.length > 0 ? (

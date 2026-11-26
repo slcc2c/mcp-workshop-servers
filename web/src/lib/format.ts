@@ -68,6 +68,32 @@ export function tokenizePromptTemplate(template: string): TemplateToken[] {
   return out;
 }
 
+export function extractPromptVariables(template: string): string[] {
+  const normalized = normalizeMultilineText(template);
+  const re = /\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g;
+  const seen: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(normalized)) !== null) {
+    const key = match[1];
+    if (!seen.includes(key)) {
+      seen.push(key);
+    }
+  }
+  return seen;
+}
+
+/** Substitute {{var}} placeholders identically to MLflowBridgedPrompt.render(). */
+export function renderPromptTemplate(
+  template: string,
+  values: Record<string, string>,
+): string {
+  const normalized = normalizeMultilineText(template);
+  return normalized.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (full, key: string) => {
+    const val = values[key];
+    return val !== undefined && val !== "" ? val : full;
+  });
+}
+
 export function extractSchemaDefaults(schema?: {
   properties?: Record<string, SchemaProperty>;
 }): Record<string, unknown> {

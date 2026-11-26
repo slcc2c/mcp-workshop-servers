@@ -1,10 +1,14 @@
-import { Component, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "./lib/api";
+import { parseWorkbenchUrl, syncWorkbenchUrl } from "./lib/urlState";
+import { resolveMlflowUiUrl } from "./lib/urls";
 import type {
   AuthState,
   EvalRunItem,
   HealthResponse,
   NavTab,
+  PlaygroundPresetItem,
+  PlaygroundReplayRequest,
   ReadyResponse,
   RegistryResponse,
   ThemeMode,
@@ -14,29 +18,13 @@ import type {
 import { AuthModal } from "./components/AuthModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { Layout } from "./components/Layout";
+import { ShortcutsModal } from "./components/ShortcutsModal";
 import { ClientsView } from "./views/ClientsView";
 import { OverviewView } from "./views/OverviewView";
 import { PlaygroundView } from "./views/PlaygroundView";
 import { RegistryView } from "./views/RegistryView";
 import { TracesView } from "./views/TracesView";
 import { UpstreamsView } from "./views/UpstreamsView";
-
-const VALID_TABS = new Set<NavTab>([
-  "overview",
-  "playground",
-  "traces",
-  "registry",
-  "upstreams",
-  "clients",
-]);
-
-function readInitialTab(): NavTab {
-  const hash = window.location.hash.replace("#", "").trim() as NavTab;
-  if (VALID_TABS.has(hash)) return hash;
-  const parts = window.location.pathname.replace(/^\/ui\/?/, "").split("/").filter(Boolean);
-  const candidate = parts[0] as NavTab | undefined;
-  return candidate && VALID_TABS.has(candidate) ? candidate : "overview";
-}
 
 function readInitialTheme(): ThemeMode {
   try {
@@ -80,11 +68,22 @@ class WorkbenchErrorBoundary extends Component<
   }
 }
 
+const G_NAV_MAP: Record<string, NavTab> = {
+  o: "overview",
+  p: "playground",
+  t: "traces",
+  r: "registry",
+  u: "upstreams",
+  c: "clients",
+};
+
 export function App() {
-  const [activeTab, setActiveTab] = useState<NavTab>(readInitialTab);
+  const initialUrlState = useMemo(() => parseWorkbenchUrl(window.location), []);
+  const [activeTab, setActiveTab] = useState<NavTab>(initialUrlState.tab);
   const [theme, setTheme] = useState<ThemeMode>(readInitialTheme);
   const [autoRefreshMs, setAutoRefreshMs] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -103,11 +102,27 @@ export function App() {
   const [profileCounts, setProfileCounts] = useState<Record<string, number>>({});
   const [evalHistory, setEvalHistory] = useState<EvalRunItem[]>([]);
   const [registry, setRegistry] = useState<RegistryResponse | null>(null);
+  const [presets, setPresets] = useState<PlaygroundPresetItem[]>([]);
 
-  const [profileFilter, setProfileFilter] = useState("");
-  const [serverFilter, setServerFilter] = useState("");
-  const [selectedToolKey, setSelectedToolKey] = useState<string | null>(null);
-  const [selectedPromptName, setSelectedPromptName] = useState<string | null>(null);
+  const [profileFilter, setProfileFilter] = useState(initialUrlState.profile || "");
+  const [serverFilter, setServerFilter] = useState(initialUrlState.server || "");
+  const [selectedToolKey, setSelectedToolKey] = useState<string | null>(
+    initialUrlState.tool || null,
+  );
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(
+    initialUrlState.trace || null,
+  );
+  const [selectedPromptName, setSelectedPromptName] = useState<string | null>(
+    initialUrlState.prompt || null,
+  );
+  const [selectedPromptVersion, setSelectedPromptVersion] = useState<string | null>(
+    initialUrlState.version || null,
+  );
+  const [replayRequest, setReplayRequest] = useState<PlaygroundReplayRequest | null>(null);
+
+  const gChordActiveRef = useRef(false);
+  const gChordTimerRef = useRef<number | null>(null);
+  const replayNonceRef = useRef(0);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -118,27 +133,151 @@ export function App() {
     }
   }, [theme]);
 
+  // Keep URL synchronized with deep-linkable workbench state
   useEffect(() => {
+    syncWorkbenchUrl({
+      tab: activeTab,
+      profile: profileFilter,
+      server: serverFilter,
+      tool: selectedToolKey,
+      trace: selectedTraceId,
+      prompt: selectedPromptName,
+      version: selectedPromptVersion,
+    });
+  }, [
+    activeTab,
+    profileFilter,
+    serverFilter,
+    selectedToolKey,
+    selectedTraceId,
+    selectedPromptName,
+    selectedPromptVersion,
+  ]);
+
+  // Listen to browser back/forward navigation
+  useEffect(() => {
+    function onPopState() {
+      const parsed = parseWorkbenchUrl(window.location);
+      setActiveTab(parsed.tab);
+      if (parsed.profile !== undefined) setProfileFilter(parsed.profile || "");
+      if (parsed.server !== undefined) setServerFilter(parsed.server || "");
+      setSelectedToolKey(parsed.tool || null);
+      setSelectedTraceId(parsed.trace || null);
+      setSelectedPromptName(parsed.prompt || null);
+      setSelectedPromptVersion(parsed.version || null);
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  const navigateTab = useCallback((tab: NavTab) => {
+    setActiveTab(tab);
+  }, []);
+
+  // Global keyboard shortcuts (Cmd/Ctrl+K, g+<tab>, ?, /, Esc)
+  useEffect(() => {
+    function clearGChord() {
+      gChordActiveRef.current = false;
+      if (gChordTimerRef.current !== null) {
+        window.clearTimeout(gChordTimerRef.current);
+        gChordTimerRef.current = null;
+      }
+    }
+
     function handleKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        clearGChord();
+        setShortcutsOpen(false);
         setPaletteOpen((v) => !v);
+        return;
+      }
+
+      if (e.key === "Escape") {
+        clearGChord();
+        if (shortcutsOpen) {
+          setShortcutsOpen(false);
+          return;
+        }
+        if (paletteOpen) {
+          setPaletteOpen(false);
+          return;
+        }
+        if (authModalOpen) {
+          setAuthModalOpen(false);
+        }
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase() || "";
+      const isEditing =
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        Boolean(target?.isContentEditable);
+
+      if (isEditing || e.metaKey || e.ctrlKey || e.altKey) {
+        clearGChord();
+        return;
+      }
+
+      if (gChordActiveRef.current) {
+        const dest = G_NAV_MAP[e.key.toLowerCase()];
+        clearGChord();
+        if (dest) {
+          e.preventDefault();
+          navigateTab(dest);
+        }
+        return;
+      }
+
+      if (e.key === "g") {
+        gChordActiveRef.current = true;
+        gChordTimerRef.current = window.setTimeout(clearGChord, 800);
+        return;
+      }
+
+      if (e.key === "?") {
+        e.preventDefault();
+        setPaletteOpen(false);
+        setShortcutsOpen((v) => !v);
+        return;
+      }
+
+      if (e.key === "/") {
+        const searchInput = document.querySelector<HTMLInputElement>(
+          '[data-shortcut-search="true"]',
+        );
+        if (searchInput) {
+          e.preventDefault();
+          searchInput.focus();
+          searchInput.select();
+        }
       }
     }
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, []);
 
-  function navigateTab(tab: NavTab) {
-    setActiveTab(tab);
-    window.location.hash = tab;
-  }
+    window.addEventListener("keydown", handleKey);
+    return () => {
+      window.removeEventListener("keydown", handleKey);
+      clearGChord();
+    };
+  }, [paletteOpen, shortcutsOpen, authModalOpen, navigateTab]);
 
   const loadToolsOnly = useCallback(async (prof: string, srv: string) => {
     try {
       const res = await api.tools({ profile: prof || undefined, server: srv || undefined });
       setTools(res.tools || []);
       setProfileCounts(res.profileCounts || {});
+    } catch {
+      // ignore if unauthenticated
+    }
+  }, []);
+
+  const reloadPresets = useCallback(async () => {
+    try {
+      const res = await api.presets();
+      setPresets(res.presets || []);
     } catch {
       // ignore if unauthenticated
     }
@@ -157,11 +296,12 @@ export function App() {
     const canFetchAuthed = me ? !me.authEnabled || me.authenticated : false;
     if (!canFetchAuthed) return;
 
-    const [wd, tl, tr, reg] = await Promise.all([
+    const [wd, tl, tr, reg, pr] = await Promise.all([
       api.watchdog().catch(() => null),
       api.tools({ profile: profileFilter || undefined, server: serverFilter || undefined }).catch(() => null),
       api.traces({ limit: "15" }).catch(() => null),
       api.registry().catch(() => null),
+      api.presets().catch(() => null),
     ]);
     if (wd) setWatchdog(wd);
     if (tl) {
@@ -172,6 +312,7 @@ export function App() {
       setEvalHistory(tr.evalHistory || tr.evalRuns || []);
     }
     if (reg) setRegistry(reg);
+    if (pr) setPresets(pr.presets || []);
   }, [profileFilter, serverFilter]);
 
   useEffect(() => {
@@ -208,9 +349,26 @@ export function App() {
     await api.logout();
     setWatchdog(null);
     setTools([]);
+    setPresets([]);
     setRegistry(null);
     await refreshAll();
   }
+
+  function handleInspectTrace(traceId: string) {
+    setSelectedTraceId(traceId);
+    navigateTab("traces");
+  }
+
+  function handleReplayInPlayground(req: Omit<PlaygroundReplayRequest, "nonce">) {
+    replayNonceRef.current += 1;
+    setProfileFilter("");
+    setServerFilter("");
+    setSelectedToolKey(`${req.server}.${req.tool}`);
+    setReplayRequest({ ...req, nonce: replayNonceRef.current });
+    navigateTab("playground");
+  }
+
+  const mlflowUiBase = resolveMlflowUiUrl(health?.mlflowUiUrl);
 
   return (
     <Layout
@@ -218,13 +376,14 @@ export function App() {
       onSelectTab={navigateTab}
       theme={theme}
       onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-      version={health?.version || "2.3.0"}
+      version={health?.version || "2.4.0"}
       readyStatus={ready?.status || "checking"}
       auth={auth}
       autoRefreshMs={autoRefreshMs}
       onChangeAutoRefresh={setAutoRefreshMs}
       onRefreshAll={() => refreshAll()}
       onOpenPalette={() => setPaletteOpen(true)}
+      onOpenShortcuts={() => setShortcutsOpen(true)}
       onOpenAuthModal={() => {
         setAuthError(null);
         setAuthModalOpen(true);
@@ -274,9 +433,11 @@ export function App() {
           tools={tools}
           servers={health?.servers || []}
           profiles={health?.profiles || []}
+          presets={presets}
           profileFilter={profileFilter}
           serverFilter={serverFilter}
           selectedToolKey={selectedToolKey}
+          replayRequest={replayRequest}
           onChangeProfileFilter={(p) => {
             setProfileFilter(p);
             setSelectedToolKey(null);
@@ -286,16 +447,31 @@ export function App() {
             setSelectedToolKey(null);
           }}
           onSelectToolKey={setSelectedToolKey}
+          onPresetsChanged={reloadPresets}
+          onInspectTrace={handleInspectTrace}
           onAfterRun={() => refreshAll()}
         />
       )}
 
-      {activeTab === "traces" && <TracesView />}
+      {activeTab === "traces" && (
+        <TracesView
+          initialTraceId={selectedTraceId}
+          mlflowUiBase={mlflowUiBase}
+          onSelectTraceId={setSelectedTraceId}
+          onReplayInPlayground={handleReplayInPlayground}
+        />
+      )}
 
       {activeTab === "registry" && (
         <RegistryView
           registry={registry}
           initialPromptName={selectedPromptName}
+          initialPromptVersion={selectedPromptVersion}
+          mlflowUiBase={mlflowUiBase}
+          onSelectPrompt={(name, ver) => {
+            setSelectedPromptName(name);
+            setSelectedPromptVersion(ver || null);
+          }}
           onReload={async () => {
             const reg = await api.registry();
             setRegistry(reg);
@@ -310,10 +486,20 @@ export function App() {
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
+        presets={presets}
         servers={health?.servers || []}
         tools={tools}
         prompts={registry?.prompts || []}
         onSelectTab={navigateTab}
+        onSelectPreset={(preset) => {
+          handleReplayInPlayground({
+            server: preset.server,
+            tool: preset.tool,
+            arguments: preset.arguments || {},
+            presetName: preset.name,
+            autoRun: false,
+          });
+        }}
         onSelectTool={(srv, toolName) => {
           setProfileFilter("");
           setServerFilter(srv);
@@ -322,9 +508,12 @@ export function App() {
         }}
         onSelectPrompt={(name) => {
           setSelectedPromptName(name);
+          setSelectedPromptVersion(null);
           navigateTab("registry");
         }}
       />
+
+      <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
       <AuthModal
         open={authModalOpen}

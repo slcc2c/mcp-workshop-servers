@@ -2,6 +2,7 @@ import type {
   AuthState,
   CallToolResponse,
   HealthResponse,
+  PlaygroundPresetItem,
   PromptDetailResponse,
   ReadyResponse,
   RegistryResponse,
@@ -128,9 +129,41 @@ export const api = {
     }),
   promoteTraceDataset: (traceId: string) =>
     apiFetch<Record<string, unknown>>(
-      `/api/v1/traces/${encodeURIComponent(traceId)}/promote-dataset`,
+      `/api/v1/traces/${encodeURIComponent(traceId)}/promote-to-dataset`,
       { method: "POST" },
     ),
+  presets: () => apiFetch<{ path: string; presets: PlaygroundPresetItem[] }>("/api/v1/presets"),
+  createPreset: (body: {
+    name: string;
+    server: string;
+    tool: string;
+    arguments: Record<string, unknown>;
+    description?: string;
+    pinned?: boolean;
+  }) =>
+    apiFetch<{ preset: PlaygroundPresetItem }>("/api/v1/presets", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updatePreset: (
+    id: string,
+    body: Partial<{
+      name: string;
+      server: string;
+      tool: string;
+      arguments: Record<string, unknown>;
+      description: string;
+      pinned: boolean;
+    }>,
+  ) =>
+    apiFetch<{ preset: PlaygroundPresetItem }>(`/api/v1/presets/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  deletePreset: (id: string) =>
+    apiFetch<{ deleted: string }>(`/api/v1/presets/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
   registry: () => apiFetch<RegistryResponse>("/api/v1/mlflow/registry"),
   promptDetail: (name: string, versionOrAlias = "latest") =>
     apiFetch<PromptDetailResponse>(
@@ -148,6 +181,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ alias, version: Number(version) }),
       },
+    ),
+  deletePromptAlias: (name: string, alias: string) =>
+    apiFetch<{ deleted: boolean; name: string; alias: string }>(
+      `/api/v1/mlflow/prompts/${encodeURIComponent(name)}/alias/${encodeURIComponent(alias)}`,
+      { method: "DELETE" },
     ),
   promoteModelAlias: (name: string, version: string, alias = "production") =>
     apiFetch<Record<string, unknown>>(

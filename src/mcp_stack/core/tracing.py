@@ -7,6 +7,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 import mcp.types as mt
@@ -48,6 +49,7 @@ _POLICY_REFUSAL_MARKERS = (
 _MAX_STR_LEN = 4000
 _GIT_SHA_CACHE: str | None = None
 _LOGGED_MODEL_CACHE: dict[tuple[str, str, str], str] = {}
+last_trace_id_var: ContextVar[str | None] = ContextVar("mcp_last_trace_id", default=None)
 
 
 def _short_git_sha() -> str:
@@ -202,6 +204,9 @@ class MLflowTracingMiddleware(Middleware):
             mlflow_mod: Any = None
             try:
                 mlflow_mod = self._configure_mlflow()
+                # Resolve LoggedModel before start_span() so set_tracking_uri()/reset()
+                # never runs mid-span.
+                model_id = get_or_create_gateway_logged_model(self._settings)
                 from mlflow.entities import SpanType
 
                 span_ctx = mlflow_mod.start_span(
@@ -209,6 +214,9 @@ class MLflowTracingMiddleware(Middleware):
                     span_type=SpanType.TOOL,
                 )
                 span = span_ctx.__enter__()
+                trace_id = getattr(span, "request_id", None) or getattr(span, "trace_id", None)
+                if trace_id:
+                    last_trace_id_var.set(str(trace_id))
                 span.set_inputs(redact_payload(raw_args))
                 span.set_attributes(
                     {
@@ -216,7 +224,6 @@ class MLflowTracingMiddleware(Middleware):
                         "mcp.tool": tool_name,
                     }
                 )
-                model_id = get_or_create_gateway_logged_model(self._settings)
                 update_fn = getattr(mlflow_mod, "update_current_trace", None)
                 if callable(update_fn):
                     update_kwargs: dict[str, Any] = {

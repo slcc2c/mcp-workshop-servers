@@ -48,14 +48,18 @@ class GatewaySettings(BaseModel):
 
     host: str = "127.0.0.1"
     port: int = 8090
+    public_url: str | None = None
     log_level: str = "INFO"
     log_json: bool = False
     auth_enabled: bool = False
     allow_unauthenticated_non_loopback: bool = False
     ui_session_ttl_s: int = 43200
     ui_session_secret: SecretStr | None = None
+    ui_trust_tailnet: bool = False
     eval_regression_threshold: float = 1.0
     admin_tools_enabled: bool = False
+    presets_path: Path | None = None
+    mlflow_ui_url: str | None = None
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:*", "http://127.0.0.1:*"]
     )
@@ -448,6 +452,8 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         env_overrides["gateway"]["host"] = val
     if val := os.getenv("MCP_GATEWAY_PORT"):
         env_overrides["gateway"]["port"] = int(val)
+    if val := os.getenv("MCP_GATEWAY_PUBLIC_URL"):
+        env_overrides["gateway"]["public_url"] = val.strip().rstrip("/")
     if val := os.getenv("MCP_LOG_LEVEL"):
         env_overrides["gateway"]["log_level"] = val
     if (b := _parse_bool(os.getenv("MCP_LOG_JSON"))) is not None:
@@ -460,10 +466,16 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         env_overrides["gateway"]["ui_session_ttl_s"] = int(val)
     if val := os.getenv("GATEWAY_UI_SESSION_SECRET"):
         env_overrides["gateway"]["ui_session_secret"] = val
+    if (b := _parse_bool(os.getenv("MCP_UI_TRUST_TAILNET"))) is not None:
+        env_overrides["gateway"]["ui_trust_tailnet"] = b
     if val := os.getenv("GATEWAY_EVAL_REGRESSION_THRESHOLD"):
         env_overrides["gateway"]["eval_regression_threshold"] = float(val)
     if (b := _parse_bool(os.getenv("MCP_GATEWAY_ADMIN_TOOLS_ENABLED"))) is not None:
         env_overrides["gateway"]["admin_tools_enabled"] = b
+    if val := os.getenv("MCP_GATEWAY_PRESETS_PATH"):
+        env_overrides["gateway"]["presets_path"] = Path(val.strip()).expanduser()
+    if val := os.getenv("MCP_GATEWAY_MLFLOW_UI_URL"):
+        env_overrides["gateway"]["mlflow_ui_url"] = val.strip().rstrip("/")
     if (items := _split_csv(os.getenv("MCP_ENABLED_SERVERS"))) is not None:
         env_overrides["gateway"]["enabled_servers"] = items
     if (items := _split_csv(os.getenv("MCP_CORS_ORIGINS"))) is not None:
