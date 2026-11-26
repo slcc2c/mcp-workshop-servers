@@ -142,6 +142,8 @@ def test_watchdog_eval_regression_detection_and_fail_open(
     )
     assert res_reg["overall"] == "healthy"
     assert res_reg["eval_regression"]["status"] == "regression"
+    assert "drift" in res_reg
+    assert res_reg["drift"]["status"] in {"ok", "drift_detected", "unavailable"}
     assert recoveries == []
     assert log_path.exists()
 

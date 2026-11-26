@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-photos",
   "title": "MCP Photos Server",
   "description": "macOS host-only Apple Photos library discovery and sandboxed export server",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "transport": {
         "type": "stdio"
       },

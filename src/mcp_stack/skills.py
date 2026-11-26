@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -196,10 +198,22 @@ def _collect_canonical_skills(
 
 
 def _scan_plugin_layers(home: Path) -> list[dict[str, Any]]:
-    """Layer 3: read-only scan of Claude plugins/synced, Codex plugins, and Antigravity plugins."""
+    """Layer 3: read-only scan of enabled Claude/Codex/Antigravity plugins and synced buckets."""
     found: list[dict[str, Any]] = []
 
-    # Claude installed_plugins.json
+    claude_enabled_map: dict[str, bool] = {}
+    claude_settings_path = home / ".claude/settings.json"
+    try:
+        if claude_settings_path.exists():
+            c_cfg = json.loads(claude_settings_path.read_text(encoding="utf-8"))
+            if isinstance(c_cfg, dict) and isinstance(c_cfg.get("enabledPlugins"), dict):
+                claude_enabled_map = {
+                    str(k): bool(v) for k, v in c_cfg["enabledPlugins"].items()
+                }
+    except Exception:
+        pass
+
+    # Claude installed_plugins.json (skip plugins explicitly disabled in ~/.claude/settings.json)
     ip_path = home / ".claude/plugins/installed_plugins.json"
     try:
         if ip_path.exists():
@@ -207,6 +221,8 @@ def _scan_plugin_layers(home: Path) -> list[dict[str, Any]]:
             plugins = raw.get("plugins", raw) if isinstance(raw, dict) else {}
             if isinstance(plugins, dict):
                 for plugin_id, entries in sorted(plugins.items()):
+                    if claude_enabled_map.get(plugin_id) is False:
+                        continue
                     items = entries if isinstance(entries, list) else [entries]
                     for item in items:
                         if not isinstance(item, dict):
@@ -242,14 +258,31 @@ def _scan_plugin_layers(home: Path) -> list[dict[str, Any]]:
     except OSError:
         pass
 
-    # Codex plugin cache (~/.codex/plugins/cache)
+    disabled_codex_plugins: set[str] = set()
+    codex_cfg_path = home / ".codex/config.toml"
+    try:
+        if codex_cfg_path.exists():
+            cx_cfg = tomllib.loads(codex_cfg_path.read_text(encoding="utf-8"))
+            for k, v in (cx_cfg.get("plugins") or {}).items():
+                if isinstance(v, dict) and v.get("enabled") is False:
+                    disabled_codex_plugins.add(str(k))
+    except Exception:
+        pass
+
+    # Codex plugin cache (~/.codex/plugins/cache/<marketplace>/<plugin>/...)
     codex_cache = home / ".codex/plugins/cache"
     try:
         if codex_cache.exists():
             seen_cx: set[tuple[str, str]] = set()
             for smd in sorted(codex_cache.rglob("SKILL.md")):
                 rel = smd.relative_to(codex_cache)
-                origin = "/".join(rel.parts[:2]) if len(rel.parts) >= 2 else rel.parts[0]
+                if len(rel.parts) >= 2:
+                    plugin_key = f"{rel.parts[1]}@{rel.parts[0]}"
+                    if plugin_key in disabled_codex_plugins:
+                        continue
+                    origin = "/".join(rel.parts[:2])
+                else:
+                    origin = rel.parts[0]
                 key = (smd.parent.name, origin)
                 if key in seen_cx:
                     continue
@@ -939,4 +972,99 @@ def rollback_quarantine(batch_dir: Path, *, dry_run: bool = True) -> dict[str, A
         "skippedCount": len(skipped),
         "restored": restored,
         "skipped": skipped,
+    }
+
+
+def dedupe_repo_dual_skills(
+    repos_root: Path,
+    *,
+    repo_names: list[str] | None = None,
+    quarantine_root: Path | None = None,
+    dry_run: bool = True,
+    home_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Quarantine identical .claude/skills/<name> copies and link to ../../.agents/skills/<name>."""
+    home = (home_dir or Path.home()).resolve()
+    r_root = repos_root.expanduser()
+    q_base = (
+        quarantine_root.expanduser()
+        if quarantine_root is not None
+        else home / ".local/share/mcp-stack/skill-quarantine"
+    )
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    batch_dir = q_base / f"{stamp}-repo-symlinks"
+
+    wanted = set(repo_names) if repo_names else None
+    actions: list[dict[str, Any]] = []
+    skipped_diverged: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+
+    if r_root.exists() and r_root.is_dir():
+        seen_repos: set[Path] = set()
+        for repo in sorted(r_root.iterdir()):
+            if not repo.is_dir():
+                continue
+            if wanted is not None and repo.name not in wanted:
+                continue
+            resolved = repo.resolve()
+            if resolved in seen_repos:
+                continue
+            seen_repos.add(resolved)
+            agents_dir = resolved / ".agents/skills"
+            claude_dir = resolved / ".claude/skills"
+            if not agents_dir.is_dir() or not claude_dir.is_dir():
+                continue
+            for agent_entry in sorted(agents_dir.iterdir()):
+                if agent_entry.name.startswith(".") or not (agent_entry / "SKILL.md").exists():
+                    continue
+                claude_entry = claude_dir / agent_entry.name
+                if claude_entry.is_symlink() or not (claude_entry / "SKILL.md").exists():
+                    continue
+                if hash_skill_dir(agent_entry) != hash_skill_dir(claude_entry):
+                    skipped_diverged.append(
+                        {
+                            "repo": repo.name,
+                            "skill": agent_entry.name,
+                            "agentsPath": str(agent_entry),
+                            "claudePath": str(claude_entry),
+                        }
+                    )
+                    continue
+                rel_target = os.path.relpath(agent_entry, claude_entry.parent)
+                if not dry_run:
+                    _quarantine_item(
+                        claude_entry,
+                        batch_dir,
+                        f"repos/{repo.name}",
+                        "repo_dual_copy_dedupe",
+                        records,
+                        dry_run=False,
+                    )
+                    claude_entry.symlink_to(rel_target)
+                actions.append(
+                    {
+                        "repo": repo.name,
+                        "skill": agent_entry.name,
+                        "claudePath": str(claude_entry),
+                        "relativeTarget": rel_target,
+                    }
+                )
+
+    manifest_file: Path | None = None
+    if not dry_run and records:
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        manifest_file = batch_dir / "manifest.json"
+        manifest_file.write_text(
+            json.dumps({"createdAt": stamp, "records": records}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    return {
+        "dryRun": dry_run,
+        "quarantineBatch": str(batch_dir) if (not dry_run and records) else None,
+        "manifestFile": str(manifest_file) if manifest_file else None,
+        "dedupedCount": len(actions),
+        "skippedDivergedCount": len(skipped_diverged),
+        "actions": actions,
+        "skippedDiverged": skipped_diverged,
     }

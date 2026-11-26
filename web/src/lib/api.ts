@@ -1,8 +1,20 @@
 import type {
+  ActivityEvent,
+  AgentStatusResponse,
   AuthState,
   CallToolResponse,
   ClientAuditResponse,
+  EvalDatasetDetailResponse,
+  EvalDatasetSummary,
+  EvalRunCompareResponse,
+  EvalRunDetailResponse,
+  EvalRunItem,
   HealthResponse,
+  OpsMetricsSeriesResponse,
+  ProfileInventoryItem,
+  SecretsHealthResponse,
+  SkillRegistryDetailResponse,
+  SkillRegistryListResponse,
   PlaygroundPresetItem,
   PromptDetailResponse,
   ReadyResponse,
@@ -246,4 +258,98 @@ export const api = {
         ...(opts?.targets ? { targets: opts.targets } : {}),
       }),
     }),
+  createProfile: (name: string, servers: string[]) =>
+    apiFetch<{ profile: ProfileInventoryItem }>("/api/v1/profiles", {
+      method: "POST",
+      body: JSON.stringify({ name, servers }),
+    }),
+  updateProfile: (name: string, servers: string[]) =>
+    apiFetch<{ profile: ProfileInventoryItem }>(`/api/v1/profiles/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify({ servers }),
+    }),
+  deleteProfile: (name: string) =>
+    apiFetch<{ deleted: string }>(`/api/v1/profiles/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  mlflowSkills: (opts?: { q?: string; status?: string; organization?: string }) => {
+    const p = new URLSearchParams();
+    if (opts?.q) p.set("q", opts.q);
+    if (opts?.status) p.set("status", opts.status);
+    if (opts?.organization) p.set("organization", opts.organization);
+    const qs = p.toString();
+    return apiFetch<SkillRegistryListResponse>(`/api/v1/mlflow/skills${qs ? `?${qs}` : ""}`);
+  },
+  mlflowSkillDetail: (name: string, opts?: { organization?: string; version_or_alias?: string }) => {
+    const p = new URLSearchParams();
+    if (opts?.organization) p.set("organization", opts.organization);
+    if (opts?.version_or_alias) p.set("version_or_alias", opts.version_or_alias);
+    const qs = p.toString();
+    return apiFetch<SkillRegistryDetailResponse>(
+      `/api/v1/mlflow/skills/${encodeURIComponent(name)}${qs ? `?${qs}` : ""}`,
+    );
+  },
+  publishMlflowSkill: (payload: {
+    source?: string;
+    localSkillId?: string;
+    name?: string;
+    organization?: string;
+    status?: string;
+    alias?: string;
+  }) =>
+    apiFetch<{ published: boolean; skill?: unknown }>("/api/v1/mlflow/skills", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateMlflowSkillVersion: (
+    name: string,
+    version: string,
+    payload: { status?: string; alias?: string; deleteAlias?: string; organization?: string },
+  ) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/mlflow/skills/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`,
+      { method: "PATCH", body: JSON.stringify(payload) },
+    ),
+  agentStatus: () => apiFetch<AgentStatusResponse>("/api/v1/agent/status"),
+  evalDatasets: () => apiFetch<{ datasets: EvalDatasetSummary[] }>("/api/v1/evals/datasets"),
+  evalDatasetDetail: (datasetId: string) =>
+    apiFetch<EvalDatasetDetailResponse>(`/api/v1/evals/datasets/${encodeURIComponent(datasetId)}`),
+  addEvalDatasetRecords: (
+    datasetId: string,
+    records: Array<{ inputs: Record<string, unknown>; expectations?: Record<string, unknown> }>,
+  ) =>
+    apiFetch<{ added: number; datasetId: string }>(
+      `/api/v1/evals/datasets/${encodeURIComponent(datasetId)}/records`,
+      { method: "POST", body: JSON.stringify({ records }) },
+    ),
+  evalRuns: (limit = 25) => apiFetch<{ runs: EvalRunItem[] }>(`/api/v1/evals/runs?limit=${limit}`),
+  evalRunDetail: (runId: string) =>
+    apiFetch<EvalRunDetailResponse>(`/api/v1/evals/runs/${encodeURIComponent(runId)}`),
+  evalCompare: (runA: string, runB: string) =>
+    apiFetch<EvalRunCompareResponse>(
+      `/api/v1/evals/compare?run_a=${encodeURIComponent(runA)}&run_b=${encodeURIComponent(runB)}`,
+    ),
+  runEval: (payload: {
+    mode: "golden" | "traces" | "agent";
+    with_llm_judge?: boolean;
+    judge_model?: string;
+    model_api?: string;
+    dataset_name?: string;
+    profile?: string;
+    model?: string;
+  }) =>
+    apiFetch<{ ok?: boolean; runId?: string; [key: string]: unknown }>("/api/v1/evals/run", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  secretsHealth: () => apiFetch<SecretsHealthResponse>("/api/v1/ops/secrets-health"),
+  reprobeAuthRequired: () =>
+    apiFetch<{ checked: number; results: unknown[] }>("/api/v1/ops/reprobe-auth-required", {
+      method: "POST",
+    }),
+  opsMetricsSeries: (bucketSeconds = 300, buckets = 12) =>
+    apiFetch<OpsMetricsSeriesResponse>(
+      `/api/v1/ops/metrics-series?bucket_seconds=${bucketSeconds}&buckets=${buckets}`,
+    ),
+  opsActivityRecent: () => apiFetch<{ events: ActivityEvent[] }>("/api/v1/ops/stream?once=1"),
 };

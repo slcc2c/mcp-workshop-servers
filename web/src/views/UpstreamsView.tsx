@@ -2,11 +2,32 @@ import { useCallback, useEffect, useState } from "react";
 import { Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
 import { resolveGatewayBaseUrl } from "../lib/urls";
-import type { UpstreamConfigItem } from "../types";
+import type {
+  ProfileInventoryItem,
+  ServerInventoryItem,
+  UpstreamConfigItem,
+  UpstreamsSubTab,
+} from "../types";
 import { CopyButton } from "../components/CopyButton";
+import { ProfilesEditor } from "../components/ProfilesEditor";
 import { StatusBadge, connectionTone } from "../components/StatusDot";
 
-export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<void> }) {
+export function UpstreamsView({
+  initialSubTab = "upstreams",
+  onChangeSubTab,
+  profiles = [],
+  servers = [],
+  profileCounts = {},
+  onAfterChange,
+}: {
+  initialSubTab?: UpstreamsSubTab;
+  onChangeSubTab?: (sub: UpstreamsSubTab) => void;
+  profiles?: ProfileInventoryItem[];
+  servers?: ServerInventoryItem[];
+  profileCounts?: Record<string, number>;
+  onAfterChange: () => Promise<void>;
+}) {
+  const [subTab, setSubTab] = useState<UpstreamsSubTab>(initialSubTab);
   const [items, setItems] = useState<UpstreamConfigItem[]>([]);
   const [configPath, setConfigPath] = useState("config/gateway.local.yaml");
   const [loading, setLoading] = useState(false);
@@ -24,8 +45,14 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
   const [profilesCsv, setProfilesCsv] = useState("studio");
   const [governance, setGovernance] = useState("external-proxy");
   const [description, setDescription] = useState("");
+  const [allowToolsText, setAllowToolsText] = useState("");
+  const [denyToolsText, setDenyToolsText] = useState("");
   const [saving, setSaving] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSubTab(initialSubTab);
+  }, [initialSubTab]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -55,6 +82,8 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
     setProfilesCsv("studio");
     setGovernance("external-proxy");
     setDescription("");
+    setAllowToolsText("");
+    setDenyToolsText("");
     setFormErr(null);
     setModalOpen(true);
   }
@@ -70,6 +99,8 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
     setProfilesCsv((item.profiles || ["studio"]).join(", "));
     setGovernance(item.governance || "external-proxy");
     setDescription(item.description || "");
+    setAllowToolsText((item.allow_tools || []).join("\n"));
+    setDenyToolsText((item.deny_tools || []).join("\n"));
     setFormErr(null);
     setModalOpen(true);
   }
@@ -103,6 +134,14 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
         profiles: profilesCsv
           .split(",")
           .map((p) => p.trim())
+          .filter(Boolean),
+        allow_tools: allowToolsText
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        deny_tools: denyToolsText
+          .split("\n")
+          .map((s) => s.trim())
           .filter(Boolean),
         governance: governance.trim() || "external-proxy",
         description: description.trim(),
@@ -147,29 +186,67 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-4 flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h2 className="text-[14px] font-semibold m-0">Federated Upstreams Manager</h2>
-          <div className="text-[12px] text-[var(--text-muted)] font-mono mt-0.5">{configPath}</div>
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="inline-flex rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] p-0.5">
+            {(
+              [
+                ["upstreams", `Upstreams (${items.length})`],
+                ["profiles", `Profiles (${profiles.length})`],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => {
+                  setSubTab(id);
+                  onChangeSubTab?.(id);
+                }}
+                className={`px-3 py-1.5 rounded-md text-[12.5px] font-medium cursor-pointer transition-colors ${
+                  subTab === id
+                    ? "bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-xs"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="text-[12px] text-[var(--text-muted)] font-mono">{configPath}</div>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={load}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] text-[12px] cursor-pointer"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            Refresh
-          </button>
-          <button
-            type="button"
-            onClick={openNewModal}
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[var(--accent)] text-white text-[12.5px] font-semibold cursor-pointer"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Add Upstream
-          </button>
-        </div>
+        {subTab === "upstreams" && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={load}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] text-[12px] cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Refresh
+            </button>
+            <button
+              type="button"
+              onClick={openNewModal}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[var(--accent)] text-white text-[12.5px] font-semibold cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Add Upstream
+            </button>
+          </div>
+        )}
       </div>
+
+      {subTab === "profiles" ? (
+        <ProfilesEditor
+          profiles={profiles}
+          servers={servers}
+          profileCounts={profileCounts}
+          onChanged={async () => {
+            await onAfterChange();
+            await load();
+          }}
+        />
+      ) : (
+        <>
 
       {msg && (
         <div className="rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-3.5 py-2 text-[12.5px] text-[var(--accent)]">
@@ -217,10 +294,16 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
 
                 {item.detail && (
                   <div className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[var(--warn-soft)] px-2.5 py-2 text-[12px] text-[var(--warn)] space-y-1 break-words">
-                    <div>{item.detail}</div>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {item.authReasonCode && (
+                        <StatusBadge label={item.authReasonCode} tone="warn" />
+                      )}
+                      <span>{item.detail}</span>
+                    </div>
                     {item.connectionStatus === "auth_required" && (
                       <div className="text-[11px] text-[var(--text-secondary)]">
-                        Provide in <code className="font-mono">.env</code> or via 1Password (<code className="font-mono">op://Server-Configurations/...</code>), then click Probe.
+                        Unlock 1Password Desktop or set{" "}
+                        <code className="font-mono">OP_SERVICE_ACCOUNT_TOKEN</code>, then click Probe.
                       </div>
                     )}
                   </div>
@@ -240,7 +323,11 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
                 )}
 
                 <div className="flex items-center gap-3 text-[11.5px] font-mono text-[var(--text-muted)] flex-wrap">
-                  <span>{item.toolCount} tools</span>
+                  <span>
+                    {typeof item.rawToolCount === "number" && item.rawToolCount !== item.toolCount
+                      ? `${item.exposedToolCount ?? item.toolCount}/${item.rawToolCount} tools (curated)`
+                      : `${item.toolCount} tools`}
+                  </span>
                   <span>profiles: {(item.profiles || []).join(", ")}</span>
                   <span>governance: {item.governance}</span>
                 </div>
@@ -432,6 +519,42 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
               </div>
 
               <div className="space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-[12px] text-[var(--text-secondary)]">
+                    Tool Curation Globs (allow_tools / deny_tools, one per line)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAllowToolsText("get_*\nlist_*\nsearch_*");
+                      setDenyToolsText("");
+                    }}
+                    className="px-2 py-0.5 rounded border border-[var(--border-hairline)] bg-[var(--bg-elevated)] text-[11px] font-mono cursor-pointer"
+                  >
+                    Read-only preset
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <textarea
+                    rows={2}
+                    aria-label="Allow tools globs"
+                    value={allowToolsText}
+                    onChange={(e) => setAllowToolsText(e.target.value)}
+                    placeholder="allow_tools (optional)"
+                    className="w-full rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] p-2 font-mono text-[12px]"
+                  />
+                  <textarea
+                    rows={2}
+                    aria-label="Deny tools globs"
+                    value={denyToolsText}
+                    onChange={(e) => setDenyToolsText(e.target.value)}
+                    placeholder="deny_tools (optional)"
+                    className="w-full rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] p-2 font-mono text-[12px]"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
                 <label className="text-[12px] text-[var(--text-secondary)]">Description</label>
                 <input
                   type="text"
@@ -461,6 +584,8 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
             </form>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

@@ -3,6 +3,7 @@
 from mcp_stack.servers.docker_server import create_docker_server
 from mcp_stack.servers.filesystem import create_filesystem_server
 from mcp_stack.servers.github import create_github_server
+from mcp_stack.servers.mac_mini import create_mac_mini_server
 from mcp_stack.servers.memory import create_memory_server
 from mcp_stack.servers.mlflow_server import (
     create_mlflow_server,
@@ -17,6 +18,7 @@ __all__ = [
     "create_docker_server",
     "create_filesystem_server",
     "create_github_server",
+    "create_mac_mini_server",
     "create_memory_server",
     "create_mlflow_server",
     "create_mlflow_upstream_proxy",

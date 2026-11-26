@@ -315,6 +315,19 @@ def build_omnigent_registry_payload(
     return rendered, managed_ids, warnings
 
 
+def _profile_includes_mlflow(settings: MCPStackSettings, profile: str | None) -> bool:
+    selected = (
+        profile if profile is not None else settings.gateway.default_client_profile
+    ).strip()
+    if not selected or selected == "full":
+        return True
+    members = {
+        m.strip().replace("_", "-").lower()
+        for m in settings.gateway.profiles.get(selected, [])
+    }
+    return bool(members & {"mlflow", "mlflow-upstream"})
+
+
 def generate_client_configs(
     settings: MCPStackSettings,
     repo_root: Path,
@@ -326,6 +339,7 @@ def generate_client_configs(
     root_str = str(repo_root.resolve())
     gw_url = _gateway_mcp_url(settings, profile=profile)
     auth_enabled = settings.gateway.effective_auth_enabled
+    include_direct_mlflow = not _profile_includes_mlflow(settings, profile)
 
     claude_gateway_entry: dict[str, Any] = {
         "type": "http",
@@ -336,33 +350,33 @@ def generate_client_configs(
             "Authorization": "Bearer ${MCP_CLAUDE_AUTH_TOKEN}",
         }
 
-    claude_code_payload: dict[str, Any] = {
-        "mcpServers": {
-            "mcp-workshop-gateway": claude_gateway_entry,
-            "mlflow": {
-                "type": "http",
-                "url": settings.mlflow.mcp_url,
-            },
-            "mcp-photos": {
-                "command": "uv",
-                "args": [
-                    "--directory",
-                    root_str,
-                    "run",
-                    "mcp-stack",
-                    "serve",
-                    "photos",
-                    "--transport",
-                    "stdio",
-                ],
-                "env": {
-                    "PHOTOS_EXPORT_ROOT": str(
-                        settings.photos.export_root or "/Users/spencer/Exports/photos-mcp"
-                    ),
-                },
-            },
-        }
+    claude_servers: dict[str, Any] = {
+        "mcp-workshop-gateway": claude_gateway_entry,
     }
+    if include_direct_mlflow:
+        claude_servers["mlflow"] = {
+            "type": "http",
+            "url": settings.mlflow.mcp_url,
+        }
+    claude_servers["mcp-photos"] = {
+        "command": "uv",
+        "args": [
+            "--directory",
+            root_str,
+            "run",
+            "mcp-stack",
+            "serve",
+            "photos",
+            "--transport",
+            "stdio",
+        ],
+        "env": {
+            "PHOTOS_EXPORT_ROOT": str(
+                settings.photos.export_root or "/Users/spencer/Exports/photos-mcp"
+            ),
+        },
+    }
+    claude_code_payload: dict[str, Any] = {"mcpServers": claude_servers}
 
     stdio_servers = [
         "unity-catalog",
@@ -413,14 +427,12 @@ def generate_client_configs(
             "Authorization": "Bearer ${env:MCP_CURSOR_AUTH_TOKEN}",
         }
 
-    cursor_payload = {
-        "mcpServers": {
-            "mcp-workshop-gateway": cursor_gateway_entry,
-            "mlflow": {
-                "url": settings.mlflow.mcp_url,
-            },
-        }
+    cursor_servers: dict[str, Any] = {
+        "mcp-workshop-gateway": cursor_gateway_entry,
     }
+    if include_direct_mlflow:
+        cursor_servers["mlflow"] = {"url": settings.mlflow.mcp_url}
+    cursor_payload = {"mcpServers": cursor_servers}
 
     photos_export = str(
         settings.photos.export_root or "/Users/spencer/Exports/photos-mcp"
@@ -432,13 +444,17 @@ def generate_client_configs(
     if auth_enabled:
         codex_gateway_lines.append('bearer_token_env_var = "MCP_CODEX_AUTH_TOKEN"')
 
-    codex_toml = "\n".join(
+    codex_parts: list[str] = [*codex_gateway_lines, ""]
+    if include_direct_mlflow:
+        codex_parts.extend(
+            [
+                "[mcp_servers.mlflow]",
+                f'url = "{settings.mlflow.mcp_url}"',
+                "",
+            ]
+        )
+    codex_parts.extend(
         [
-            *codex_gateway_lines,
-            "",
-            "[mcp_servers.mlflow]",
-            f'url = "{settings.mlflow.mcp_url}"',
-            "",
             "[mcp_servers.mcp_photos]",
             'command = "uv"',
             (
@@ -449,26 +465,23 @@ def generate_client_configs(
             "",
         ]
     )
+    codex_toml = "\n".join(codex_parts)
 
-    antigravity_entry: dict[str, Any] = {"serverUrl": gw_url}
+    antigravity_entry: dict[str, Any] = {"url": gw_url}
     if auth_enabled:
         antigravity_entry["headers"] = {"Authorization": "Bearer ${MCP_ANTIGRAVITY_AUTH_TOKEN}"}
-    antigravity_payload = {
-        "mcpServers": {
-            "mcp-workshop-gateway": antigravity_entry,
-            "mlflow": {"serverUrl": settings.mlflow.mcp_url},
-        }
-    }
+    ag_servers: dict[str, Any] = {"mcp-workshop-gateway": antigravity_entry}
+    if include_direct_mlflow:
+        ag_servers["mlflow"] = {"url": settings.mlflow.mcp_url}
+    antigravity_payload = {"mcpServers": ag_servers}
 
     gemini_entry: dict[str, Any] = {"httpUrl": gw_url}
     if auth_enabled:
         gemini_entry["headers"] = {"Authorization": "Bearer ${MCP_GEMINI_AUTH_TOKEN}"}
-    gemini_payload = {
-        "mcpServers": {
-            "mcp-workshop-gateway": gemini_entry,
-            "mlflow": {"httpUrl": settings.mlflow.mcp_url},
-        }
-    }
+    gem_servers: dict[str, Any] = {"mcp-workshop-gateway": gemini_entry}
+    if include_direct_mlflow:
+        gem_servers["mlflow"] = {"httpUrl": settings.mlflow.mcp_url}
+    gemini_payload = {"mcpServers": gem_servers}
 
     omnigent_yaml, _, _ = build_omnigent_registry_payload(
         settings,
@@ -571,6 +584,12 @@ def _is_shadowed_entry(
     target = _extract_mcp_target(entry)
     if not target:
         return False, "override-only"
+    if norm == "memory":
+        env_map = entry.get("env")
+        if isinstance(env_map, dict):
+            mem_file = str(env_map.get("MEMORY_FILE_PATH") or "").strip()
+            if mem_file.endswith(".jsonl"):
+                return False, "project-scoped"
     base = _gateway_base_url(settings)
     if target.startswith(base):
         return False, "gateway-routed"
@@ -655,7 +674,11 @@ def audit_client_configs(
     json_clients = [
         ("claude-code", home / ".claude.json"),
         ("cursor", home / ".cursor/mcp.json"),
-        ("antigravity", home / ".gemini/antigravity/mcp_config.json"),
+        ("antigravity", home / ".gemini/config/mcp_config.json"),
+        (
+            "antigravity-legacy",
+            home / ".gemini/antigravity/mcp_config.json",
+        ),
         (
             "antigravity-migrated",
             home / ".gemini/config/plugins/migrated-settings/mcp_config.json",
@@ -1047,7 +1070,7 @@ def install_client_configs(
                 "entries": sorted(src_cd.keys()),
             }
         elif key == "antigravity":
-            target = home / ".gemini/antigravity/mcp_config.json"
+            target = home / ".gemini/config/mcp_config.json"
             doc, _ = _safe_load_json_dict(target)
             servers = dict(doc.get("mcpServers") or {})
             src_ag = json.loads(rendered["antigravity"])["mcpServers"]

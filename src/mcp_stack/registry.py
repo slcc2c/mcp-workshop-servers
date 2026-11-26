@@ -37,6 +37,9 @@ SERVER_DESCRIPTIONS: dict[str, str] = {
     "omnigent": (
         "Local or Tailscale Omnigent hub sessions, workflows, automations, and Inbox bridge"
     ),
+    "mac-mini": (
+        "Mac mini SSH delegation server for isolated git-worktree Antigravity coding jobs"
+    ),
 }
 
 

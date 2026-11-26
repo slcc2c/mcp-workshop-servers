@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from mcp_stack.client_configs import audit_client_configs
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.servers.mlflow_server import probe_mcp_http_endpoint
 from mcp_stack.service import (
@@ -23,6 +24,7 @@ from mcp_stack.service import (
     _launchctl_info,
     rotate_log_file,
 )
+from mcp_stack.skills import audit_skills, load_skills_manifest, resolve_manifest_path
 
 DEFAULT_STATE_PATH = Path.home() / ".local/share/mcp-workshop-stack/watchdog-state.json"
 DEFAULT_LOG_PATH = LOG_DIR / "watchdog.log"
@@ -229,6 +231,96 @@ def _default_eval_regression_probe(
     }
 
 
+def _default_auto_reprobe_auth_required(
+    settings: MCPStackSettings,
+    *,
+    last_attempt_ts: float,
+    min_interval_s: float = 120.0,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Rate-limited reprobe for auth_required upstreams when 1Password CLI is ready."""
+    cur_now = now if now is not None else time.time()
+    if (cur_now - last_attempt_ts) < min_interval_s:
+        return {"skipped": True, "reason": "cooldown"}
+
+    base = f"http://{settings.gateway.host}:{settings.gateway.port}".rstrip("/")
+    token = next(iter(settings.gateway.clients.keys()), "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    reprobed: list[dict[str, Any]] = []
+    try:
+        with httpx.Client(timeout=4.0, headers=headers) as client:
+            up_resp = client.get(f"{base}/api/v1/upstreams")
+            if up_resp.status_code != 200:
+                return {"skipped": True, "reason": f"upstreams HTTP {up_resp.status_code}"}
+            items = up_resp.json().get("upstreams") or []
+            pending = [u for u in items if u.get("connectionStatus") == "auth_required"]
+            if not pending:
+                return {"skipped": False, "attempted": 0, "reprobed": []}
+            for item in pending:
+                slug = str(item.get("slug") or "")
+                if not slug:
+                    continue
+                p_resp = client.post(f"{base}/api/v1/upstreams/{slug}/probe", timeout=15.0)
+                if p_resp.status_code == 200:
+                    up_item = (p_resp.json().get("upstream") or {})
+                    reprobed.append(
+                        {
+                            "slug": slug,
+                            "connectionStatus": up_item.get("connectionStatus"),
+                            "toolCount": up_item.get("toolCount", 0),
+                        }
+                    )
+        return {"skipped": False, "attempted": len(pending), "reprobed": reprobed}
+    except Exception as exc:
+        return {"skipped": False, "attempted": len(reprobed), "error": str(exc)[:180]}
+
+
+def collect_passive_drift_summary(settings: MCPStackSettings) -> dict[str, Any]:
+    """Read-only skill/MCP drift snapshot for doctor and watchdog (never mutates state)."""
+    summary: dict[str, Any] = {
+        "status": "ok",
+        "skillDriftIssues": 0,
+        "skillCollisions": 0,
+        "repoDualCopies": 0,
+        "mcpClientDuplicates": 0,
+        "mcpRepoShadows": 0,
+    }
+    try:
+        mpath = resolve_manifest_path(configured=settings.skills.manifest_path)
+        if mpath.exists():
+            s_rep = audit_skills(
+                load_skills_manifest(mpath),
+                repos_root=settings.skills.repos_root,
+            )
+            s_sum = s_rep.get("summary") or {}
+            summary["skillDriftIssues"] = int(s_sum.get("driftIssues", 0))
+            summary["skillCollisions"] = int(s_sum.get("collisions", 0))
+            summary["repoDualCopies"] = int(s_sum.get("repoDualCopies", 0))
+        else:
+            summary["manifestMissing"] = str(mpath)
+    except Exception as exc:
+        summary["skillsError"] = str(exc)[:200]
+
+    try:
+        c_rep = audit_client_configs(settings)
+        c_sum = c_rep.get("summary") or {}
+        summary["mcpClientDuplicates"] = int(c_sum.get("shadowedClientEntries", 0))
+        summary["mcpRepoShadows"] = int(c_sum.get("repoShadows", 0))
+    except Exception as exc:
+        summary["clientsError"] = str(exc)[:200]
+
+    if summary.get("skillsError") or summary.get("clientsError"):
+        summary["status"] = "unavailable"
+    elif (
+        summary["skillDriftIssues"]
+        or summary["skillCollisions"]
+        or summary["repoDualCopies"]
+        or summary["mcpClientDuplicates"]
+    ):
+        summary["status"] = "drift_detected"
+    return summary
+
+
 def run_watchdog_once(
     settings: MCPStackSettings,
     *,
@@ -307,6 +399,20 @@ def run_watchdog_once(
     state["eval_regression"] = eval_regression
     if eval_regression.get("status") == "regression" and prev_eval_status != "regression":
         should_log = True
+
+    auth_reprobe: dict[str, Any] = {"skipped": True, "reason": "dry_run"}
+    if not dry_run:
+        last_reprobe_ts = float(state.get("last_auth_reprobe_ts") or 0.0)
+        auth_reprobe = _default_auto_reprobe_auth_required(
+            settings, last_attempt_ts=last_reprobe_ts, now=now
+        )
+        if not auth_reprobe.get("skipped"):
+            state["last_auth_reprobe_ts"] = now
+            if auth_reprobe.get("reprobed"):
+                should_log = True
+    state["auth_reprobe"] = auth_reprobe
+    drift = collect_passive_drift_summary(settings)
+    state["drift"] = drift
     _save_state(state_path, state)
 
     summary: dict[str, Any] = {
@@ -315,6 +421,8 @@ def run_watchdog_once(
         "actions": actions,
         "components": components_state,
         "eval_regression": eval_regression,
+        "auth_reprobe": auth_reprobe,
+        "drift": drift,
     }
     if recovery_details:
         summary["recoveries"] = recovery_details

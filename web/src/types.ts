@@ -1,12 +1,15 @@
 export type NavTab =
   | "overview"
-  | "chat"
   | "playground"
   | "traces"
+  | "evals"
   | "registry"
   | "upstreams"
-  | "clients"
-  | "skills";
+  | "clients";
+
+export type PlaygroundSubTab = "tools" | "agent" | "omnigent";
+export type RegistrySubTab = "servers" | "prompts" | "models" | "skills";
+export type UpstreamsSubTab = "upstreams" | "profiles";
 
 export type ThemeMode = "dark" | "light";
 
@@ -45,6 +48,7 @@ export interface ProfileInventoryItem {
   route: string;
   servers: string[];
   includesUpstreamMcp?: boolean;
+  builtin?: boolean;
 }
 
 export interface HealthResponse {
@@ -301,6 +305,12 @@ export interface UpstreamConfigItem {
   route: string;
   connectionStatus: string;
   toolCount: number;
+  rawToolCount?: number;
+  exposedToolCount?: number;
+  filteredOutCount?: number;
+  allow_tools?: string[];
+  deny_tools?: string[];
+  authReasonCode?: string | null;
   sampleTools?: string[];
   missingEnv?: string[];
   detail?: string | null;
@@ -559,4 +569,175 @@ export interface OmnigentInboxResponse {
   unreadCount: number;
   items: OmnigentInboxItem[];
   pendingApprovalSessions: OmnigentSessionRow[];
+}
+
+export interface SkillRegistryCapability {
+  supported: boolean;
+  serverVersion?: string | null;
+  requiredVersion?: string;
+  trackingUri?: string;
+  reason?: string | null;
+}
+
+export interface SkillRegistryVersion {
+  version: string | number;
+  status?: string | null;
+  aliases?: string[];
+  source?: string | null;
+  creationTimestamp?: number | null;
+  lastUpdatedTimestamp?: number | null;
+}
+
+export interface SkillRegistryItem {
+  name: string;
+  organization?: string | null;
+  description?: string | null;
+  latestVersion?: string | null;
+  aliases?: Record<string, string | number>;
+  tags?: Record<string, string>;
+}
+
+export interface SkillRegistryListResponse {
+  supported: boolean;
+  serverVersion?: string | null;
+  requiredVersion?: string;
+  reason?: string | null;
+  skills: SkillRegistryItem[];
+}
+
+export interface SkillRegistryDetailResponse {
+  supported?: boolean;
+  name: string;
+  organization?: string | null;
+  description?: string | null;
+  aliases?: Record<string, string | number>;
+  tags?: Record<string, string>;
+  versions: SkillRegistryVersion[];
+  selectedVersion?: SkillRegistryVersion | null;
+  skillMd?: string | null;
+}
+
+export interface AgentStatusResponse {
+  reachable: boolean;
+  agentUrl: string;
+  defaultProfile: string;
+  defaultModel: string;
+  llmBaseUrl: string;
+  maxToolRounds: number;
+  detail?: string | null;
+}
+
+export interface EvalDatasetSummary {
+  datasetId: string;
+  name: string;
+  experimentIds?: string[];
+  recordCount?: number | null;
+  lastUpdateTime?: number | null;
+  createdBy?: string | null;
+  tags?: Record<string, string>;
+}
+
+export interface EvalDatasetRecord {
+  datasetRecordId?: string | null;
+  inputs: Record<string, unknown>;
+  expectations?: Record<string, unknown>;
+}
+
+export interface EvalDatasetDetailResponse {
+  datasetId: string;
+  name: string;
+  recordCount: number;
+  records: EvalDatasetRecord[];
+  tags?: Record<string, string>;
+}
+
+export interface EvalRunRowItem {
+  evalId?: string | null;
+  traceId?: string | null;
+  request?: string | null;
+  response?: string | null;
+  assessments?: Array<{
+    name?: string | null;
+    value?: unknown;
+    rationale?: string | null;
+    typesafeProbability?: number | null;
+  }>;
+  typesafeProbability?: number | null;
+  passed?: boolean | null;
+}
+
+export interface EvalRunDetailResponse {
+  runId: string;
+  runName?: string | null;
+  status?: string | null;
+  startTimeMs?: number | null;
+  endTimeMs?: number | null;
+  minScore?: number | null;
+  metrics: Record<string, number>;
+  params: Record<string, string>;
+  tags: Record<string, string>;
+  rows: EvalRunRowItem[];
+}
+
+export interface EvalCompareDelta {
+  metric: string;
+  baseline: number | null;
+  candidate: number | null;
+  delta: number | null;
+}
+
+export interface EvalRunCompareResponse {
+  runA: EvalRunDetailResponse;
+  runB: EvalRunDetailResponse;
+  deltas: EvalCompareDelta[];
+}
+
+export interface SecretsHealthResponse {
+  onepasswordEnabled: boolean;
+  mode: string;
+  serviceAccountConfigured: boolean;
+  cliPath: string;
+  cliAvailable: boolean;
+  allowedVaults: string[];
+  cacheEntries: number;
+  cacheTtlSeconds: number;
+  lastSuccessAt?: string | null;
+  lastErrorCode?: string | null;
+  lastError?: string | null;
+  authRequiredUpstreams: Array<{
+    slug: string;
+    detail?: string | null;
+    authReasonCode?: string | null;
+    missingEnv?: string[];
+  }>;
+}
+
+export interface OpsMetricsBucket {
+  ts: string;
+  totalCalls: number;
+  errorCount: number;
+  errorRate: number;
+  p50Ms: number;
+  p95Ms: number;
+}
+
+export interface OpsMetricsSeriesResponse {
+  bucketSeconds: number;
+  buckets: OpsMetricsBucket[];
+  totalRecorded: number;
+}
+
+export interface ActivityEvent {
+  id: string;
+  ts: string;
+  kind: string;
+  actor: string;
+  server?: string | null;
+  tool?: string | null;
+  profile?: string | null;
+  status: string;
+  durationMs?: number | null;
+  traceId?: string | null;
+  summary: string;
+  meta?: Record<string, unknown>;
 }

@@ -57,10 +57,11 @@ def create_omnigent_server(
     *,
     secret_resolver: SecretResolver | None = None,
     http_client: httpx.AsyncClient | None = None,
+    auth: Any | None = None,
 ) -> FastMCP:
     """Create the async Omnigent REST/SSE bridge MCP server."""
     resolver = secret_resolver or SecretResolver(settings.secrets)
-    mcp = FastMCP("omnigent")
+    mcp = FastMCP("omnigent", auth=auth)
     mcp.add_middleware(MLflowTracingMiddleware(settings, "omnigent"))
 
     def _base_url() -> str:

@@ -130,7 +130,14 @@ async def test_profile_auth_allowlist_and_env_override(make_settings, monkeypatc
         "restricted-token": ClientPolicy(
             client_id="limited",
             client_name="Limited Client",
-            allowed_servers=["memory", "filesystem", "github", "unity_catalog", "mlflow"],
+            allowed_servers=[
+                "memory",
+                "filesystem",
+                "github",
+                "unity_catalog",
+                "mlflow",
+                "mac_mini",
+            ],
         )
     }
     settings.mlflow.proxy_upstream_mcp = False

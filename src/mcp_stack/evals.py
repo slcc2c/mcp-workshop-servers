@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
+
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.core.tracing import get_or_create_gateway_logged_model
 
@@ -248,13 +250,52 @@ def normalize_judge_model_uri(judge_model: str | None = None) -> str:
     return raw
 
 
-def build_native_clarity_judge(judge_model: str | None = None) -> Any:
+def is_typesafe_judge_model(
+    judge_model: str | None,
+    model_api: str | None = None,
+) -> bool:
+    """Return True when the requested judge uses TypeSafe System One (`typesafe:/` or decisions)."""
+    if (model_api or "").strip().lower() == "decisions":
+        return True
+    return bool(judge_model and judge_model.strip().lower().startswith("typesafe:/"))
+
+
+def _ensure_typesafe_api_key(settings: MCPStackSettings | None = None) -> None:
+    raw = os.getenv("TYPESAFE_API_KEY", "").strip()
+    if raw.startswith(("env:", "op://")) and settings is not None:
+        from mcp_stack.core.secrets import SecretResolver
+
+        resolved = SecretResolver(settings.secrets).resolve(raw)
+        if resolved:
+            os.environ["TYPESAFE_API_KEY"] = resolved
+
+
+def build_native_clarity_judge(
+    judge_model: str | None = None,
+    *,
+    model_api: str = "default",
+    settings: MCPStackSettings | None = None,
+) -> Any:
     """Build a native MLflow 3.x LLM judge using mlflow.genai.judges.make_judge()."""
     from mlflow.genai.judges import make_judge
 
     ollama_url = os.getenv("MCP_EVAL_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
     os.environ.setdefault("OLLAMA_API_BASE", ollama_url)
     normalized = normalize_judge_model_uri(judge_model)
+    if is_typesafe_judge_model(normalized, model_api):
+        _ensure_typesafe_api_key(settings)
+        # TypeSafe System One decision models evaluate inputs/outputs/expectations (no {{ trace }})
+        return make_judge(
+            name="tool_response_clarity_typesafe",
+            instructions=(
+                "Answer yes or no: Is the response in {{ outputs }} structured, concise, "
+                "actionable, free of exposed secrets or Python tracebacks, and consistent with "
+                "{{ inputs }} and {{ expectations }}?"
+            ),
+            model=normalized,
+            model_api="decisions",
+            feedback_value_type=bool,
+        )
     return make_judge(
         name="tool_response_clarity_judge",
         instructions=(
@@ -274,6 +315,8 @@ def build_trace_scorers(
     forbidden_tokens: list[str] | None = None,
     with_llm_judge: bool = False,
     judge_model: str | None = None,
+    model_api: str = "default",
+    settings: MCPStackSettings | None = None,
 ) -> list[Any]:
     """Build deterministic MLflow 3.x GenAI @scorers plus optional local Ollama / LLM judge."""
     from mlflow.entities import Feedback
@@ -392,8 +435,13 @@ def build_trace_scorers(
         )
         has_litellm = importlib.util.find_spec("litellm") is not None
         is_ollama = effective_model.startswith(("ollama:/", "ollama:", "ollama_chat:/"))
-        if has_litellm or not is_ollama:
-            scorers.append(build_native_clarity_judge(effective_model))
+        is_typesafe = is_typesafe_judge_model(effective_model, model_api)
+        if has_litellm or is_typesafe or not is_ollama:
+            scorers.append(
+                build_native_clarity_judge(
+                    effective_model, model_api=model_api, settings=settings
+                )
+            )
         else:
             scorers.append(_build_ollama_clarity_scorer(effective_model))
 
@@ -629,6 +677,7 @@ def run_golden_benchmark(
     latency_sla_ms: float = 5000.0,
     with_llm_judge: bool = False,
     judge_model: str | None = None,
+    model_api: str = "default",
 ) -> dict[str, Any]:
     """Run executable golden benchmark against mlflow.genai.datasets via mlflow.genai.evaluate()."""
     import mlflow
@@ -680,6 +729,8 @@ def run_golden_benchmark(
             forbidden_tokens=list(settings.gateway.clients.keys()),
             with_llm_judge=with_llm_judge,
             judge_model=judge_model,
+            model_api=model_api,
+            settings=settings,
         )
         model_id = get_or_create_gateway_logged_model(settings, experiment_name=exp_target)
         eval_kwargs: dict[str, Any] = {
@@ -712,6 +763,7 @@ def run_trace_evaluation(
     latency_sla_ms: float = 5000.0,
     with_llm_judge: bool = False,
     judge_model: str | None = None,
+    model_api: str = "default",
 ) -> dict[str, Any]:
     """Run mlflow.genai.evaluate() over recent MCP gateway traces."""
     import mlflow
@@ -750,6 +802,8 @@ def run_trace_evaluation(
         forbidden_tokens=list(settings.gateway.clients.keys()),
         with_llm_judge=with_llm_judge,
         judge_model=judge_model,
+        model_api=model_api,
+        settings=settings,
     )
     eval_df = traces_to_df(list(traces))
     result = mlflow.genai.evaluate(data=eval_df, scorers=scorers)
@@ -759,5 +813,350 @@ def run_trace_evaluation(
         "experiment_id": exp.experiment_id,
         "run_id": getattr(result, "run_id", None),
         "trace_count": len(traces),
+        "metrics": dict(getattr(result, "metrics", {}) or {}),
+    }
+
+
+def list_eval_datasets(
+    settings: MCPStackSettings,
+    *,
+    experiment_name: str | None = None,
+    max_results: int = 25,
+) -> dict[str, Any]:
+    """List MLflow GenAI evaluation datasets for the active experiment."""
+    import mlflow
+    from mlflow.genai.datasets import search_datasets
+
+    exp_target = experiment_name or settings.mlflow.experiment_name
+    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+    exp = client.get_experiment_by_name(exp_target)
+    if exp is None:
+        return {"available": True, "experiment": exp_target, "datasets": []}
+
+    datasets = search_datasets(
+        experiment_ids=[exp.experiment_id],
+        max_results=max(1, min(max_results, 100)),
+    )
+    out: list[dict[str, Any]] = []
+    for ds in datasets:
+        records = _extract_dataset_records(ds)
+        out.append(
+            {
+                "datasetId": getattr(ds, "dataset_id", None),
+                "name": getattr(ds, "name", None),
+                "createdTime": getattr(ds, "created_time", None),
+                "digest": getattr(ds, "digest", None),
+                "tags": dict(getattr(ds, "tags", None) or {}),
+                "recordCount": len(records),
+            }
+        )
+    return {"available": True, "experiment": exp_target, "datasets": out}
+
+
+def _extract_dataset_records(dataset: Any) -> list[dict[str, Any]]:
+    try:
+        to_df = getattr(dataset, "to_df", None)
+        if callable(to_df):
+            df = to_df()
+            rows = df.to_dict(orient="records")
+            return json.loads(json.dumps(rows, default=str))
+    except Exception:
+        pass
+    try:
+        to_dict = getattr(dataset, "to_dict", None)
+        if callable(to_dict):
+            d = to_dict()
+            recs = d.get("records") if isinstance(d, dict) else None
+            if isinstance(recs, list):
+                return json.loads(json.dumps(recs, default=str))
+    except Exception:
+        pass
+    return []
+
+
+def get_eval_dataset(
+    settings: MCPStackSettings,
+    dataset_id: str,
+) -> dict[str, Any]:
+    """Fetch a dataset and its records by dataset_id."""
+    import mlflow
+    from mlflow.genai.datasets import get_dataset
+
+    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    ds = get_dataset(dataset_id=dataset_id)
+    records = _extract_dataset_records(ds)
+    return {
+        "datasetId": getattr(ds, "dataset_id", dataset_id),
+        "name": getattr(ds, "name", None),
+        "createdTime": getattr(ds, "created_time", None),
+        "digest": getattr(ds, "digest", None),
+        "tags": dict(getattr(ds, "tags", None) or {}),
+        "recordCount": len(records),
+        "records": records,
+    }
+
+
+def merge_dataset_records(
+    settings: MCPStackSettings,
+    dataset_id: str,
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Append or merge new test records into an existing MLflow GenAI dataset."""
+    import mlflow
+    from mlflow.genai.datasets import get_dataset
+
+    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    ds = get_dataset(dataset_id=dataset_id)
+    ds.merge_records(records)
+    updated = _extract_dataset_records(ds)
+    return {
+        "merged": True,
+        "datasetId": getattr(ds, "dataset_id", dataset_id),
+        "name": getattr(ds, "name", None),
+        "addedCount": len(records),
+        "recordCount": len(updated),
+    }
+
+
+def _extract_typesafe_prob(item: Any) -> float | None:
+    feedback = getattr(item, "feedback", None)
+    meta = dict(getattr(item, "metadata", None) or {})
+    if feedback is not None:
+        meta.update(dict(getattr(feedback, "metadata", None) or {}))
+    for key in ("typesafe.probability", "probability"):
+        if key in meta and meta[key] is not None:
+            try:
+                return round(float(meta[key]), 4)
+            except Exception:
+                pass
+    return None
+
+
+def list_eval_runs(
+    settings: MCPStackSettings,
+    *,
+    experiment_name: str | None = None,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """List recent MLflow GenAI evaluation runs with metrics and params."""
+    import mlflow
+
+    exp_target = experiment_name or settings.mlflow.experiment_name
+    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+    exp = client.get_experiment_by_name(exp_target)
+    if exp is None:
+        return {"available": True, "experiment": exp_target, "runs": []}
+
+    runs = client.search_runs(
+        [exp.experiment_id],
+        order_by=["attributes.start_time DESC"],
+        max_results=max(1, min(limit * 2, 100)),
+    )
+    out: list[dict[str, Any]] = []
+    for run in runs:
+        metrics = {
+            k: round(float(v), 4)
+            for k, v in (run.data.metrics or {}).items()
+            if "/" in k or "tool_" in k or "policy_" in k or "clarity" in k
+        }
+        if not metrics:
+            continue
+        out.append(
+            {
+                "runId": run.info.run_id,
+                "runName": getattr(run.info, "run_name", None),
+                "status": getattr(run.info, "status", None),
+                "startTimeMs": getattr(run.info, "start_time", None),
+                "endTimeMs": getattr(run.info, "end_time", None),
+                "params": dict(run.data.params or {}),
+                "tags": {
+                    k: v
+                    for k, v in dict(run.data.tags or {}).items()
+                    if not k.startswith("mlflow.log-model")
+                },
+                "metrics": metrics,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return {"available": True, "experiment": exp_target, "runs": out}
+
+
+def get_eval_run_detail(
+    settings: MCPStackSettings,
+    run_id: str,
+) -> dict[str, Any]:
+    """Return aggregate metrics and per-row scorer feedback (with typesafe.probability)."""
+    import mlflow
+
+    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+    run = client.get_run(run_id)
+    metrics = {k: round(float(v), 4) for k, v in (run.data.metrics or {}).items()}
+    traces = client.search_traces(run_id=run_id, max_results=200)
+
+    rows: list[dict[str, Any]] = []
+    for tr in traces:
+        info = getattr(tr, "info", tr)
+        spans = getattr(getattr(tr, "data", None), "spans", None) or []
+        root = spans[0] if spans else None
+        assessments_out: list[dict[str, Any]] = []
+        for item in getattr(info, "assessments", None) or []:
+            fb = getattr(item, "feedback", None)
+            val = getattr(fb, "value", None) if fb is not None else getattr(item, "value", None)
+            assessments_out.append(
+                {
+                    "name": getattr(item, "name", None),
+                    "value": val,
+                    "rationale": getattr(item, "rationale", None),
+                    "typesafeProbability": _extract_typesafe_prob(item),
+                }
+            )
+        rows.append(
+            {
+                "traceId": getattr(info, "trace_id", None) or getattr(info, "request_id", None),
+                "state": str(getattr(info, "state", "")),
+                "durationMs": round(_trace_duration_ms(tr), 1),
+                "inputs": json.loads(json.dumps(getattr(root, "inputs", None), default=str))
+                if root
+                else None,
+                "outputs": json.loads(json.dumps(getattr(root, "outputs", None), default=str))
+                if root
+                else None,
+                "assessments": assessments_out,
+            }
+        )
+
+    return {
+        "runId": run.info.run_id,
+        "runName": getattr(run.info, "run_name", None),
+        "status": getattr(run.info, "status", None),
+        "startTimeMs": getattr(run.info, "start_time", None),
+        "metrics": metrics,
+        "params": dict(run.data.params or {}),
+        "rows": rows,
+    }
+
+
+def compare_eval_runs(
+    settings: MCPStackSettings,
+    run_a: str,
+    run_b: str,
+) -> dict[str, Any]:
+    """Compare two MLflow GenAI eval runs and compute per-metric deltas."""
+    detail_a = get_eval_run_detail(settings, run_a)
+    detail_b = get_eval_run_detail(settings, run_b)
+    keys = sorted(set(detail_a["metrics"].keys()) | set(detail_b["metrics"].keys()))
+    deltas: list[dict[str, Any]] = []
+    for k in keys:
+        va = detail_a["metrics"].get(k)
+        vb = detail_b["metrics"].get(k)
+        delta = (
+            round(float(vb) - float(va), 4)
+            if isinstance(va, (int, float)) and isinstance(vb, (int, float))
+            else None
+        )
+        deltas.append(
+            {
+                "metric": k,
+                "runA": va,
+                "runB": vb,
+                "delta": delta,
+                "direction": (
+                    "improved"
+                    if isinstance(delta, float) and delta > 0
+                    else ("regressed" if isinstance(delta, float) and delta < 0 else "unchanged")
+                ),
+            }
+        )
+    return {
+        "runA": {
+            "runId": detail_a["runId"],
+            "runName": detail_a["runName"],
+            "metrics": detail_a["metrics"],
+            "rowCount": len(detail_a["rows"]),
+        },
+        "runB": {
+            "runId": detail_b["runId"],
+            "runName": detail_b["runName"],
+            "metrics": detail_b["metrics"],
+            "rowCount": len(detail_b["rows"]),
+        },
+        "deltas": deltas,
+    }
+
+
+def run_agent_dataset_evaluation(
+    settings: MCPStackSettings,
+    *,
+    dataset_name: str = GOLDEN_DATASET_NAME,
+    experiment_name: str | None = None,
+    profile: str | None = None,
+    model: str | None = None,
+    with_llm_judge: bool = False,
+    judge_model: str | None = None,
+    model_api: str = "default",
+) -> dict[str, Any]:
+    """Run mlflow.genai.evaluate() against the co-hosted ResponsesAgent /invocations."""
+    import mlflow
+    import mlflow.genai
+    from mlflow.genai.datasets import search_datasets
+
+    exp_target = experiment_name or settings.mlflow.experiment_name
+    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    exp = mlflow.set_experiment(exp_target)
+    datasets = search_datasets(
+        experiment_ids=[exp.experiment_id],
+        filter_string=f"name = '{dataset_name}'",
+        max_results=1,
+    )
+    if not datasets:
+        raise ValueError(f"Dataset '{dataset_name}' not found in experiment '{exp_target}'")
+    dataset = datasets[0]
+    agent_url = f"{settings.agent.url.rstrip('/')}/invocations"
+
+    @mlflow.trace(name="agent_eval_invocation", span_type="CHAIN")
+    def predict_fn(**row_inputs: Any) -> str:
+        prompt = json.dumps(row_inputs, default=str)
+        custom_inputs: dict[str, Any] = {}
+        if profile:
+            custom_inputs["profile"] = profile
+        if model:
+            custom_inputs["model"] = model
+        resp = httpx.post(
+            agent_url,
+            json={
+                "input": [{"role": "user", "content": prompt}],
+                "custom_inputs": custom_inputs,
+            },
+            timeout=settings.agent.timeout_seconds,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        texts: list[str] = []
+        for out in data.get("output") or []:
+            content = out.get("content")
+            if isinstance(content, list):
+                texts.extend(str(c.get("text") or "") for c in content if isinstance(c, dict))
+            elif isinstance(content, str):
+                texts.append(content)
+        return "\n".join(t for t in texts if t) or json.dumps(data, default=str)
+
+    scorers = build_trace_scorers(
+        forbidden_tokens=list(settings.gateway.clients.keys()),
+        with_llm_judge=with_llm_judge,
+        judge_model=judge_model,
+        model_api=model_api,
+        settings=settings,
+    )
+    result = mlflow.genai.evaluate(data=dataset, predict_fn=predict_fn, scorers=scorers)
+    return {
+        "status": "completed",
+        "mode": "agent",
+        "dataset_name": dataset_name,
+        "experiment": exp_target,
+        "run_id": getattr(result, "run_id", None),
         "metrics": dict(getattr(result, "metrics", {}) or {}),
     }

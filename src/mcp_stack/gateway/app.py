@@ -3,69 +3,39 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import sys
-import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from datetime import UTC, datetime
-from pathlib import Path
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
-import httpx
-from fastapi import Body, FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
-from pydantic import SecretStr
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mcp_stack import __version__
-from mcp_stack.client_configs import (
-    audit_client_configs,
-    generate_client_configs,
-    verify_client_connection,
-)
-from mcp_stack.core.auth import (
-    UI_SESSION_COOKIE,
-    GatewayAuthMiddleware,
-    LoginNonceStore,
-    caller_auth_method_var,
-    caller_client_id_var,
-    caller_client_policy_var,
-    find_client_by_id,
-    is_server_allowed,
-    resolve_owner_ui_client,
-    resolve_trusted_ui_method,
-    sign_ui_session,
-    verify_ui_session,
-)
-from mcp_stack.core.config import (
-    ClientPolicy,
-    MCPStackSettings,
-    UpstreamServerConfig,
-    save_local_upstreams,
-    serialize_upstream_config,
-    validate_upstream_secret_refs,
-)
+from mcp_stack.core.auth import GatewayAuthMiddleware, LoginNonceStore
+from mcp_stack.core.config import MCPStackSettings, UpstreamServerConfig
 from mcp_stack.core.logging import get_logger
-from mcp_stack.core.metrics import render_metrics
-from mcp_stack.core.secrets import SecretResolver
-from mcp_stack.core.tracing import last_trace_id_var, redact_payload
-from mcp_stack.evals import (
-    _POLICY_REFUSAL_MARKERS,
-    GOLDEN_DATASET_NAME,
-    _trace_duration_ms,
-    is_expected_policy_refusal,
+from mcp_stack.evals import (  # noqa: F401
     run_golden_benchmark,
     run_trace_evaluation,
     sync_golden_dataset,
 )
 from mcp_stack.gateway.dashboard import get_static_dir, has_built_dashboard, render_dashboard_html
 from mcp_stack.gateway.presets import PresetStore
+from mcp_stack.gateway.routes_agent import build_agent_router
+from mcp_stack.gateway.routes_auth import build_auth_router, maybe_mint_trusted_ui_session
+from mcp_stack.gateway.routes_clients_skills import build_clients_skills_router
+from mcp_stack.gateway.routes_evals import build_evals_router
+from mcp_stack.gateway.routes_mlflow import build_mlflow_router
+from mcp_stack.gateway.routes_ops import build_ops_router
+from mcp_stack.gateway.routes_skills_registry import build_skills_registry_router
+from mcp_stack.gateway.routes_tools import build_tools_router
+from mcp_stack.gateway.routes_upstreams import build_upstreams_router
+from mcp_stack.gateway.state import GatewayRuntimeState, slug_for
 from mcp_stack.gateway.upstreams import build_upstream_proxy, probe_upstream_proxy
 from mcp_stack.servers.docker_server import create_docker_server
 from mcp_stack.servers.filesystem import create_filesystem_server
@@ -76,6 +46,7 @@ from mcp_stack.servers.gateway_meta import (
 from mcp_stack.servers.github import create_github_server
 from mcp_stack.servers.jupyter_server import create_jupyter_server
 from mcp_stack.servers.kubernetes_server import create_kubernetes_server
+from mcp_stack.servers.mac_mini import create_mac_mini_server
 from mcp_stack.servers.memory import create_memory_server
 from mcp_stack.servers.mlflow_server import (
     create_mlflow_server,
@@ -94,24 +65,9 @@ from mcp_stack.servers.unity_catalog import (
     sync_uc_function_tools,
 )
 from mcp_stack.servers.xcodebuild import create_xcodebuild_server
-from mcp_stack.skills import (
-    audit_skills,
-    load_skills_manifest,
-    resolve_manifest_path,
-    sync_skills,
-)
-from mcp_stack.watchdog import (
-    _EVAL_SCORE_KEYS,
-    DEFAULT_LOG_PATH,
-    DEFAULT_STATE_PATH,
-    _default_eval_regression_probe,
-    _load_state,
-    run_watchdog_once,
-)
+from mcp_stack.watchdog import run_watchdog_once  # noqa: F401
 
-
-def _slug_for(server_key: str) -> str:
-    return server_key.replace("_", "-")
+_slug_for = slug_for
 
 
 class NormalizeMCPPathMiddleware:
@@ -133,6 +89,39 @@ class NormalizeMCPPathMiddleware:
                     new_scope["raw_path"] = raw_path + b"/"
                 scope = new_scope
         await self.app(scope, receive, send)
+
+
+class DynamicProfilesASGI:
+    """Route /profiles/<name>/mcp requests dynamically from live state.profile_http."""
+
+    def __init__(self, state: GatewayRuntimeState) -> None:
+        self.state = state
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return
+        raw_path = str(scope.get("path", "") or "")
+        rel_path = raw_path[len("/profiles") :] if raw_path.startswith("/profiles/") else raw_path
+        parts = [p for p in rel_path.split("/") if p]
+        if len(parts) >= 2 and parts[1] == "mcp":
+            pname = parts[0]
+            target_app = self.state.profile_http.get(pname)
+            if target_app is not None:
+                prefix = f"/{pname}/mcp"
+                rem = rel_path[len(prefix) :] if rel_path.startswith(prefix) else "/"
+                if not rem:
+                    rem = "/"
+                sub_scope = dict(scope)
+                sub_scope["path"] = rem
+                sub_scope["raw_path"] = rem.encode("utf-8")
+                sub_scope["root_path"] = f"/profiles/{pname}/mcp"
+                await target_app(sub_scope, receive, send)
+                return
+        resp = JSONResponse(
+            status_code=404,
+            content={"error": {"code": "PROFILE_NOT_FOUND", "message": "Unknown MCP profile"}},
+        )
+        await resp(scope, receive, send)
 
 
 def build_server_instance(
@@ -177,6 +166,8 @@ def build_server_instance(
         return create_xcodebuild_server(settings), None
     if normalized == "omnigent":
         return create_omnigent_server(settings), None
+    if normalized == "mac_mini":
+        return create_mac_mini_server(settings), None
     raise ValueError(f"Unknown MCP server '{server_key}'")
 
 
@@ -220,28 +211,40 @@ def build_gateway_app(
     meta_prompt_provider = MLflowPromptRegistryProvider(settings)
     preset_store = PresetStore(settings.gateway.presets_path)
     upstream_proxy: FastMCP | None = None
+    if settings.mlflow.proxy_upstream_mcp:
+        factory = upstream_proxy_factory or create_mlflow_upstream_proxy
+        upstream_proxy = factory(settings)
+
     federated_proxies: dict[str, FastMCP] = {}
     federated_meta: dict[str, dict[str, Any]] = {}
-    federated_cfg_map: dict[str, Any] = {}
+    federated_cfg_map: dict[str, UpstreamServerConfig] = {}
     server_inventory: list[dict[str, Any]] = []
     profile_inventory: list[dict[str, Any]] = []
+    profile_apps: dict[str, FastMCP] = {}
+    profile_http: dict[str, Any] = {}
+    login_nonces = LoginNonceStore()
 
-    def _meta_state_snapshot() -> dict[str, Any]:
-        instances: dict[str, FastMCP] = {_slug_for(k): s for k, s in servers.items()}
-        if upstream_proxy is not None:
-            instances["mlflow-upstream"] = upstream_proxy
-        for fs, fp in federated_proxies.items():
-            instances[fs] = fp
-        return {
-            "servers": server_inventory,
-            "profiles": profile_inventory,
-            "server_instances": instances,
-            "settings": settings,
-        }
+    state = GatewayRuntimeState(
+        settings=settings,
+        logger=logger,
+        servers=servers,
+        uc_adapter=uc_adapter,
+        upstream_proxy=upstream_proxy,
+        federated_proxies=federated_proxies,
+        federated_meta=federated_meta,
+        federated_cfg_map=federated_cfg_map,
+        server_inventory=server_inventory,
+        profile_inventory=profile_inventory,
+        profile_apps=profile_apps,
+        profile_http=profile_http,
+        meta_prompt_provider=meta_prompt_provider,
+        preset_store=preset_store,
+        login_nonces=login_nonces,
+    )
 
     gateway_meta_server = create_gateway_meta_server(
         settings,
-        _meta_state_snapshot,
+        state.meta_state_snapshot,
         prompt_provider=meta_prompt_provider,
     )
     servers["gateway"] = gateway_meta_server
@@ -250,14 +253,9 @@ def build_gateway_app(
     for _key, srv in servers.items():
         composed.mount(srv)
 
-    if settings.mlflow.proxy_upstream_mcp:
-        factory = upstream_proxy_factory or create_mlflow_upstream_proxy
-        upstream_proxy = factory(settings)
-
-    secret_resolver = SecretResolver(settings.secrets)
     for raw_up_name, up_cfg in settings.gateway.upstream_servers.items():
         proxy_srv, up_info = build_upstream_proxy(
-            raw_up_name, up_cfg, settings, resolver=secret_resolver
+            raw_up_name, up_cfg, settings, resolver=state.secret_resolver
         )
         slug = str(up_info["slug"])
         federated_meta[slug] = up_info
@@ -267,7 +265,7 @@ def build_gateway_app(
 
     composed_http = composed.http_app(path="/")
     per_server_http: dict[str, Any] = {
-        _slug_for(key): srv.http_app(path="/") for key, srv in servers.items()
+        slug_for(key): srv.http_app(path="/") for key, srv in servers.items()
     }
     if upstream_proxy is not None:
         per_server_http["mlflow-upstream"] = upstream_proxy.http_app(path="/")
@@ -288,11 +286,8 @@ def build_gateway_app(
             if fed_slug not in members and fed_slug.replace("-", "_") not in members:
                 members.append(fed_slug)
 
-    profile_apps: dict[str, FastMCP] = {}
-    profile_http: dict[str, Any] = {}
     profile_wants_upstream: dict[str, bool] = {}
     profile_wants_federated: dict[str, list[str]] = {}
-
     for profile_name, raw_members in effective_profiles.items():
         clean_profile = profile_name.strip()
         if not clean_profile:
@@ -310,7 +305,7 @@ def build_gateway_app(
                 continue
             if norm in servers:
                 p_mcp.mount(servers[norm])
-                resolved_slugs.append(_slug_for(norm))
+                resolved_slugs.append(slug_for(norm))
             elif fed_slug_cand in federated_proxies:
                 wants_fed.append(fed_slug_cand)
                 resolved_slugs.append(fed_slug_cand)
@@ -324,11 +319,39 @@ def build_gateway_app(
                 "route": f"/profiles/{clean_profile}/mcp",
                 "servers": resolved_slugs,
                 "includesUpstreamMcp": wants_upstream,
+                "builtin": clean_profile in {"discover", "core", "data", "ops", "macos"},
             }
         )
 
+    server_inventory.extend(
+        {
+            "key": key,
+            "slug": slug_for(key),
+            "route": f"/servers/{slug_for(key)}/mcp",
+            "status": "enabled",
+            "connectionStatus": "connected",
+            "external": False,
+        }
+        for key in servers
+    )
+    if upstream_proxy is not None:
+        server_inventory.append(
+            {
+                "key": "mlflow_upstream",
+                "slug": "mlflow-upstream",
+                "route": "/servers/mlflow-upstream/mcp",
+                "status": "proxy",
+                "connectionStatus": "configured",
+                "external": True,
+                "target": settings.mlflow.mcp_url,
+            }
+        )
+    for _fed_slug, meta in federated_meta.items():
+        server_inventory.append(meta)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        state.app_ref = app
         async with AsyncExitStack() as stack:
             if (
                 "unity_catalog" in servers
@@ -353,6 +376,7 @@ def build_gateway_app(
                 if should_compose is None:
                     probe = await probe_mcp_http_endpoint(settings.mlflow.mcp_url, timeout=1.5)
                     should_compose = bool(probe.get("reachable"))
+                state.upstream_composed = bool(should_compose)
                 inv_up = next(
                     (s for s in server_inventory if s["slug"] == "mlflow-upstream"), None
                 )
@@ -379,7 +403,12 @@ def build_gateway_app(
             if federated_proxies:
                 async def _probe_one(f_slug: str, f_proxy: FastMCP) -> tuple[str, dict[str, Any]]:
                     cfg_obj = federated_cfg_map[f_slug]
-                    return f_slug, await probe_upstream_proxy(f_proxy, timeout_s=cfg_obj.timeout_s)
+                    return f_slug, await probe_upstream_proxy(
+                        f_proxy,
+                        timeout_s=cfg_obj.timeout_s,
+                        allow_tools=cfg_obj.allow_tools,
+                        deny_tools=cfg_obj.deny_tools,
+                    )
 
                 probe_results = await asyncio.gather(
                     *(_probe_one(s, p) for s, p in federated_proxies.items())
@@ -388,6 +417,11 @@ def build_gateway_app(
                     meta_ref = federated_meta[f_slug]
                     meta_ref["connectionStatus"] = f_res["connectionStatus"]
                     meta_ref["toolCount"] = f_res.get("toolCount", 0)
+                    meta_ref["rawToolCount"] = f_res.get("rawToolCount", meta_ref["toolCount"])
+                    meta_ref["exposedToolCount"] = f_res.get(
+                        "exposedToolCount", meta_ref["toolCount"]
+                    )
+                    meta_ref["filteredOutCount"] = f_res.get("filteredOutCount", 0)
                     meta_ref["sampleTools"] = list(
                         f_res.get("sampleTools") or f_res.get("tools", [])[:5]
                     )
@@ -414,2042 +448,32 @@ def build_gateway_app(
                         )
 
             await stack.enter_async_context(composed_http.lifespan(app))
-            for _pname, p_http in profile_http.items():
+            for _pname, p_http in list(profile_http.items()):
                 await stack.enter_async_context(p_http.lifespan(app))
-            yield
+            try:
+                yield
+            finally:
+                for p_runner in list(state.profile_runners.values()):
+                    await p_runner.stop()
+                state.profile_runners.clear()
 
     app = FastAPI(
         title="MCP Workshop Stack Gateway",
         version=__version__,
         lifespan=lifespan,
     )
-    login_nonces = LoginNonceStore()
     app.state.login_nonces = login_nonces
-
-    def _set_session_cookie(response: Response, cookie_token: str, request: Request) -> None:
-        fwd_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-        is_https = request.url.scheme == "https" or fwd_proto == "https"
-        response.set_cookie(
-            key=UI_SESSION_COOKIE,
-            value=cookie_token,
-            max_age=settings.gateway.ui_session_ttl_s,
-            path="/",
-            httponly=True,
-            samesite="lax",
-            secure=is_https,
-        )
-
-    def _resolve_auth_identity(request: Request) -> tuple[ClientPolicy | None, str]:
-        if not settings.gateway.effective_auth_enabled:
-            return None, "open"
-        auth_header = request.headers.get("authorization", "")
-        bearer = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-        if bearer:
-            return settings.gateway.clients.get(bearer), "bearer"
-        cookie_val = request.cookies.get(UI_SESSION_COOKIE)
-        cid = verify_ui_session(cookie_val, settings)
-        if cid:
-            return find_client_by_id(settings, cid), "cookie"
-        return None, "anonymous"
-
-    def _maybe_mint_trusted_ui_session(
-        request: Request, response: Response
-    ) -> tuple[ClientPolicy | None, str | None]:
-        if not settings.gateway.effective_auth_enabled:
-            return None, None
-        client_host = request.client.host if request.client else ""
-        headers_lower = {k.lower(): v for k, v in request.headers.items()}
-        trusted_method = resolve_trusted_ui_method(client_host, headers_lower, settings)
-        if trusted_method is None:
-            return None, None
-        owner_cid, owner_policy = resolve_owner_ui_client(settings)
-        existing_cid = verify_ui_session(request.cookies.get(UI_SESSION_COOKIE), settings)
-        if not existing_cid:
-            session_val = sign_ui_session(owner_cid, settings)
-            _set_session_cookie(response, session_val, request)
-        return owner_policy, trusted_method
-
-    server_inventory.extend(
-        {
-            "key": key,
-            "slug": _slug_for(key),
-            "route": f"/servers/{_slug_for(key)}/mcp",
-            "status": "enabled",
-            "connectionStatus": "connected",
-            "external": False,
-        }
-        for key in servers
-    )
-    if upstream_proxy is not None:
-        server_inventory.append(
-            {
-                "key": "mlflow_upstream",
-                "slug": "mlflow-upstream",
-                "route": "/servers/mlflow-upstream/mcp",
-                "status": "proxy",
-                "connectionStatus": "configured",
-                "external": True,
-                "target": settings.mlflow.mcp_url,
-            }
-        )
-    for _fed_slug, meta in federated_meta.items():
-        server_inventory.append(meta)
-
-    @app.get("/favicon.ico")
-    async def favicon() -> Response:
-        svg = (
-            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
-            '<rect width="32" height="32" rx="7" fill="#0f172a"/>'
-            '<path d="M8 10h6v6H8zm10 0h6v6h-6zM8 20h6v6H8zm10 0h6v6h-6z" fill="#38bdf8"/>'
-            "</svg>"
-        )
-        return Response(
-            content=svg,
-            media_type="image/svg+xml",
-            headers={"Cache-Control": "public, max-age=86400"},
-        )
-
-    @app.get("/health")
-    async def health() -> dict[str, Any]:
-        return {
-            "status": "healthy",
-            "version": __version__,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "composedRoute": "/mcp",
-            "defaultProfile": settings.gateway.default_client_profile,
-            "mlflowUiUrl": settings.gateway.mlflow_ui_url or settings.mlflow.tracking_uri,
-            "servers": server_inventory,
-            "profiles": profile_inventory,
-        }
-
-    @app.get("/ready")
-    async def ready() -> dict[str, Any]:
-        checks: dict[str, Any] = {}
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            try:
-                r = await client.get(
-                    f"{settings.mlflow.tracking_uri.rstrip('/')}/api/2.0/mlflow/experiments/search",
-                    params={"max_results": 1},
-                )
-                mlflow_check: dict[str, Any] = {
-                    "healthy": r.status_code == 200,
-                    "status_code": r.status_code,
-                    "url": settings.mlflow.tracking_uri,
-                }
-                if r.status_code != 200:
-                    mlflow_check["detail"] = r.text[:200]
-                checks["mlflow_tracking"] = mlflow_check
-            except Exception as exc:
-                checks["mlflow_tracking"] = {
-                    "healthy": False,
-                    "url": settings.mlflow.tracking_uri,
-                    "error": str(exc),
-                }
-
-            try:
-                r = await client.get(
-                    f"{settings.unity_catalog.effective_api_base}/catalogs",
-                    params={"max_results": 1},
-                )
-                checks["unity_catalog"] = {
-                    "healthy": r.status_code == 200,
-                    "status_code": r.status_code,
-                    "url": settings.unity_catalog.effective_api_base,
-                }
-            except Exception as exc:
-                checks["unity_catalog"] = {
-                    "healthy": False,
-                    "url": settings.unity_catalog.effective_api_base,
-                    "error": str(exc),
-                }
-
-        checks["mlflow_mcp_upstream"] = await probe_mcp_http_endpoint(
-            settings.mlflow.mcp_url, timeout=2.0
-        )
-        all_healthy = all(
-            c.get("healthy", c.get("reachable", False)) for c in checks.values()
-        )
-        return {
-            "status": "ready" if all_healthy else "degraded",
-            "timestamp": datetime.now(UTC).isoformat(),
-            "checks": checks,
-        }
-
-    @app.get("/api/v1/servers")
-    async def list_servers() -> dict[str, Any]:
-        return {
-            "composedRoute": "/mcp",
-            "servers": server_inventory,
-        }
-
-    @app.get("/api/v1/profiles")
-    async def list_profiles() -> dict[str, Any]:
-        return {
-            "defaultProfile": settings.gateway.default_client_profile,
-            "fullRoute": "/mcp",
-            "profiles": profile_inventory,
-            "clientSnippets": generate_client_configs(settings, repo_root=Path.cwd()),
-        }
-
-    @app.get("/ui", response_class=HTMLResponse)
-    async def dashboard_ui(request: Request) -> HTMLResponse:
-        resp = HTMLResponse(
-            content=render_dashboard_html(__version__),
-            headers={"Cache-Control": "no-store"},
-        )
-        _maybe_mint_trusted_ui_session(request, resp)
-        return resp
-
-    @app.post("/api/v1/auth/login-link", response_model=None)
-    async def ui_login_link_api(request: Request) -> dict[str, Any] | JSONResponse:
-        if settings.gateway.effective_auth_enabled and caller_auth_method_var.get() != "bearer":
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": {
-                        "code": "BEARER_REQUIRED",
-                        "message": "Minting a /ui login link requires Authorization: Bearer auth",
-                    }
-                },
-            )
-        client_id = caller_client_id_var.get() or "codex"
-        if client_id == "anonymous":
-            first = next(iter(settings.gateway.clients.values()), None)
-            client_id = first.client_id if first is not None else "local"
-        nonce = login_nonces.issue(client_id)
-        origin = (
-            (settings.gateway.public_url or "").rstrip("/")
-            or str(request.base_url).rstrip("/")
-        )
-        return {
-            "url": f"{origin}/ui/login?nonce={nonce}",
-            "expiresInSeconds": 60,
-            "clientId": client_id,
-        }
-
-    @app.get("/ui/login")
-    async def ui_login_consume(request: Request, nonce: str = "") -> RedirectResponse:
-        client_id = login_nonces.consume(nonce)
-        if not client_id:
-            return RedirectResponse(url="/ui?auth_error=invalid_link", status_code=303)
-        session_val = sign_ui_session(client_id, settings)
-        resp = RedirectResponse(url="/ui", status_code=303)
-        _set_session_cookie(resp, session_val, request)
-        return resp
-
-    @app.post("/api/v1/auth/session", response_model=None)
-    async def ui_session_create(
-        request: Request,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> Response:
-        auth_header = request.headers.get("authorization", "")
-        token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-        if not token and isinstance(payload, dict):
-            token = str(payload.get("token") or "").strip()
-
-        if not settings.gateway.effective_auth_enabled:
-            session_val = sign_ui_session("local", settings)
-            resp = JSONResponse(
-                {
-                    "authenticated": True,
-                    "authEnabled": False,
-                    "clientId": "local",
-                    "clientName": "Local (Auth Disabled)",
-                    "allowedServers": ["*"],
-                    "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
-                }
-            )
-            _set_session_cookie(resp, session_val, request)
-            return resp
-
-        policy = settings.gateway.clients.get(token) if token else None
-        if policy is None:
-            return JSONResponse(
-                status_code=401,
-                content={"error": {"code": "AUTH_FAILED", "message": "Invalid Bearer token"}},
-            )
-        session_val = sign_ui_session(policy.client_id, settings)
-        resp = JSONResponse(
-            {
-                "authenticated": True,
-                "authEnabled": True,
-                "clientId": policy.client_id,
-                "clientName": policy.client_name,
-                "allowedServers": list(policy.allowed_servers),
-                "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
-            }
-        )
-        _set_session_cookie(resp, session_val, request)
-        return resp
-
-    @app.get("/api/v1/auth/me", response_model=None)
-    async def ui_session_me(request: Request) -> Response | dict[str, Any]:
-        policy, method = _resolve_auth_identity(request)
-        if not settings.gateway.effective_auth_enabled:
-            return {
-                "authenticated": True,
-                "authEnabled": False,
-                "clientId": "local",
-                "clientName": "Local (Auth Disabled)",
-                "allowedServers": ["*"],
-                "authMethod": "open",
-                "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
-                "adminToolsEnabled": settings.gateway.admin_tools_enabled,
-            }
-        if policy is None:
-            client_host = request.client.host if request.client else ""
-            headers_lower = {k.lower(): v for k, v in request.headers.items()}
-            trusted_method = resolve_trusted_ui_method(client_host, headers_lower, settings)
-            if trusted_method is not None:
-                owner_cid, owner_policy = resolve_owner_ui_client(settings)
-                if owner_policy is not None:
-                    resp = JSONResponse(
-                        {
-                            "authenticated": True,
-                            "authEnabled": True,
-                            "clientId": owner_policy.client_id,
-                            "clientName": owner_policy.client_name,
-                            "allowedServers": list(owner_policy.allowed_servers),
-                            "authMethod": trusted_method,
-                            "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
-                            "adminToolsEnabled": settings.gateway.admin_tools_enabled,
-                        }
-                    )
-                    _maybe_mint_trusted_ui_session(request, resp)
-                    return resp
-            return {
-                "authenticated": False,
-                "authEnabled": True,
-                "clientId": None,
-                "clientName": None,
-                "allowedServers": [],
-                "authMethod": "anonymous",
-                "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
-                "adminToolsEnabled": settings.gateway.admin_tools_enabled,
-            }
-        return {
-            "authenticated": True,
-            "authEnabled": True,
-            "clientId": policy.client_id,
-            "clientName": policy.client_name,
-            "allowedServers": list(policy.allowed_servers),
-            "authMethod": method,
-            "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
-            "adminToolsEnabled": settings.gateway.admin_tools_enabled,
-        }
-
-    @app.post("/api/v1/auth/logout")
-    async def ui_session_logout() -> Response:
-        resp = JSONResponse({"ok": True})
-        resp.delete_cookie(key=UI_SESSION_COOKIE, path="/")
-        return resp
-
-    async def _collect_tools_for_server(
-        slug: str, srv: FastMCP, *, timeout_s: float = 2.0
-    ) -> list[dict[str, Any]]:
-        try:
-            items = await asyncio.wait_for(srv.list_tools(), timeout=timeout_s)
-        except Exception as exc:
-            logger.debug("Tool inspection skipped for server", server=slug, error=str(exc))
-            return []
-        collected: list[dict[str, Any]] = []
-        for tool in items:
-            params = getattr(tool, "parameters", None)
-            if not isinstance(params, dict):
-                params = {}
-            collected.append(
-                {
-                    "name": getattr(tool, "name", ""),
-                    "server": slug,
-                    "description": (getattr(tool, "description", None) or "").strip(),
-                    "parameters": params,
-                }
-            )
-        return collected
-
-    @app.get("/api/v1/tools")
-    async def list_tools_api(
-        server: str | None = None,
-        profile: str | None = None,
-        q: str | None = None,
-    ) -> dict[str, Any]:
-        target_slugs: dict[str, FastMCP] = {
-            _slug_for(k): srv for k, srv in servers.items()
-        }
-        if upstream_proxy is not None:
-            target_slugs["mlflow-upstream"] = upstream_proxy
-        for fed_slug, fed_proxy in federated_proxies.items():
-            target_slugs[fed_slug] = fed_proxy
-
-        allowed_by_profile: set[str] | None = None
-        if profile:
-            prof_entry = next((p for p in profile_inventory if p["name"] == profile), None)
-            if prof_entry is None:
-                return {"totalTools": 0, "profileCounts": {}, "tools": []}
-            allowed_by_profile = set(prof_entry["servers"])
-            if prof_entry.get("includesUpstreamMcp"):
-                allowed_by_profile.add("mlflow-upstream")
-
-        async def _gather_one(slug: str, srv: FastMCP) -> tuple[str, list[dict[str, Any]]]:
-            t_out = federated_cfg_map[slug].timeout_s if slug in federated_cfg_map else 2.0
-            return slug, await _collect_tools_for_server(slug, srv, timeout_s=t_out)
-
-        gathered = await asyncio.gather(
-            *(_gather_one(slug, srv) for slug, srv in target_slugs.items())
-        )
-        per_server_tools: dict[str, list[dict[str, Any]]] = dict(gathered)
-
-        profile_counts: dict[str, int] = {}
-        for prof in profile_inventory:
-            total = sum(len(per_server_tools.get(s, [])) for s in prof["servers"])
-            if prof.get("includesUpstreamMcp"):
-                total += len(per_server_tools.get("mlflow-upstream", []))
-            profile_counts[str(prof["name"])] = total
-
-        needle = (q or "").strip().lower()
-        srv_filter = (server or "").strip().replace("_", "-").lower()
-
-        filtered: list[dict[str, Any]] = []
-        for slug, items in per_server_tools.items():
-            if srv_filter and slug.lower() != srv_filter:
-                continue
-            if allowed_by_profile is not None and slug not in allowed_by_profile:
-                continue
-            for item in items:
-                if needle:
-                    hay = f"{item['name']} {item['description']} {slug}".lower()
-                    if needle not in hay:
-                        continue
-                filtered.append(item)
-
-        return {
-            "totalTools": len(filtered),
-            "profileCounts": profile_counts,
-            "tools": filtered,
-        }
-
-    @app.get("/api/v1/watchdog")
-    async def watchdog_status_api() -> dict[str, Any]:
-        state = await asyncio.to_thread(_load_state, DEFAULT_STATE_PATH)
-        recent_events: list[dict[str, Any]] = []
-        try:
-            if DEFAULT_LOG_PATH.exists():
-                raw_lines = DEFAULT_LOG_PATH.read_text(encoding="utf-8").splitlines()[-25:]
-                for line in reversed(raw_lines):
-                    if not line.strip():
-                        continue
-                    try:
-                        recent_events.append(json.loads(line))
-                    except Exception:
-                        recent_events.append({"raw": line})
-        except Exception as exc:
-            recent_events.append({"error": str(exc)})
-        eval_regression = state.get("eval_regression")
-        if eval_regression is None:
-            eval_regression = await asyncio.to_thread(
-                _default_eval_regression_probe, settings, timeout=0.6
-            )
-        return {
-            "statePath": str(DEFAULT_STATE_PATH),
-            "logPath": str(DEFAULT_LOG_PATH),
-            "lastRunAt": state.get("last_run_at"),
-            "lastActions": state.get("last_actions") or {},
-            "components": state.get("components") or {},
-            "evalRegression": eval_regression,
-            "recentEvents": recent_events,
-        }
-
-    @app.get("/api/v1/traces")
-    async def recent_traces_api(
-        limit: int = 25,
-        experiment: str = "",
-        server: str = "",
-        user: str = "",
-        model_id: str = "",
-        state: str = "",
-        policy_refusal: str = "all",
-        q: str = "",
-    ) -> dict[str, Any]:
-        clamped = max(1, min(limit, 100))
-
-        def _fetch() -> dict[str, Any]:
-            import mlflow
-
-            client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
-            target_exp_name = experiment.strip() or settings.mlflow.experiment_name
-            exp = client.get_experiment_by_name(target_exp_name)
-            experiments_out: list[dict[str, str]] = []
-            try:
-                for item in client.search_experiments(max_results=50):
-                    if getattr(item, "lifecycle_stage", "active") == "active":
-                        experiments_out.append(
-                            {
-                                "id": str(item.experiment_id),
-                                "name": str(item.name),
-                            }
-                        )
-            except Exception:
-                pass
-            if exp is None:
-                return {
-                    "available": True,
-                    "experiment": target_exp_name,
-                    "experiments": experiments_out,
-                    "traces": [],
-                    "facets": {"servers": [], "users": [], "modelIds": []},
-                    "latestEvalRun": None,
-                    "evalHistory": [],
-                    "evalRegression": {
-                        "status": "no_eval_runs",
-                        "threshold": settings.gateway.eval_regression_threshold,
-                    },
-                }
-            search_limit = max(clamped * 3, 60)
-            traces = client.search_traces(
-                locations=[exp.experiment_id],
-                max_results=search_limit,
-                order_by=["timestamp_ms DESC"],
-            )
-            all_rows: list[dict[str, Any]] = []
-            facet_servers: set[str] = set()
-            facet_users: set[str] = set()
-            facet_models: set[str] = set()
-            for tr in traces:
-                info = getattr(tr, "info", tr)
-                spans = getattr(getattr(tr, "data", None), "spans", None) or []
-                root_name = getattr(spans[0], "name", "") if spans else ""
-                tags = dict(getattr(info, "tags", None) or {})
-                meta = dict(getattr(info, "trace_metadata", None) or {})
-                srv_val = str(
-                    tags.get("mcp.server")
-                    or (root_name.split(".", 1)[0] if "." in root_name else "")
-                ).strip()
-                tool_val = str(
-                    tags.get("mcp.tool")
-                    or (root_name.split(".", 1)[1] if "." in root_name else "")
-                ).strip()
-                user_val = str(meta.get("mlflow.trace.user") or tags.get("mcp.user") or "").strip()
-                model_val = str(
-                    getattr(info, "model_id", None) or meta.get("mlflow.modelId") or ""
-                ).strip()
-                if srv_val:
-                    facet_servers.add(srv_val)
-                if user_val:
-                    facet_users.add(user_val)
-                if model_val:
-                    facet_models.add(model_val)
-                all_rows.append(
-                    {
-                        "traceId": getattr(info, "trace_id", None)
-                        or getattr(info, "request_id", None),
-                        "name": root_name,
-                        "state": str(getattr(info, "state", "")),
-                        "policyRefusal": is_expected_policy_refusal(tr),
-                        "durationMs": round(_trace_duration_ms(tr), 1),
-                        "timestampMs": getattr(info, "timestamp_ms", None),
-                        "user": user_val or None,
-                        "sessionId": meta.get("mlflow.trace.session"),
-                        "modelId": model_val or None,
-                        "server": srv_val or None,
-                        "tool": tool_val or None,
-                        "profile": tags.get("mcp.profile"),
-                        "assessmentCount": len(getattr(info, "assessments", None) or []),
-                    }
-                )
-
-            srv_f = server.strip().lower()
-            usr_f = user.strip().lower()
-            mdl_f = model_id.strip()
-            st_f = state.strip().upper()
-            pr_f = policy_refusal.strip().lower()
-            q_f = q.strip().lower()
-
-            filtered: list[dict[str, Any]] = []
-            for row in all_rows:
-                if srv_f and str(row.get("server") or "").lower() != srv_f:
-                    continue
-                if usr_f and str(row.get("user") or "").lower() != usr_f:
-                    continue
-                if mdl_f and str(row.get("modelId") or "") != mdl_f:
-                    continue
-                if st_f and st_f not in str(row.get("state") or "").upper():
-                    continue
-                if pr_f == "only" and not row["policyRefusal"]:
-                    continue
-                if pr_f == "exclude" and row["policyRefusal"]:
-                    continue
-                if q_f:
-                    hay = (
-                        f"{row.get('traceId', '')} {row.get('name', '')} "
-                        f"{row.get('server', '')} {row.get('tool', '')} {row.get('user', '')}"
-                    ).lower()
-                    if q_f not in hay:
-                        continue
-                filtered.append(row)
-                if len(filtered) >= clamped:
-                    break
-
-            eval_history: list[dict[str, Any]] = []
-            try:
-                runs = client.search_runs(
-                    [exp.experiment_id],
-                    order_by=["attributes.start_time DESC"],
-                    max_results=25,
-                )
-                for run in runs:
-                    metrics = {
-                        k: round(float(v), 4)
-                        for k, v in (run.data.metrics or {}).items()
-                        if "/" in k or "tool_" in k or "policy_" in k
-                    }
-                    if metrics:
-                        core_vals = [
-                            metrics[k] for k in _EVAL_SCORE_KEYS if k in metrics
-                        ] or list(metrics.values())
-                        min_score = round(min(core_vals), 4)
-                        eval_history.append(
-                            {
-                                "run_id": run.info.run_id,
-                                "run_name": getattr(run.info, "run_name", None),
-                                "timestamp_ms": getattr(run.info, "start_time", None),
-                                "min_score": min_score,
-                                "metrics": metrics,
-                            }
-                        )
-                        if len(eval_history) >= 10:
-                            break
-            except Exception:
-                pass
-
-            latest_eval = eval_history[0] if eval_history else None
-            threshold = settings.gateway.eval_regression_threshold
-            if latest_eval is None:
-                eval_regression: dict[str, Any] = {
-                    "status": "no_eval_runs",
-                    "threshold": threshold,
-                }
-            else:
-                failing = {
-                    k: v
-                    for k, v in latest_eval["metrics"].items()
-                    if k in _EVAL_SCORE_KEYS and v < threshold
-                }
-                eval_regression = {
-                    "status": "regression" if failing else "ok",
-                    "threshold": threshold,
-                    "run_id": latest_eval["run_id"],
-                    "run_name": latest_eval.get("run_name"),
-                    "min_score": latest_eval["min_score"],
-                    "failing_metrics": failing,
-                }
-
-            return {
-                "available": True,
-                "experiment": target_exp_name,
-                "experimentId": exp.experiment_id,
-                "experiments": experiments_out,
-                "traces": filtered,
-                "facets": {
-                    "servers": sorted(facet_servers),
-                    "users": sorted(facet_users),
-                    "modelIds": sorted(facet_models),
-                },
-                "latestEvalRun": latest_eval,
-                "evalHistory": eval_history,
-                "evalRegression": eval_regression,
-            }
-
-        try:
-            return await asyncio.to_thread(_fetch)
-        except Exception as exc:
-            return {
-                "available": False,
-                "experiment": experiment.strip() or settings.mlflow.experiment_name,
-                "experiments": [],
-                "error": str(exc),
-                "traces": [],
-                "facets": {"servers": [], "users": [], "modelIds": []},
-                "latestEvalRun": None,
-                "evalHistory": [],
-                "evalRegression": {
-                    "status": "unavailable",
-                    "threshold": settings.gateway.eval_regression_threshold,
-                },
-            }
-
-    @app.get("/api/v1/traces/{trace_id}", response_model=None)
-    async def trace_detail_api(trace_id: str) -> dict[str, Any] | JSONResponse:
-        def _safe_json(val: Any) -> Any:
-            try:
-                return json.loads(json.dumps(val, default=str))
-            except Exception:
-                return str(val)
-
-        def _fetch_one() -> dict[str, Any]:
-            import mlflow
-
-            flush_fn = getattr(mlflow, "flush_trace_async_logging", None)
-            if callable(flush_fn):
-                with suppress(Exception):
-                    flush_fn(terminate=False)
-            client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
-            trace = None
-            last_exc: Exception | None = None
-            for attempt in range(4):
-                try:
-                    trace = client.get_trace(trace_id)
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    msg_l = str(exc).lower()
-                    is_transient = (
-                        "not found" in msg_l
-                        or "does not exist" in msg_l
-                        or "corrupted" in msg_l
-                    )
-                    if not is_transient or attempt == 3:
-                        raise
-                    time.sleep(0.35)
-            if trace is None and last_exc is not None:
-                raise last_exc
-            info = getattr(trace, "info", trace)
-            raw_spans = getattr(getattr(trace, "data", None), "spans", None) or []
-            spans_out: list[dict[str, Any]] = []
-            for sp in raw_spans:
-                start_ns = getattr(sp, "start_time_ns", None)
-                end_ns = getattr(sp, "end_time_ns", None)
-                dur_ms = (
-                    round((end_ns - start_ns) / 1_000_000.0, 2)
-                    if isinstance(start_ns, int)
-                    and isinstance(end_ns, int)
-                    and end_ns >= start_ns
-                    else None
-                )
-                events_out: list[dict[str, Any]] = []
-                for ev in getattr(sp, "events", None) or []:
-                    attrs = getattr(ev, "attributes", None)
-                    clean_attrs = (
-                        {
-                            k: v
-                            for k, v in attrs.items()
-                            if k != "exception.stacktrace"
-                        }
-                        if isinstance(attrs, dict)
-                        else attrs
-                    )
-                    events_out.append(
-                        {
-                            "name": getattr(ev, "name", None),
-                            "attributes": _safe_json(clean_attrs),
-                        }
-                    )
-                raw_attrs = getattr(sp, "attributes", None)
-                clean_span_attrs = (
-                    redact_payload(dict(raw_attrs))
-                    if isinstance(raw_attrs, dict)
-                    else {}
-                )
-                spans_out.append(
-                    {
-                        "spanId": getattr(sp, "span_id", None),
-                        "parentId": getattr(sp, "parent_id", None),
-                        "name": getattr(sp, "name", ""),
-                        "spanType": str(getattr(sp, "span_type", "")),
-                        "status": str(getattr(sp, "status", "")),
-                        "durationMs": dur_ms,
-                        "startTimeMs": (
-                            round(start_ns / 1_000_000.0, 2)
-                            if isinstance(start_ns, int)
-                            else None
-                        ),
-                        "endTimeMs": (
-                            round(end_ns / 1_000_000.0, 2)
-                            if isinstance(end_ns, int)
-                            else None
-                        ),
-                        "attributes": _safe_json(clean_span_attrs),
-                        "inputs": _safe_json(getattr(sp, "inputs", None)),
-                        "outputs": _safe_json(getattr(sp, "outputs", None)),
-                        "events": events_out,
-                    }
-                )
-
-            assessments_out: list[dict[str, Any]] = []
-            for item in getattr(info, "assessments", None) or []:
-                feedback = getattr(item, "feedback", None)
-                expectation = getattr(item, "expectation", None)
-                if feedback is not None:
-                    kind = "feedback"
-                    val = getattr(feedback, "value", None)
-                elif expectation is not None:
-                    kind = "expectation"
-                    val = getattr(expectation, "value", None)
-                else:
-                    kind = "assessment"
-                    val = getattr(item, "value", None)
-                assessments_out.append(
-                    {
-                        "kind": kind,
-                        "name": getattr(item, "name", None),
-                        "value": _safe_json(val),
-                        "rationale": getattr(item, "rationale", None),
-                    }
-                )
-
-            tags = dict(getattr(info, "tags", None) or {})
-            meta = dict(getattr(info, "trace_metadata", None) or {})
-            root_span = next((s for s in spans_out if not s.get("parentId")), None) or (
-                spans_out[0] if spans_out else {}
-            )
-            root_attrs = root_span.get("attributes") if isinstance(root_span, dict) else {}
-            srv_name = tags.get("mcp.server") or (
-                root_attrs.get("mcp.server") if isinstance(root_attrs, dict) else None
-            )
-            tl_name = tags.get("mcp.tool") or (
-                root_attrs.get("mcp.tool") if isinstance(root_attrs, dict) else None
-            )
-            if (not srv_name or not tl_name) and isinstance(root_span, dict):
-                rname = str(root_span.get("name") or "")
-                if "." in rname:
-                    cand_s, cand_t = rname.split(".", 1)
-                    srv_name = srv_name or cand_s
-                    tl_name = tl_name or cand_t
-            return {
-                "traceId": getattr(info, "trace_id", None) or trace_id,
-                "state": str(getattr(info, "state", "")),
-                "policyRefusal": is_expected_policy_refusal(trace),
-                "durationMs": round(_trace_duration_ms(trace), 2),
-                "timestampMs": getattr(info, "timestamp_ms", None),
-                "server": srv_name,
-                "tool": tl_name,
-                "user": meta.get("mlflow.trace.user"),
-                "sessionId": meta.get("mlflow.trace.session"),
-                "modelId": meta.get("mlflow.modelId") or getattr(info, "model_id", None),
-                "tags": _safe_json(tags),
-                "spans": spans_out,
-                "assessments": assessments_out,
-            }
-
-        try:
-            return await asyncio.to_thread(_fetch_one)
-        except Exception as exc:
-            msg = str(exc)
-            lowered = msg.lower()
-            status_code = 404 if ("not found" in lowered or "does not exist" in lowered) else 503
-            code = "NOT_FOUND" if status_code == 404 else "MLFLOW_UNAVAILABLE"
-            return JSONResponse(
-                status_code=status_code,
-                content={"error": {"code": code, "message": msg}},
-            )
-
-    @app.post("/api/v1/traces/{trace_id}/feedback", response_model=None)
-    async def trace_feedback_api(
-        trace_id: str,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        if not isinstance(payload, dict) or "value" not in payload:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_REQUEST", "message": "Provide 'value'"}},
-            )
-        name = str(payload.get("name") or "human_quality").strip() or "human_quality"
-        value = payload["value"]
-        rationale = (
-            str(payload["rationale"]).strip()
-            if payload.get("rationale") is not None
-            else None
-        )
-        caller_id = caller_client_id_var.get() or "dashboard"
-
-        def _log() -> dict[str, Any]:
-            import mlflow
-            from mlflow.entities.assessment_source import AssessmentSource, AssessmentSourceType
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            assessment = mlflow.log_feedback(
-                trace_id=trace_id,
-                name=name,
-                value=value,
-                rationale=rationale or None,
-                source=AssessmentSource(
-                    source_type=AssessmentSourceType.HUMAN,
-                    source_id=caller_id,
-                ),
-            )
-            return {
-                "logged": True,
-                "traceId": trace_id,
-                "assessmentId": getattr(assessment, "assessment_id", None),
-                "name": name,
-                "value": value,
-            }
-
-        try:
-            return await asyncio.to_thread(_log)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
-            )
-
-    @app.post("/api/v1/traces/{trace_id}/expectation", response_model=None)
-    async def trace_expectation_api(
-        trace_id: str,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        if not isinstance(payload, dict) or "value" not in payload:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_REQUEST", "message": "Provide 'value'"}},
-            )
-        name = str(payload.get("name") or "expected_outcome").strip() or "expected_outcome"
-        value = payload["value"]
-        caller_id = caller_client_id_var.get() or "dashboard"
-
-        def _log() -> dict[str, Any]:
-            import mlflow
-            from mlflow.entities.assessment_source import AssessmentSource, AssessmentSourceType
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            assessment = mlflow.log_expectation(
-                trace_id=trace_id,
-                name=name,
-                value=value,
-                source=AssessmentSource(
-                    source_type=AssessmentSourceType.HUMAN,
-                    source_id=caller_id,
-                ),
-            )
-            return {
-                "logged": True,
-                "traceId": trace_id,
-                "assessmentId": getattr(assessment, "assessment_id", None),
-                "name": name,
-                "value": value,
-            }
-
-        try:
-            return await asyncio.to_thread(_log)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
-            )
-
-    @app.post("/api/v1/traces/{trace_id}/tag", response_model=None)
-    async def trace_tag_api(
-        trace_id: str,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        key = str((payload or {}).get("key") or "").strip() if isinstance(payload, dict) else ""
-        val = str((payload or {}).get("value") or "").strip() if isinstance(payload, dict) else ""
-        if not key:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_REQUEST", "message": "Provide 'key'"}},
-            )
-
-        def _tag() -> dict[str, Any]:
-            import mlflow
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            mlflow.set_trace_tag(trace_id=trace_id, key=key, value=val)
-            return {"tagged": True, "traceId": trace_id, "key": key, "value": val}
-
-        try:
-            return await asyncio.to_thread(_tag)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
-            )
-
-    @app.post("/api/v1/traces/{trace_id}/promote-to-dataset", response_model=None)
-    async def trace_promote_to_dataset_api(
-        trace_id: str,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        body = payload if isinstance(payload, dict) else {}
-        dataset_name = str(body.get("dataset_name") or GOLDEN_DATASET_NAME).strip()
-        expected_outcome = str(body.get("expected_outcome") or "").strip()
-        must_contain = body.get("must_contain")
-
-        def _promote() -> dict[str, Any]:
-            import mlflow
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
-            trace = client.get_trace(trace_id)
-            spans = getattr(getattr(trace, "data", None), "spans", None) or []
-            if not spans:
-                raise ValueError(f"Trace '{trace_id}' has no spans")
-            root = spans[0]
-            attrs = dict(getattr(root, "attributes", None) or {})
-            raw_inputs = getattr(root, "inputs", None)
-            inputs_dict = dict(raw_inputs) if isinstance(raw_inputs, dict) else {}
-
-            if {"server", "tool"} <= set(inputs_dict.keys()):
-                srv_name = str(inputs_dict["server"])
-                tool_name = str(inputs_dict["tool"])
-                args_dict = dict(inputs_dict.get("arguments") or {})
-            else:
-                srv_name = str(attrs.get("mcp.server") or "")
-                tool_name = str(attrs.get("mcp.tool") or "")
-                span_name = str(getattr(root, "name", "") or "")
-                if (not srv_name or not tool_name) and "." in span_name:
-                    p_srv, p_tool = span_name.split(".", 1)
-                    srv_name = srv_name or p_srv
-                    tool_name = tool_name or p_tool
-                args_dict = inputs_dict
-
-            if not srv_name or not tool_name:
-                raise ValueError("Could not determine 'server' and 'tool' from trace root span")
-
-            outcome = expected_outcome or (
-                "policy_refusal" if is_expected_policy_refusal(trace) else "ok"
-            )
-            expectations: dict[str, Any] = {"expected_outcome": outcome}
-            if isinstance(must_contain, str) and must_contain.strip():
-                expectations["must_contain"] = must_contain.strip()
-
-            record = {
-                "inputs": {
-                    "server": srv_name,
-                    "tool": tool_name,
-                    "arguments": args_dict,
-                },
-                "expectations": expectations,
-            }
-            sync_res = sync_golden_dataset(
-                settings,
-                dataset_name=dataset_name,
-                cases=[record],
-            )
-            mlflow.set_trace_tag(trace_id=trace_id, key="promoted_to_dataset", value=dataset_name)
-            return {
-                "promoted": True,
-                "traceId": trace_id,
-                "dataset": sync_res,
-                "record": record,
-            }
-
-        try:
-            return await asyncio.to_thread(_promote)
-        except ValueError as exc:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_TRACE", "message": str(exc)}},
-            )
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
-            )
-
-    @app.get("/api/v1/mlflow/registry")
-    async def mlflow_registry_api() -> dict[str, Any]:
-        def _load_registry() -> dict[str, Any]:
-            import mlflow
-            import mlflow.genai
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
-
-            mcp_servers_out: list[dict[str, Any]] = []
-            try:
-                for srv in client.search_mcp_servers(max_results=50):
-                    aliases_dict = dict(getattr(srv, "aliases", None) or {})
-                    tags_dict = dict(getattr(srv, "tags", None) or {})
-                    srv_url = getattr(srv, "url", None) or tags_dict.get("gateway_route") or ""
-                    if not srv_url and aliases_dict:
-                        first_ver = str(next(iter(aliases_dict.values())))
-                        try:
-                            mv = client.get_mcp_server_version(
-                                name=str(srv.name), version=first_ver
-                            )
-                            remotes = getattr(mv, "remotes", None) or []
-                            if remotes:
-                                r0 = remotes[0]
-                                srv_url = (
-                                    str(r0.get("url") or "")
-                                    if isinstance(r0, dict)
-                                    else str(getattr(r0, "url", "") or "")
-                                )
-                        except Exception:
-                            pass
-                    mcp_servers_out.append(
-                        {
-                            "name": getattr(srv, "name", None),
-                            "url": srv_url or None,
-                            "version": getattr(srv, "version", None),
-                            "description": getattr(srv, "description", None),
-                            "aliases": aliases_dict,
-                            "tags": tags_dict,
-                        }
-                    )
-            except Exception:
-                pass
-
-            prompts_out: list[dict[str, Any]] = []
-            try:
-                prompts = mlflow.genai.search_prompts(max_results=50)
-                for p in prompts[:50]:
-                    p_name = str(getattr(p, "name", ""))
-                    versions_out: list[dict[str, Any]] = []
-                    try:
-                        vers = client.search_prompt_versions(name=p_name, max_results=25)
-                        for v in vers:
-                            versions_out.append(
-                                {
-                                    "version": getattr(v, "version", None),
-                                    "aliases": list(getattr(v, "aliases", None) or []),
-                                    "commitMessage": getattr(v, "commit_message", None),
-                                    "creationTimestamp": getattr(v, "creation_timestamp", None),
-                                }
-                            )
-                        versions_out.sort(
-                            key=lambda item: (
-                                int(item["version"])
-                                if str(item.get("version") or "").isdigit()
-                                else -1
-                            ),
-                            reverse=True,
-                        )
-                    except Exception:
-                        pass
-                    prompts_out.append(
-                        {
-                            "name": p_name,
-                            "description": getattr(p, "description", None),
-                            "tags": dict(getattr(p, "tags", None) or {}),
-                            "versions": versions_out,
-                        }
-                    )
-            except Exception:
-                pass
-
-            reg_models_out: list[dict[str, Any]] = []
-            try:
-                for m in client.search_registered_models(max_results=30):
-                    latest = [
-                        {
-                            "version": getattr(lv, "version", None),
-                            "currentStage": getattr(lv, "current_stage", None),
-                            "aliases": list(getattr(lv, "aliases", None) or []),
-                        }
-                        for lv in (getattr(m, "latest_versions", None) or [])
-                    ]
-                    reg_models_out.append(
-                        {
-                            "name": getattr(m, "name", None),
-                            "description": getattr(m, "description", None),
-                            "aliases": dict(getattr(m, "aliases", None) or {}),
-                            "tags": dict(getattr(m, "tags", None) or {}),
-                            "latestVersions": latest,
-                        }
-                    )
-            except Exception:
-                pass
-
-            logged_models_out: list[dict[str, Any]] = []
-            try:
-                exp = client.get_experiment_by_name(settings.mlflow.experiment_name)
-                if exp is not None:
-                    for lm in client.search_logged_models(
-                        experiment_ids=[exp.experiment_id], max_results=20
-                    ):
-                        logged_models_out.append(
-                            {
-                                "modelId": getattr(lm, "model_id", None),
-                                "name": getattr(lm, "name", None),
-                                "status": str(getattr(lm, "status", "")),
-                                "tags": dict(getattr(lm, "tags", None) or {}),
-                                "metrics": [
-                                    {
-                                        "key": getattr(met, "key", None),
-                                        "value": getattr(met, "value", None),
-                                    }
-                                    for met in (getattr(lm, "metrics", None) or [])
-                                ],
-                            }
-                        )
-            except Exception:
-                pass
-
-            return {
-                "available": True,
-                "mutationsEnabled": settings.mlflow.allow_mutations,
-                "experiment": settings.mlflow.experiment_name,
-                "mcpServers": mcp_servers_out,
-                "prompts": prompts_out,
-                "registeredModels": reg_models_out,
-                "loggedModels": logged_models_out,
-            }
-
-        try:
-            return await asyncio.to_thread(_load_registry)
-        except Exception as exc:
-            return {
-                "available": False,
-                "mutationsEnabled": settings.mlflow.allow_mutations,
-                "experiment": settings.mlflow.experiment_name,
-                "error": str(exc),
-                "mcpServers": [],
-                "prompts": [],
-                "registeredModels": [],
-                "loggedModels": [],
-            }
-
-    @app.get("/api/v1/mlflow/prompts/{name}", response_model=None)
-    async def mlflow_prompt_detail_api(
-        name: str,
-        version_or_alias: str = "latest",
-    ) -> dict[str, Any] | JSONResponse:
-        def _load() -> dict[str, Any]:
-            import mlflow
-            import mlflow.genai
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            if version_or_alias.isdigit():
-                pv = mlflow.genai.load_prompt(name, version=int(version_or_alias))
-            else:
-                pv = mlflow.genai.load_prompt(f"prompts:/{name}@{version_or_alias}")
-            return {
-                "name": getattr(pv, "name", name),
-                "version": getattr(pv, "version", None),
-                "template": getattr(pv, "template", None),
-                "commitMessage": getattr(pv, "commit_message", None),
-                "tags": dict(getattr(pv, "tags", None) or {}),
-                "uri": getattr(pv, "uri", None),
-            }
-
-        try:
-            return await asyncio.to_thread(_load)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=404,
-                content={"error": {"code": "PROMPT_NOT_FOUND", "message": str(exc)}},
-            )
-
-    @app.post("/api/v1/mlflow/prompts/{name}/alias", response_model=None)
-    async def mlflow_prompt_alias_api(
-        name: str,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        if not settings.mlflow.allow_mutations:
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": {
-                        "code": "MLFLOW_MUTATIONS_DISABLED",
-                        "message": "Set MLFLOW_ALLOW_MUTATIONS=true to update prompt aliases",
-                    }
-                },
-            )
-        body = payload if isinstance(payload, dict) else {}
-        alias = str(body.get("alias") or "").strip()
-        raw_ver = body.get("version")
-        if not alias or raw_ver is None:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "code": "INVALID_REQUEST",
-                        "message": "Provide 'alias' and integer 'version'",
-                    }
-                },
-            )
-        version_int = int(raw_ver)
-
-        def _set() -> dict[str, Any]:
-            import mlflow
-            import mlflow.genai
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            mlflow.genai.set_prompt_alias(name=name, alias=alias, version=version_int)
-            meta_prompt_provider.invalidate_cache()
-            return {"updated": True, "name": name, "alias": alias, "version": version_int}
-
-        try:
-            return await asyncio.to_thread(_set)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
-            )
-
-    @app.delete("/api/v1/mlflow/prompts/{name}/alias/{alias}", response_model=None)
-    async def mlflow_prompt_alias_delete_api(
-        name: str, alias: str
-    ) -> dict[str, Any] | JSONResponse:
-        if not settings.mlflow.allow_mutations:
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": {
-                        "code": "MLFLOW_MUTATIONS_DISABLED",
-                        "message": "Set MLFLOW_ALLOW_MUTATIONS=true to delete prompt aliases",
-                    }
-                },
-            )
-        clean_alias = alias.strip().lstrip("@")
-        if not clean_alias:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_REQUEST", "message": "Provide valid 'alias'"}},
-            )
-
-        def _delete() -> dict[str, Any]:
-            import mlflow
-            import mlflow.genai
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            delete_fn = getattr(mlflow.genai, "delete_prompt_alias", None)
-            if callable(delete_fn):
-                delete_fn(name=name, alias=clean_alias)
-            else:
-                client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
-                client.delete_prompt_alias(name=name, alias=clean_alias)
-            meta_prompt_provider.invalidate_cache()
-            return {"deleted": True, "name": name, "alias": clean_alias}
-
-        try:
-            return await asyncio.to_thread(_delete)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
-            )
-
-    @app.post("/api/v1/mlflow/prompts", response_model=None)
-    async def mlflow_prompt_create_api(
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        if not settings.mlflow.allow_mutations:
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": {
-                        "code": "MLFLOW_MUTATIONS_DISABLED",
-                        "message": "Set MLFLOW_ALLOW_MUTATIONS=true to register or version prompts",
-                    }
-                },
-            )
-        body = payload if isinstance(payload, dict) else {}
-        name = str(body.get("name") or "").strip()
-        template = str(body.get("template") or "")
-        commit_msg = str(body.get("commitMessage") or "").strip()
-        alias = str(body.get("alias") or "").strip()
-        if not name or not template:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "code": "INVALID_REQUEST",
-                        "message": "Provide non-empty 'name' and 'template'",
-                    }
-                },
-            )
-
-        def _create() -> dict[str, Any]:
-            import mlflow
-            import mlflow.genai
-
-            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            pv = mlflow.genai.register_prompt(
-                name=name,
-                template=template,
-                commit_message=commit_msg or "Registered from Control Plane Workbench",
-            )
-            ver = getattr(pv, "version", None)
-            set_alias_fn = getattr(mlflow.genai, "set_prompt_alias", None)
-            if alias and ver is not None and callable(set_alias_fn):
-                set_alias_fn(name=name, alias=alias, version=int(ver))
-            meta_prompt_provider.invalidate_cache()
-            return {
-                "created": True,
-                "name": getattr(pv, "name", name),
-                "version": ver,
-                "alias": alias or None,
-                "template": getattr(pv, "template", template),
-                "commitMessage": getattr(pv, "commit_message", commit_msg),
-            }
-
-        try:
-            return await asyncio.to_thread(_create)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
-            )
-
-    def _local_upstreams_path() -> Path:
-        return Path(os.getenv("MCP_LOCAL_CONFIG_PATH") or "config/gateway.local.yaml")
-
-    def _serialize_upstream_item(raw_key: str, cfg: UpstreamServerConfig) -> dict[str, Any]:
-        slug = _slug_for(raw_key)
-        meta = dict(federated_meta.get(slug) or {})
-        safe_cfg = serialize_upstream_config(cfg)
-        return {
-            **safe_cfg,
-            "slug": slug,
-            "route": f"/servers/{slug}/mcp",
-            "connectionStatus": meta.get(
-                "connectionStatus", "disabled" if not cfg.enabled else "configured"
-            ),
-            "toolCount": meta.get("toolCount", 0),
-            "sampleTools": meta.get("sampleTools", []),
-            "missingEnv": meta.get("missingEnv", []),
-            "detail": meta.get("detail") or meta.get("error"),
-        }
-
-    def _parse_upstream_payload(body: dict[str, Any]) -> UpstreamServerConfig:
-        transport = str(body.get("transport") or "http").strip().lower()
-        if transport not in {"http", "stdio"}:
-            raise ValueError("transport must be 'http' or 'stdio'")
-        raw_headers = body.get("headers") or {}
-        raw_env = body.get("env") or {}
-        if not isinstance(raw_headers, dict) or not isinstance(raw_env, dict):
-            raise ValueError("headers and env must be JSON objects")
-        raw_args = body.get("args") or []
-        if isinstance(raw_args, str):
-            raw_args = [line for line in raw_args.splitlines() if line.strip()]
-        raw_profiles = body.get("profiles") or ["studio"]
-        if isinstance(raw_profiles, str):
-            raw_profiles = [p.strip() for p in raw_profiles.split(",") if p.strip()]
-        raw_cwd = str(body.get("cwd") or "").strip() or None
-        cfg = UpstreamServerConfig(
-            transport=transport,  # type: ignore[arg-type]
-            url=str(body.get("url") or "").strip() or None,
-            headers={str(k): SecretStr(str(v)) for k, v in raw_headers.items() if str(k).strip()},
-            command=str(body.get("command") or "").strip() or None,
-            args=[str(a) for a in raw_args],
-            cwd=Path(raw_cwd) if raw_cwd else None,
-            env={str(k): SecretStr(str(v)) for k, v in raw_env.items() if str(k).strip()},
-            enabled=bool(body.get("enabled", True)),
-            compose_into_full=bool(body.get("compose_into_full", True)),
-            profiles=[str(p).strip() for p in raw_profiles if str(p).strip()] or ["studio"],
-            timeout_s=float(body.get("timeout_s", 5.0)),
-            registry_name=str(body.get("registry_name") or "").strip() or None,
-            governance=str(body.get("governance") or "external-proxy").strip() or "external-proxy",
-            description=str(body.get("description") or "").strip(),
-        )
-        validate_upstream_secret_refs(cfg)
-        if cfg.transport == "http" and not cfg.url:
-            raise ValueError("url is required for http upstream")
-        if cfg.transport == "stdio" and not cfg.command:
-            raise ValueError("command is required for stdio upstream")
-        return cfg
-
-    async def _sync_upstream_runtime(slug: str, cfg: UpstreamServerConfig | None) -> dict[str, Any]:
-        nonlocal federated_meta, federated_proxies, federated_cfg_map
-        target_key = next(
-            (k for k in list(settings.gateway.upstream_servers.keys()) if _slug_for(k) == slug),
-            slug,
-        )
-        if cfg is None:
-            settings.gateway.upstream_servers.pop(target_key, None)
-            federated_proxies.pop(slug, None)
-            federated_meta.pop(slug, None)
-            federated_cfg_map.pop(slug, None)
-            server_inventory[:] = [
-                s for s in server_inventory if not (s.get("external") and s.get("slug") == slug)
-            ]
-            save_local_upstreams(_local_upstreams_path(), settings.gateway.upstream_servers)
-            return {"deleted": slug}
-
-        if target_key != slug and target_key in settings.gateway.upstream_servers:
-            settings.gateway.upstream_servers.pop(target_key, None)
-        settings.gateway.upstream_servers[slug] = cfg
-        save_local_upstreams(_local_upstreams_path(), settings.gateway.upstream_servers)
-
-        proxy_srv, up_info = build_upstream_proxy(
-            slug, cfg, settings, resolver=SecretResolver(settings.secrets)
-        )
-        federated_cfg_map[slug] = cfg
-        if proxy_srv is not None:
-            federated_proxies[slug] = proxy_srv
-            probe_res = await probe_upstream_proxy(proxy_srv, timeout_s=cfg.timeout_s)
-            up_info["connectionStatus"] = probe_res["connectionStatus"]
-            up_info["toolCount"] = probe_res.get("toolCount", 0)
-            up_info["sampleTools"] = probe_res.get("sampleTools", [])
-            if probe_res.get("error"):
-                up_info["error"] = probe_res["error"]
-        else:
-            federated_proxies.pop(slug, None)
-
-        federated_meta[slug] = up_info
-        existing_idx = next(
-            (
-                idx
-                for idx, s in enumerate(server_inventory)
-                if s.get("external") and s.get("slug") == slug
-            ),
-            None,
-        )
-        if existing_idx is not None:
-            server_inventory[existing_idx] = up_info
-        else:
-            server_inventory.append(up_info)
-        return _serialize_upstream_item(slug, cfg)
-
-    @app.get("/api/v1/upstreams")
-    async def list_upstreams_api() -> dict[str, Any]:
-        items = [
-            _serialize_upstream_item(k, cfg)
-            for k, cfg in settings.gateway.upstream_servers.items()
-        ]
-        return {"configPath": str(_local_upstreams_path()), "upstreams": items}
-
-    @app.post("/api/v1/upstreams", response_model=None)
-    async def create_upstream_api(
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        body = payload if isinstance(payload, dict) else {}
-        slug = _slug_for(str(body.get("slug") or body.get("name") or ""))
-        if not slug:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_REQUEST", "message": "Provide 'slug'"}},
-            )
-        try:
-            cfg = _parse_upstream_payload(body)
-        except ValueError as exc:
-            code = "RAW_SECRET_REJECTED" if "raw secret" in str(exc) else "INVALID_REQUEST"
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": code, "message": str(exc)}},
-            )
-        item = await _sync_upstream_runtime(slug, cfg)
-        return {"upstream": item}
-
-    @app.put("/api/v1/upstreams/{slug}", response_model=None)
-    async def update_upstream_api(
-        slug: str,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        clean_slug = _slug_for(slug)
-        body = payload if isinstance(payload, dict) else {}
-        try:
-            cfg = _parse_upstream_payload(body)
-        except ValueError as exc:
-            code = "RAW_SECRET_REJECTED" if "raw secret" in str(exc) else "INVALID_REQUEST"
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": code, "message": str(exc)}},
-            )
-        item = await _sync_upstream_runtime(clean_slug, cfg)
-        return {"upstream": item}
-
-    @app.delete("/api/v1/upstreams/{slug}", response_model=None)
-    async def delete_upstream_api(slug: str) -> dict[str, Any] | JSONResponse:
-        clean_slug = _slug_for(slug)
-        if not any(_slug_for(k) == clean_slug for k in settings.gateway.upstream_servers):
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": {
-                        "code": "UPSTREAM_NOT_FOUND",
-                        "message": f"Unknown '{clean_slug}'",
-                    }
-                },
-            )
-        return await _sync_upstream_runtime(clean_slug, None)
-
-    @app.post("/api/v1/upstreams/{slug}/probe", response_model=None)
-    async def probe_single_upstream_api(slug: str) -> dict[str, Any] | JSONResponse:
-        clean_slug = _slug_for(slug)
-        cfg = next(
-            (v for k, v in settings.gateway.upstream_servers.items() if _slug_for(k) == clean_slug),
-            None,
-        )
-        if cfg is None:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": {
-                        "code": "UPSTREAM_NOT_FOUND",
-                        "message": f"Unknown '{clean_slug}'",
-                    }
-                },
-            )
-        item = await _sync_upstream_runtime(clean_slug, cfg)
-        return {"upstream": item}
-
-    @app.get("/api/v1/clients/configs")
-    async def client_configs_api(profile: str | None = None) -> dict[str, Any]:
-        selected = (
-            profile.strip()
-            if isinstance(profile, str) and profile.strip()
-            else settings.gateway.default_client_profile
-        )
-        target_slugs: dict[str, FastMCP] = {
-            _slug_for(k): srv for k, srv in servers.items()
-        }
-        if upstream_proxy is not None:
-            target_slugs["mlflow-upstream"] = upstream_proxy
-        for fed_slug, fed_proxy in federated_proxies.items():
-            target_slugs[fed_slug] = fed_proxy
-
-        async def _gather_names(slug: str, srv: FastMCP) -> tuple[str, list[str]]:
-            t_out = federated_cfg_map[slug].timeout_s if slug in federated_cfg_map else 2.0
-            items = await _collect_tools_for_server(slug, srv, timeout_s=t_out)
-            return slug, sorted({str(t["name"]) for t in items if t.get("name")})
-
-        gathered = await asyncio.gather(
-            *(_gather_names(slug, srv) for slug, srv in target_slugs.items())
-        )
-        tool_catalog: dict[str, list[str]] = {
-            slug: names for slug, names in gathered if names
-        }
-        for prof in profile_inventory:
-            pname = str(prof.get("name") or "").strip()
-            if not pname:
-                continue
-            combined: set[str] = set()
-            for srv in prof.get("servers", []):
-                combined.update(tool_catalog.get(str(srv), ()))
-            if prof.get("includesUpstreamMcp"):
-                combined.update(tool_catalog.get("mlflow-upstream", ()))
-            if combined:
-                tool_catalog[f"profile:{pname}"] = sorted(combined)
-
-        configs = generate_client_configs(
-            settings,
-            repo_root=Path.cwd(),
-            profile=selected,
-            tool_catalog=tool_catalog,
-        )
-        return {
-            "defaultProfile": settings.gateway.default_client_profile,
-            "selectedProfile": selected,
-            "profiles": profile_inventory,
-            "configs": configs,
-        }
-
-    @app.get("/api/v1/clients/audit")
-    async def client_audit_api() -> dict[str, Any]:
-        return await asyncio.to_thread(audit_client_configs, settings)
-
-    @app.post("/api/v1/clients/verify", response_model=None)
-    async def client_verify_api(
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any]:
-        body = payload if isinstance(payload, dict) else {}
-        client_name = str(body.get("client") or "codex").strip().lower()
-        raw_profile = body.get("profile")
-        prof = str(raw_profile).strip() if isinstance(raw_profile, str) and raw_profile else None
-        return await verify_client_connection(settings, client=client_name, profile=prof)
-
-    @app.get("/api/v1/skills")
-    async def skills_audit_api() -> dict[str, Any]:
-        def _run() -> dict[str, Any]:
-            mpath = resolve_manifest_path(configured=settings.skills.manifest_path)
-            if not mpath.exists():
-                return {
-                    "available": False,
-                    "manifestPath": str(mpath),
-                    "error": f"Skills manifest not found: {mpath}",
-                }
-            manifest = load_skills_manifest(mpath)
-            report = audit_skills(manifest, repos_root=settings.skills.repos_root)
-            report["manifestPath"] = str(mpath)
-            return report
-
-        try:
-            return await asyncio.to_thread(_run)
-        except Exception as exc:
-            return {"available": False, "error": str(exc)}
-
-    @app.post("/api/v1/actions/skills-sync", response_model=None)
-    async def skills_sync_api(
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        body = payload if isinstance(payload, dict) else {}
-        dry_run = bool(body.get("dry_run", True))
-        quarantine_legacy = bool(body.get("quarantine_legacy", False))
-        raw_targets = body.get("targets")
-        targets = (
-            [str(t).strip() for t in raw_targets if str(t).strip()]
-            if isinstance(raw_targets, list)
-            else None
-        )
-
-        def _run() -> dict[str, Any]:
-            mpath = resolve_manifest_path(configured=settings.skills.manifest_path)
-            manifest = load_skills_manifest(mpath)
-            res = sync_skills(
-                manifest,
-                dry_run=dry_run,
-                quarantine_legacy=quarantine_legacy,
-                targets=targets,
-            )
-            res["manifestPath"] = str(mpath)
-            return res
-
-        try:
-            return await asyncio.to_thread(_run)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "SKILLS_SYNC_FAILED", "message": str(exc)}},
-            )
-
-    @app.get("/api/v1/presets")
-    async def presets_list_api() -> dict[str, Any]:
-        return {
-            "path": str(preset_store.path),
-            "presets": [p.model_dump(mode="json") for p in preset_store.list_presets()],
-        }
-
-    @app.post("/api/v1/presets", response_model=None)
-    async def presets_create_api(
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        if not isinstance(payload, dict):
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_REQUEST", "message": "JSON body required"}},
-            )
-        try:
-            preset = preset_store.create_preset(
-                name=str(payload.get("name") or ""),
-                server=str(payload.get("server") or ""),
-                tool=str(payload.get("tool") or ""),
-                arguments=payload.get("arguments"),
-                description=str(payload.get("description") or ""),
-                pinned=bool(payload.get("pinned", False)),
-                preset_id=payload.get("id"),
-            )
-        except Exception as exc:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_PRESET", "message": str(exc)}},
-            )
-        return {"preset": preset.model_dump(mode="json")}
-
-    @app.put("/api/v1/presets/{preset_id}", response_model=None)
-    async def presets_update_api(
-        preset_id: str,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        if not isinstance(payload, dict):
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_REQUEST", "message": "JSON body required"}},
-            )
-        try:
-            updated = preset_store.update_preset(preset_id, payload)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_PRESET", "message": str(exc)}},
-            )
-        if updated is None:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": {
-                        "code": "PRESET_NOT_FOUND",
-                        "message": f"Unknown preset '{preset_id}'",
-                    }
-                },
-            )
-        return {"preset": updated.model_dump(mode="json")}
-
-    @app.delete("/api/v1/presets/{preset_id}", response_model=None)
-    async def presets_delete_api(preset_id: str) -> dict[str, Any] | JSONResponse:
-        deleted = preset_store.delete_preset(preset_id)
-        if not deleted:
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": {
-                        "code": "PRESET_NOT_FOUND",
-                        "message": f"Unknown preset '{preset_id}'",
-                    }
-                },
-            )
-        return {"deleted": preset_id}
-
-    @app.post("/api/v1/mlflow/models/{name}/alias", response_model=None)
-    async def mlflow_model_alias_api(
-        name: str,
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        if not settings.mlflow.allow_mutations:
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": {
-                        "code": "MLFLOW_MUTATIONS_DISABLED",
-                        "message": "Set MLFLOW_ALLOW_MUTATIONS=true to update model aliases",
-                    }
-                },
-            )
-        body = payload if isinstance(payload, dict) else {}
-        alias = str(body.get("alias") or "").strip()
-        raw_ver = body.get("version")
-        if not alias or raw_ver is None:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "code": "INVALID_REQUEST",
-                        "message": "Provide 'alias' and 'version'",
-                    }
-                },
-            )
-        ver_str = str(raw_ver).strip()
-
-        def _set() -> dict[str, Any]:
-            import mlflow
-
-            client = mlflow.MlflowClient(
-                tracking_uri=settings.mlflow.tracking_uri,
-                registry_uri=settings.effective_mlflow_registry_uri,
-            )
-            client.set_registered_model_alias(name=name, alias=alias, version=ver_str)
-            return {"updated": True, "name": name, "alias": alias, "version": ver_str}
-
-        try:
-            return await asyncio.to_thread(_set)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
-            )
-
-    @app.post("/api/v1/actions/refresh-uc")
-    async def action_refresh_uc() -> dict[str, Any]:
-        if "unity_catalog" not in servers or uc_adapter is None:
-            return {"status": "skipped", "reason": "unity_catalog server is not enabled"}
-        return await sync_uc_function_tools(servers["unity_catalog"], uc_adapter, settings)
-
-    @app.post("/api/v1/actions/watchdog")
-    async def action_watchdog(
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any]:
-        dry_run = True if not isinstance(payload, dict) else bool(payload.get("dry_run", True))
-        return await asyncio.to_thread(run_watchdog_once, settings, dry_run=dry_run)
-
-    @app.post("/api/v1/actions/eval")
-    async def action_eval(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
-        raw_limit = 20 if not isinstance(payload, dict) else int(payload.get("limit", 20))
-        clamped = max(1, min(raw_limit, 100))
-        return await asyncio.to_thread(run_trace_evaluation, settings, limit=clamped)
-
-    @app.post("/api/v1/actions/benchmark")
-    async def action_benchmark(
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any]:
-        with_judge = (
-            False if not isinstance(payload, dict) else bool(payload.get("with_llm_judge", False))
-        )
-        raw_model = None if not isinstance(payload, dict) else payload.get("judge_model")
-        judge_model = str(raw_model).strip() if isinstance(raw_model, str) and raw_model else None
-        return await asyncio.to_thread(
-            run_golden_benchmark,
-            settings,
-            with_llm_judge=with_judge,
-            judge_model=judge_model,
-        )
-
-    @app.post("/api/v1/actions/call-tool", response_model=None)
-    async def action_call_tool(
-        payload: dict[str, Any] | None = Body(default=None),
-    ) -> dict[str, Any] | JSONResponse:
-        if not isinstance(payload, dict):
-            return JSONResponse(
-                status_code=400,
-                content={"error": {"code": "INVALID_REQUEST", "message": "JSON body required"}},
-            )
-        raw_server = str(payload.get("server") or "").strip()
-        tool_name = str(payload.get("tool") or "").strip()
-        arguments = payload.get("arguments")
-        if arguments is None:
-            arguments = {}
-        if not raw_server or not tool_name or not isinstance(arguments, dict):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": {
-                        "code": "INVALID_REQUEST",
-                        "message": "Provide 'server', 'tool', and object 'arguments'",
-                    }
-                },
-            )
-
-        slug = raw_server.replace("_", "-").lower()
-        key = slug.replace("-", "_")
-        if settings.gateway.effective_auth_enabled:
-            policy = caller_client_policy_var.get()
-            if not is_server_allowed(policy, slug):
-                client_label = policy.client_name if policy else "caller"
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "error": {
-                            "code": "FORBIDDEN",
-                            "message": (
-                                f"Client '{client_label}' is not allowed to invoke tools "
-                                f"on server '{slug}'"
-                            ),
-                        }
-                    },
-                )
-
-        target_srv = (
-            upstream_proxy
-            if slug == "mlflow-upstream"
-            else (federated_proxies.get(slug) or servers.get(key))
-        )
-        if target_srv is None:
-            fed_meta = federated_meta.get(slug)
-            if fed_meta is not None:
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        "error": {
-                            "code": "SERVER_UNAVAILABLE",
-                            "message": str(
-                                fed_meta.get("detail")
-                                or f"Upstream server '{slug}' is {fed_meta.get('connectionStatus')}"
-                            ),
-                        }
-                    },
-                )
-            return JSONResponse(
-                status_code=404,
-                content={"error": {"code": "SERVER_NOT_FOUND", "message": f"Unknown '{slug}'"}},
-            )
-
-        try:
-            avail_tools = await asyncio.wait_for(target_srv.list_tools(), timeout=3.0)
-        except Exception as exc:
-            return JSONResponse(
-                status_code=503,
-                content={"error": {"code": "SERVER_UNAVAILABLE", "message": str(exc)}},
-            )
-
-        if not any(getattr(t, "name", "") == tool_name for t in avail_tools):
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": {
-                        "code": "TOOL_NOT_FOUND",
-                        "message": f"Tool '{tool_name}' not found on server '{slug}'",
-                    }
-                },
-            )
-
-        t0 = time.monotonic()
-        trace_token = last_trace_id_var.set(None)
-        try:
-            tool_res = await asyncio.wait_for(
-                target_srv.call_tool(tool_name, arguments=arguments, run_middleware=True),
-                timeout=30.0,
-            )
-            captured_trace_id = last_trace_id_var.get()
-            elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
-            blocks = getattr(tool_res, "content", None) or []
-            content_blocks: list[dict[str, Any]] = []
-            text_parts: list[str] = []
-            for block in blocks:
-                b_type = getattr(block, "type", None)
-                b_text = getattr(block, "text", None)
-                b_data = getattr(block, "data", None)
-                b_mime = getattr(block, "mimeType", None)
-                if b_type == "image" or (isinstance(b_data, str) and isinstance(b_mime, str)):
-                    content_blocks.append(
-                        {
-                            "type": "image",
-                            "mimeType": str(b_mime or "image/png"),
-                            "data": str(b_data or "")[:5_000_000],
-                        }
-                    )
-                elif b_type == "resource" or getattr(block, "resource", None) is not None:
-                    res_obj = getattr(block, "resource", None) or block
-                    res_text = getattr(res_obj, "text", None)
-                    content_blocks.append(
-                        {
-                            "type": "resource",
-                            "uri": str(getattr(res_obj, "uri", "") or ""),
-                            "mimeType": getattr(res_obj, "mimeType", None),
-                            "text": str(res_text) if res_text is not None else None,
-                        }
-                    )
-                    if isinstance(res_text, str):
-                        text_parts.append(res_text)
-                elif b_text is not None:
-                    txt = str(b_text)
-                    content_blocks.append({"type": "text", "text": txt})
-                    text_parts.append(txt)
-                else:
-                    txt = str(block)
-                    content_blocks.append({"type": "text", "text": txt})
-                    text_parts.append(txt)
-
-            raw_text = "\n".join(text_parts)
-            structured = getattr(tool_res, "structured_content", None)
-            if not raw_text and structured is not None:
-                raw_text = json.dumps(structured, default=str)
-
-            max_chars = 50_000
-            truncated = len(raw_text) > max_chars
-            clipped = raw_text[:max_chars] if truncated else raw_text
-            parsed_out: Any = clipped
-            if not truncated:
-                try:
-                    parsed_out = json.loads(clipped)
-                except Exception:
-                    parsed_out = clipped
-
-            return {
-                "ok": True,
-                "policyRefusal": False,
-                "server": slug,
-                "tool": tool_name,
-                "durationMs": elapsed_ms,
-                "traceId": captured_trace_id,
-                "truncated": truncated,
-                "result": parsed_out,
-                "structuredContent": structured,
-                "contentBlocks": content_blocks,
-            }
-        except ToolError as exc:
-            captured_trace_id = last_trace_id_var.get()
-            elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
-            msg = str(exc)
-            is_refusal = any(m in msg.lower() for m in _POLICY_REFUSAL_MARKERS)
-            return {
-                "ok": False,
-                "policyRefusal": is_refusal,
-                "server": slug,
-                "tool": tool_name,
-                "durationMs": elapsed_ms,
-                "traceId": captured_trace_id,
-                "error": msg,
-            }
-        except TimeoutError:
-            elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
-            return JSONResponse(
-                status_code=504,
-                content={
-                    "ok": False,
-                    "server": slug,
-                    "tool": tool_name,
-                    "durationMs": elapsed_ms,
-                    "error": "Tool execution timed out after 30s",
-                },
-            )
-        finally:
-            last_trace_id_var.reset(trace_token)
-
-    @app.get("/metrics")
-    async def metrics() -> Response:
-        payload, content_type = render_metrics()
-        return Response(content=payload, media_type=content_type)
+    app.state.gateway_state = state
+
+    app.include_router(build_auth_router(state))
+    app.include_router(build_ops_router(state))
+    app.include_router(build_tools_router(state))
+    app.include_router(build_mlflow_router(state))
+    app.include_router(build_evals_router(state))
+    app.include_router(build_upstreams_router(state))
+    app.include_router(build_clients_skills_router(state))
+    app.include_router(build_skills_registry_router(state))
+    app.include_router(build_agent_router(state))
 
     if has_built_dashboard():
         static_root = get_static_dir().resolve()
@@ -2468,14 +492,13 @@ def build_gateway_app(
             content=render_dashboard_html(__version__, static_dir=static_root),
             headers={"Cache-Control": "no-store"},
         )
-        _maybe_mint_trusted_ui_session(request, resp)
+        maybe_mint_trusted_ui_session(state, request, resp)
         return resp
 
     app.mount("/mcp", composed_http)
     for slug, sub_http in per_server_http.items():
         app.mount(f"/servers/{slug}/mcp", sub_http)
-    for pname, p_http in profile_http.items():
-        app.mount(f"/profiles/{pname}/mcp", p_http)
+    app.mount("/profiles", DynamicProfilesASGI(state))
 
     # Pure ASGI middlewares (outermost added last: CORS -> NormalizePath -> Auth)
     app.add_middleware(GatewayAuthMiddleware, settings=settings)

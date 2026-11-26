@@ -22,16 +22,23 @@ from pydantic import SecretStr
 
 from mcp_stack import __version__
 from mcp_stack.client_configs import generate_client_configs
+from mcp_stack.core.auth import caller_client_policy_var, is_server_allowed
 from mcp_stack.core.config import (
     MCPStackSettings,
     UpstreamServerConfig,
     save_local_upstreams,
     validate_upstream_secret_refs,
 )
-from mcp_stack.evals import run_golden_benchmark
+from mcp_stack.core.tracing import last_trace_id_var
+from mcp_stack.evals import (
+    compare_eval_runs,
+    list_eval_datasets,
+    run_golden_benchmark,
+)
 from mcp_stack.gateway.presets import PresetStore
 from mcp_stack.gateway.upstreams import build_upstream_proxy, probe_upstream_proxy
 from mcp_stack.servers.mlflow_server import probe_mcp_http_endpoint
+from mcp_stack.skill_registry import get_mlflow_skill_detail, list_mlflow_skills
 from mcp_stack.watchdog import (
     DEFAULT_STATE_PATH,
     _load_state,
@@ -417,6 +424,209 @@ def create_gateway_meta_server(
         capped = [item[1] for item in matches[: max(1, min(limit, 100))]]
         return {"query": query, "count": len(capped), "tools": capped}
 
+    def _resolve_target_server(server: str) -> tuple[str, FastMCP]:
+        slug = server.strip().replace("_", "-").lower()
+        if settings.gateway.effective_auth_enabled:
+            policy = caller_client_policy_var.get()
+            if not is_server_allowed(policy, slug):
+                client_label = policy.client_name if policy else "caller"
+                raise ToolError(
+                    f"[ACCESS_DENIED] Client '{client_label}' is not allowed to access '{slug}'."
+                )
+        gw_state = state_provider()
+        instances: dict[str, FastMCP] = gw_state.get("server_instances", {})
+        target = instances.get(slug)
+        if target is None:
+            raise ToolError(
+                f"[SERVER_NOT_FOUND] Unknown or disconnected server '{slug}'. "
+                "Call gateway_list_servers() to see live slugs."
+            )
+        return slug, target
+
+    @mcp.tool(
+        name="gateway_describe_tool",
+        description=(
+            "Return full JSON Schema parameters, description, and governance metadata for a "
+            "single tool on any mounted built-in or federated server."
+        ),
+    )
+    async def gateway_describe_tool(server: str, tool: str) -> dict[str, Any]:
+        slug, target = _resolve_target_server(server)
+        try:
+            items = await asyncio.wait_for(target.list_tools(), timeout=4.0)
+        except Exception as exc:
+            raise ToolError(
+                f"[SERVER_UNAVAILABLE] Failed to list tools on '{slug}': {exc}"
+            ) from exc
+        found = next((t for t in items if getattr(t, "name", "") == tool.strip()), None)
+        if found is None:
+            raise ToolError(
+                f"[TOOL_NOT_FOUND] Tool '{tool}' not found (or curated out) on server '{slug}'."
+            )
+        gw_state = state_provider()
+        srv_meta: dict[str, Any] = next(
+            (s for s in gw_state.get("servers", []) if s.get("slug") == slug),
+            {},
+        )
+        params = getattr(found, "parameters", None)
+        return {
+            "server": slug,
+            "tool": getattr(found, "name", tool),
+            "route": f"/servers/{slug}/mcp",
+            "governance": srv_meta.get("governance"),
+            "external": bool(srv_meta.get("external", False)),
+            "description": (getattr(found, "description", None) or "").strip(),
+            "parameters": params if isinstance(params, dict) else {},
+        }
+
+    @mcp.tool(
+        name="gateway_call_tool",
+        description=(
+            "Progressive-disclosure proxy tool: dynamically invoke any curated tool across "
+            "built-in and federated MCP servers while enforcing client ACLs and MLflow tracing."
+        ),
+    )
+    async def gateway_call_tool(
+        server: str,
+        tool: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        slug, target = _resolve_target_server(server)
+        clean_tool = tool.strip()
+        try:
+            items = await asyncio.wait_for(target.list_tools(), timeout=4.0)
+        except Exception as exc:
+            raise ToolError(f"[SERVER_UNAVAILABLE] Failed to inspect '{slug}': {exc}") from exc
+        if not any(getattr(t, "name", "") == clean_tool for t in items):
+            raise ToolError(
+                f"[TOOL_NOT_FOUND] Tool '{clean_tool}' not found (or curated out) on '{slug}'."
+            )
+
+        gw_state = state_provider()
+        activity_bus = gw_state.get("activity_bus")
+        args_dict = dict(arguments or {})
+        t0 = time.monotonic()
+        trace_tok = last_trace_id_var.set(None)
+        try:
+            try:
+                import mlflow
+
+                mlflow.update_current_trace(tags={"mcp.via": "discover", "mcp.server": slug})
+            except Exception:
+                pass
+            res = await asyncio.wait_for(
+                target.call_tool(clean_tool, arguments=args_dict, run_middleware=True),
+                timeout=30.0,
+            )
+            elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
+            trace_id = last_trace_id_var.get()
+            blocks = getattr(res, "content", None) or []
+            texts = [
+                str(getattr(b, "text", b))
+                for b in blocks
+                if getattr(b, "text", None) is not None or getattr(b, "type", "") == "text"
+            ]
+            raw_text = "\n".join(texts)
+            structured = getattr(res, "structured_content", None)
+            parsed: Any = raw_text
+            if raw_text:
+                try:
+                    parsed = json.loads(raw_text)
+                except Exception:
+                    parsed = raw_text[:20_000]
+            elif structured is not None:
+                parsed = structured
+            if activity_bus is not None:
+                activity_bus.record(
+                    "tool_call",
+                    status="ok",
+                    server=slug,
+                    tool=clean_tool,
+                    duration_ms=elapsed_ms,
+                    trace_id=trace_id,
+                    summary=f"discover -> {slug}.{clean_tool} ({elapsed_ms} ms)",
+                )
+            return {
+                "ok": True,
+                "server": slug,
+                "tool": clean_tool,
+                "durationMs": elapsed_ms,
+                "traceId": trace_id,
+                "result": parsed,
+            }
+        except ToolError as exc:
+            elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
+            if activity_bus is not None:
+                activity_bus.record(
+                    "tool_call",
+                    status="error",
+                    server=slug,
+                    tool=clean_tool,
+                    duration_ms=elapsed_ms,
+                    trace_id=last_trace_id_var.get(),
+                    summary=str(exc)[:160],
+                )
+            raise
+        finally:
+            last_trace_id_var.reset(trace_tok)
+
+    @mcp.tool(
+        name="gateway_search_skills",
+        description=(
+            "Search the MLflow 3.18 Skill Registry (returns capability status gracefully on <3.18)."
+        ),
+    )
+    async def gateway_search_skills(
+        query: str = "",
+        status: str = "",
+        organization: str = "",
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            list_mlflow_skills,
+            settings,
+            query=query,
+            status=status,
+            organization=organization,
+        )
+
+    @mcp.tool(
+        name="gateway_get_skill",
+        description="Fetch versions, aliases, and SKILL.md content for an MLflow registered skill.",
+    )
+    async def gateway_get_skill(
+        name: str,
+        organization: str = "",
+        version_or_alias: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                get_mlflow_skill_detail,
+                settings,
+                name,
+                organization=organization,
+                version_or_alias=version_or_alias,
+            )
+        except Exception as exc:
+            raise ToolError(f"[SKILL_UNAVAILABLE] {exc}") from exc
+
+    @mcp.tool(
+        name="gateway_list_datasets",
+        description="List MLflow GenAI evaluation datasets for closed-loop quality workflows.",
+    )
+    async def gateway_list_datasets(experiment: str = "") -> dict[str, Any]:
+        return await asyncio.to_thread(
+            list_eval_datasets,
+            settings,
+            experiment_name=experiment.strip() or None,
+        )
+
+    @mcp.tool(
+        name="gateway_compare_eval_runs",
+        description="Compare two MLflow GenAI evaluation runs and return per-metric deltas.",
+    )
+    async def gateway_compare_eval_runs(run_a: str, run_b: str) -> dict[str, Any]:
+        return await asyncio.to_thread(compare_eval_runs, settings, run_a, run_b)
+
     @mcp.tool(
         name="gateway_list_profiles",
         description=(
@@ -706,6 +916,26 @@ def create_gateway_meta_server(
             },
             indent=2,
         )
+
+    @mcp.resource(
+        "gateway://skills",
+        name="gateway_skills_catalog",
+        description="MLflow 3.18 Skill Registry catalog and capability status.",
+        mime_type="application/json",
+    )
+    async def gateway_skills_resource() -> str:
+        res = await asyncio.to_thread(list_mlflow_skills, settings)
+        return json.dumps(res, indent=2)
+
+    @mcp.resource(
+        "gateway://skills/{name}",
+        name="gateway_skill_detail",
+        description="SKILL.md content and versions for a registered MLflow skill.",
+        mime_type="application/json",
+    )
+    async def gateway_skill_detail_resource(name: str) -> str:
+        res = await asyncio.to_thread(get_mlflow_skill_detail, settings, name)
+        return json.dumps(res, indent=2)
 
     @mcp.resource(
         "gateway://client-configs/{client}",

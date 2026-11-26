@@ -1,27 +1,33 @@
 import { useEffect, useMemo, useState } from "react";
 import { Plus, Search, Sparkles } from "lucide-react";
 import { api } from "../lib/api";
-import type { RegistryResponse } from "../types";
+import type { RegistryResponse, RegistrySubTab } from "../types";
 import { CopyButton } from "../components/CopyButton";
 import { PromptWorkbench } from "../components/PromptWorkbench";
+import { SkillRegistryPanel } from "../components/SkillRegistryPanel";
 import { StatusBadge } from "../components/StatusDot";
+import { SkillsView } from "./SkillsView";
 
 export function RegistryView({
   registry,
+  initialSubTab,
   initialPromptName,
   initialPromptVersion,
   mlflowUiBase,
+  onChangeSubTab,
   onSelectPrompt,
   onReload,
 }: {
   registry: RegistryResponse | null;
+  initialSubTab?: RegistrySubTab;
   initialPromptName?: string | null;
   initialPromptVersion?: string | null;
   mlflowUiBase: string;
+  onChangeSubTab?: (sub: RegistrySubTab) => void;
   onSelectPrompt?: (name: string, version?: string | null) => void;
   onReload: () => Promise<void>;
 }) {
-  const [subTab, setSubTab] = useState<"servers" | "prompts" | "models">("servers");
+  const [subTab, setSubTab] = useState<RegistrySubTab>(initialSubTab || "servers");
   const [search, setSearch] = useState("");
   const [selectedServerName, setSelectedServerName] = useState<string | null>(null);
   const [selectedPromptName, setSelectedPromptName] = useState<string | null>(
@@ -44,12 +50,19 @@ export function RegistryView({
   const prompts = useMemo(() => registry?.prompts || [], [registry]);
 
   useEffect(() => {
+    if (initialSubTab) {
+      setSubTab(initialSubTab);
+    }
+  }, [initialSubTab]);
+
+  useEffect(() => {
     if (initialPromptName) {
       setSubTab("prompts");
+      onChangeSubTab?.("prompts");
       setSelectedPromptName(initialPromptName);
       setSelectedPromptVer(initialPromptVersion || null);
     }
-  }, [initialPromptName, initialPromptVersion]);
+  }, [initialPromptName, initialPromptVersion, onChangeSubTab]);
 
   const filteredServers = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -114,12 +127,16 @@ export function RegistryView({
                 ["servers", `MCP Servers (${mcpServers.length})`],
                 ["prompts", `Prompts (${prompts.length})`],
                 ["models", `Models (${(registry?.loggedModels || []).length})`],
+                ["skills", "Skills Registry & Sync"],
               ] as const
             ).map(([id, label]) => (
               <button
                 key={id}
                 type="button"
-                onClick={() => setSubTab(id)}
+                onClick={() => {
+                  setSubTab(id);
+                  onChangeSubTab?.(id);
+                }}
                 className={`px-3 py-1.5 rounded-md text-[12.5px] font-medium cursor-pointer transition-colors ${
                   subTab === id
                     ? "bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-xs"
@@ -475,6 +492,13 @@ export function RegistryView({
               </div>
             )}
           </section>
+        </div>
+      )}
+
+      {subTab === "skills" && (
+        <div className="space-y-5">
+          <SkillRegistryPanel />
+          <SkillsView />
         </div>
       )}
     </div>
