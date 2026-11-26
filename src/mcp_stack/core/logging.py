@@ -5,12 +5,25 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from typing import Any
+from typing import Any, TextIO, cast
 
 import structlog
 
 # Silence MLflow import-time hint chatter that could pollute logs.
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
+
+
+class _DynamicStderr:
+    """Delegate dynamically to sys.stderr so pytest stream replacement never closes it."""
+
+    def write(self, data: str) -> int:
+        return sys.stderr.write(data)
+
+    def flush(self) -> None:
+        sys.stderr.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(sys.stderr, "isatty", lambda: False)())
 
 
 def configure_logging(level: str = "INFO", json_format: bool = False) -> None:
@@ -45,7 +58,7 @@ def configure_logging(level: str = "INFO", json_format: bool = False) -> None:
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=cast(TextIO, _DynamicStderr())),
         cache_logger_on_first_use=False,
     )
 

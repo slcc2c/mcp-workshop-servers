@@ -63,6 +63,7 @@ from mcp_stack.service import (
 )
 from mcp_stack.skills import (
     audit_skills,
+    dedupe_repo_dual_skills,
     load_skills_manifest,
     promote_skill,
     resolve_manifest_path,
@@ -70,7 +71,7 @@ from mcp_stack.skills import (
     sync_skills,
 )
 from mcp_stack.uc_bootstrap import bootstrap_oss_unity_catalog
-from mcp_stack.watchdog import run_watchdog_once
+from mcp_stack.watchdog import collect_passive_drift_summary, run_watchdog_once
 
 app = typer.Typer(
     name="mcp-stack",
@@ -328,6 +329,7 @@ async def _run_doctor(
             "error": str(exc),
         }
 
+    checks["drift"] = collect_passive_drift_summary(settings)
     return checks
 
 
@@ -975,6 +977,34 @@ def skills_rollback(
     typer.echo(json.dumps(res, indent=2))
 
 
+@skills_app.command("dedupe-repos")
+def skills_dedupe_repos(
+    repo: list[str] = typer.Option([], "--repo", help="Specific repo directory name(s)"),
+    apply: bool = typer.Option(
+        False, "--apply", help="Quarantine identical .claude/skills copies & create symlinks"
+    ),
+    repos_root: Path | None = typer.Option(None, "--repos-root", help="Repos root path"),
+    manifest: Path | None = typer.Option(None, "--manifest", help="Optional skills manifest path"),
+) -> None:
+    """Deduplicate identical repo-local .claude/skills copies to ../../.agents/skills/*."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    q_root = settings.skills.quarantine_dir
+    try:
+        mpath = resolve_manifest_path(manifest, configured=settings.skills.manifest_path)
+        if mpath.exists():
+            q_root = Path(load_skills_manifest(mpath).quarantine_root)
+    except Exception:
+        pass
+    res = dedupe_repo_dual_skills(
+        repos_root or settings.skills.repos_root,
+        repo_names=repo or None,
+        quarantine_root=q_root,
+        dry_run=not apply,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
 def _parse_env_file_map(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     if not path.is_file():
@@ -1094,7 +1124,9 @@ def omnigent_public_configure(
     from_printer_env: Path | None = typer.Option(
         None,
         "--from-printer-env",
-        help="Optional printer native.env to reuse Google OAuth client ID/secret and email allowlist",
+        help=(
+            "Optional printer native.env to reuse Google OAuth client ID/secret and email allowlist"
+        ),
     ),
     use_default_printer_env: bool = typer.Option(
         False,
@@ -1137,12 +1169,18 @@ def omnigent_public_configure(
         cid = typer.prompt("Google OAuth Client ID").strip()
     if not csec:
         if not sys.stdin.isatty():
-            typer.echo("Missing Google client secret (pass --client-secret or --use-printer-env)", err=True)
+            typer.echo(
+                "Missing Google client secret (pass --client-secret or --use-printer-env)",
+                err=True,
+            )
             raise typer.Exit(code=1)
         csec = getpass.getpass("Google OAuth Client Secret: ").strip()
     if not emails:
         if not sys.stdin.isatty():
-            typer.echo("Missing allowed emails (pass --allowed-emails or --use-printer-env)", err=True)
+            typer.echo(
+                "Missing allowed emails (pass --allowed-emails or --use-printer-env)",
+                err=True,
+            )
             raise typer.Exit(code=1)
         emails = typer.prompt("Allowed Google email(s)").strip()
 

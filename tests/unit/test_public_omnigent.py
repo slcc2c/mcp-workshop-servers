@@ -136,13 +136,19 @@ async def test_provider_blocks_disallowed_redirects_and_emails(tmp_path: Path) -
                 claims=self._claims,
             )
 
-    provider._token_validator._inner = FakeVerifier({"email": "stranger@example.com", "email_verified": True})
+    provider._token_validator._inner = FakeVerifier(
+        {"email": "stranger@example.com", "email_verified": True}
+    )
     assert await provider._token_validator.verify_token("tok") is None
 
-    provider._token_validator._inner = FakeVerifier({"email": "owner@example.com", "email_verified": False})
+    provider._token_validator._inner = FakeVerifier(
+        {"email": "owner@example.com", "email_verified": False}
+    )
     assert await provider._token_validator.verify_token("tok") is None
 
-    provider._token_validator._inner = FakeVerifier({"email": "OWNER@example.com", "email_verified": "true"})
+    provider._token_validator._inner = FakeVerifier(
+        {"email": "OWNER@example.com", "email_verified": "true"}
+    )
     ok = await provider._token_validator.verify_token("tok")
     assert ok is not None
 
@@ -178,7 +184,9 @@ async def test_public_omnigent_guard_and_oauth_discovery(make_settings, tmp_path
         assert r_hz_cf.status_code == 403
 
         # 3. Host header DNS-rebinding guard
-        r_host = await client.get("/.well-known/oauth-authorization-server", headers={"Host": "evil.example"})
+        r_host = await client.get(
+            "/.well-known/oauth-authorization-server", headers={"Host": "evil.example"}
+        )
         assert r_host.status_code == 403
 
         # 4. OAuth metadata and 401 WWW-Authenticate on unauthenticated POST /mcp
@@ -198,7 +206,9 @@ async def test_public_omnigent_guard_and_oauth_discovery(make_settings, tmp_path
         assert r_off.json()["error"] == "service_disabled"
 
         cfg.off_file.unlink()
-        r_restored = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        r_restored = await client.post(
+            "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+        )
         assert r_restored.status_code == 401
 
     assert cfg.refusal_log.exists()

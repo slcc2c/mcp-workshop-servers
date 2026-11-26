@@ -338,7 +338,7 @@ def update_mlflow_skill_version(
     settings: MCPStackSettings,
     *,
     name: str,
-    version: int,
+    version: int | str,
     organization: str = "",
     status: str | None = None,
     alias: str | None = None,
@@ -348,6 +348,11 @@ def update_mlflow_skill_version(
     """Update lifecycle status or alias on a skill version in MLflow 3.18."""
     if not settings.mlflow.allow_mutations:
         raise PermissionError("Set MLFLOW_ALLOW_MUTATIONS=true to update skill versions")
+
+    try:
+        ver_num = int(version)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"version must be a positive integer, got {version!r}") from exc
 
     if mlflow_module is None:
         cap = probe_skill_registry_capability(settings.mlflow.tracking_uri)
@@ -368,7 +373,7 @@ def update_mlflow_skill_version(
             raise ValueError("status must be one of: draft, active, deprecated")
         updated_ver = client.update_skill_version(
             name=name,
-            version=version,
+            version=ver_num,
             organization=organization.strip(),
             status=status,
         )
@@ -376,7 +381,7 @@ def update_mlflow_skill_version(
         client.set_skill_alias(
             name=name,
             alias=alias.strip(),
-            version=version,
+            version=ver_num,
             organization=organization.strip(),
         )
     if delete_alias and delete_alias.strip():
@@ -387,6 +392,6 @@ def update_mlflow_skill_version(
         )
     if updated_ver is None:
         updated_ver = client.get_skill_version(
-            name=name, version=version, organization=organization.strip()
+            name=name, version=ver_num, organization=organization.strip()
         )
     return {"updated": True, "version": _serialize_skill_version(updated_ver)}

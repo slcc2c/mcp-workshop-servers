@@ -10,15 +10,17 @@ import re
 import threading
 import time
 from collections import defaultdict, deque
+from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
+from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.auth.providers.google import GoogleProvider
-from mcp.server.auth.provider import AccessToken, RegistrationError
+from mcp.server.auth.provider import RegistrationError
 from mcp.shared.auth import OAuthClientInformationFull
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -90,7 +92,7 @@ class PublicOmnigentConfig:
         if self.jwt_signing_key:
             return self.jwt_signing_key
         digest = hashlib.sha256(
-            f"omnigent-public-jwt:{self.public_url}:{self.google_client_secret}".encode("utf-8")
+            f"omnigent-public-jwt:{self.public_url}:{self.google_client_secret}".encode()
         ).hexdigest()
         return digest
 
@@ -231,7 +233,7 @@ def _is_allowed_origin(origin: str, public_host: str) -> bool:
     return _is_google_host(host)
 
 
-def _email_allowed(token: AccessToken | None, allowed_emails: frozenset[str]) -> tuple[bool, str]:
+def _email_allowed(token: Any, allowed_emails: frozenset[str]) -> tuple[bool, str]:
     if token is None:
         return False, "invalid_or_missing_token"
     claims = token.claims if isinstance(token.claims, dict) else {}
@@ -279,7 +281,7 @@ class RefusalLogger:
             os.chmod(self.path, 0o600)
 
 
-class _OwnerTokenVerifierProxy:
+class _OwnerTokenVerifierProxy(TokenVerifier):
     """Wrap FastMCP's GoogleTokenVerifier to enforce verified owner email allowlisting."""
 
     def __init__(
@@ -288,6 +290,7 @@ class _OwnerTokenVerifierProxy:
         allowed_emails: frozenset[str],
         refusals: RefusalLogger,
     ) -> None:
+        super().__init__(required_scopes=getattr(inner, "required_scopes", None))
         self._inner = inner
         self._allowed_emails = allowed_emails
         self._refusals = refusals
@@ -377,7 +380,7 @@ class OmnigentGoogleProvider(GoogleProvider):
                 detail="AccessToken failed owner email allowlist check",
             )
             return None
-        return access
+        return cast("AccessToken", access)
 
 
 class PublicOmnigentGuardMiddleware:
@@ -530,7 +533,11 @@ class PublicOmnigentGuardMiddleware:
             return
 
         origin = headers.get("origin", "").strip()
-        if origin and method not in {"GET", "HEAD"} and not _is_allowed_origin(origin, self.config.public_host):
+        if (
+            origin
+            and method not in {"GET", "HEAD"}
+            and not _is_allowed_origin(origin, self.config.public_host)
+        ):
             self.refusals.record(
                 reason="bad_origin",
                 status=403,
@@ -560,7 +567,7 @@ class PublicOmnigentGuardMiddleware:
 
         observed_status = 200
 
-        async def _tracking_send(message: dict[str, Any]) -> None:
+        async def _tracking_send(message: MutableMapping[str, Any]) -> None:
             nonlocal observed_status
             if message["type"] == "http.response.start":
                 observed_status = int(message["status"])
