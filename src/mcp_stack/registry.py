@@ -34,6 +34,9 @@ SERVER_DESCRIPTIONS: dict[str, str] = {
     "kubernetes": "Kubernetes cluster server with namespace allowlists and read-only defaults",
     "jupyter": "Jupyter notebook inspection, export, and sandboxed kernel execution server",
     "xcodebuild": "macOS host-only Xcode, SwiftPM, and CoreSimulator MCP server",
+    "omnigent": (
+        "Local or Tailscale Omnigent hub sessions, workflows, automations, and Inbox bridge"
+    ),
 }
 
 

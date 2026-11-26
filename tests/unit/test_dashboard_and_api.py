@@ -846,3 +846,411 @@ async def test_federated_upstream_proxy_local_yaml_and_multi_experiment(
         reg = (await cli.get("/api/v1/mlflow/registry", headers=headers)).json()
         assert reg["mcpServers"][0]["url"] == "http://127.0.0.1:8090/servers/printer/mcp"
         assert any(u["registry_uri"] is None for u in init_uris)
+
+
+async def test_ui_login_link_uses_public_url_and_sets_secure_httponly_cookie(make_settings) -> None:
+    tok = "tok_public_url_test"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.public_url = "https://mcp.slcc2c.com/"
+    settings.gateway.ui_session_ttl_s = 2592000
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+
+    app = build_gateway_app(settings)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.slcc2c.com"
+    ) as cli:
+        link = await cli.post(
+            "/api/v1/auth/login-link", headers={"Authorization": f"Bearer {tok}"}
+        )
+        assert link.status_code == 200
+        url = link.json()["url"]
+        assert url.startswith("https://mcp.slcc2c.com/ui/login?nonce=")
+        nonce = url.split("nonce=", 1)[1]
+
+        consumed = await cli.get(
+            f"/ui/login?nonce={nonce}",
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert consumed.status_code == 303
+        set_cookie = consumed.headers.get("set-cookie", "")
+        assert f"{UI_SESSION_COOKIE}=" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "Secure" in set_cookie
+        assert "Max-Age=2592000" in set_cookie
+
+
+async def test_ui_trust_tailnet_auto_signs_in_tailnet_only_and_keeps_mcp_locked(
+    make_settings,
+) -> None:
+    tok = "tok_tailnet_ui"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.ui_trust_tailnet = True
+    settings.gateway.ui_session_ttl_s = 2592000
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+
+    app = build_gateway_app(settings)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.slcc2c.com"
+    ) as cli:
+        # Public X-Forwarded-For must NOT receive an auto-session cookie
+        pub = await cli.get("/ui", headers={"X-Forwarded-For": "8.8.8.8"})
+        assert pub.status_code == 200
+        assert UI_SESSION_COOKIE not in pub.cookies
+
+        # Tailscale CGNAT X-Forwarded-For over HTTPS proxy gets auto HttpOnly + Secure cookie
+        ts = await cli.get(
+            "/ui",
+            headers={"X-Forwarded-For": "100.86.47.76", "X-Forwarded-Proto": "https"},
+        )
+        assert ts.status_code == 200
+        set_cookie = ts.headers.get("set-cookie", "")
+        assert f"{UI_SESSION_COOKIE}=" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "Secure" in set_cookie
+
+        # Cookie works for /api/v1/auth/me and /api/v1/profiles
+        me = await cli.get("/api/v1/auth/me")
+        assert me.status_code == 200
+        assert me.json()["authenticated"] is True
+        assert me.json()["authMethod"] == "cookie"
+
+        # /mcp remains strictly Bearer-authenticated
+        mcp_unauth = await cli.get("/mcp")
+        assert mcp_unauth.status_code == 401
+
+    # Simulated Uvicorn ProxyHeadersMiddleware rewriting client.host to the Tailnet client IP
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("100.86.47.76", 44321)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_proxy:
+        proxied = await cli_proxy.get(
+            "/ui",
+            headers={"X-Forwarded-For": "100.86.47.76", "X-Forwarded-Proto": "https"},
+        )
+        assert proxied.status_code == 200
+        set_cookie = proxied.headers.get("set-cookie", "")
+        assert f"{UI_SESSION_COOKIE}=" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "Secure" in set_cookie
+
+    # Untrusted peer spoofing X-Forwarded-For must NOT get auto-signed in
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("8.8.8.8", 44321)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_spoof:
+        spoofed = await cli_spoof.get(
+            "/ui",
+            headers={"X-Forwarded-For": "100.86.47.76", "X-Forwarded-Proto": "https"},
+        )
+        assert spoofed.status_code == 200
+        assert UI_SESSION_COOKIE not in spoofed.cookies
+
+
+async def test_ui_trust_forward_auth_mints_cookie_from_caddy_header_and_blocks_spoof(
+    make_settings,
+) -> None:
+    tok = "tok_fwd_ui"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.ui_trust_tailnet = False
+    settings.gateway.ui_trust_forward_auth = True
+    settings.gateway.ui_allowed_emails = ["spencer@slcc2c.com"]
+    settings.gateway.ui_session_ttl_s = 2592000
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+
+    app = build_gateway_app(settings)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 55110)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli:
+        # Allowed X-Auth-Email from local Caddy mints session cookie
+        ok_resp = await cli.get(
+            "/ui",
+            headers={"X-Auth-Email": "Spencer@slcc2c.com", "X-Forwarded-Proto": "https"},
+        )
+        assert ok_resp.status_code == 200
+        assert f"{UI_SESSION_COOKIE}=" in ok_resp.headers.get("set-cookie", "")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 55111)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_bad_email:
+        bad_email = await cli_bad_email.get(
+            "/ui",
+            headers={"X-Auth-Email": "other@gmail.com", "X-Forwarded-Proto": "https"},
+        )
+        assert bad_email.status_code == 200
+        assert UI_SESSION_COOKIE not in bad_email.cookies
+
+        mcp_unauth = await cli_bad_email.get("/mcp")
+        assert mcp_unauth.status_code == 401
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("8.8.8.8", 55112)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_untrusted:
+        untrusted = await cli_untrusted.get(
+            "/ui",
+            headers={"X-Auth-Email": "spencer@slcc2c.com", "X-Forwarded-Proto": "https"},
+        )
+        assert untrusted.status_code == 200
+        assert UI_SESSION_COOKIE not in untrusted.cookies
+
+
+async def test_clients_omnigent_audit_and_skills_endpoints(
+    make_settings, tmp_path: Path, monkeypatch
+) -> None:
+    import yaml
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    skill_dir = home / "repos/atelier/templates/agents/skills/demo-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Demo skill\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "skills-manifest.yaml"
+    manifest_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "quarantine_root": str(home / ".local/share/mcp-stack/skill-quarantine"),
+                "sources": {
+                    "personal": {
+                        "path": str(home / "repos/atelier/templates/agents/skills"),
+                        "kind": "canonical-repo",
+                        "owner": "personal",
+                        "skills": ["demo-skill"],
+                    }
+                },
+                "targets": {
+                    "claude-code": {
+                        "dir": str(home / ".claude/skills"),
+                        "sources": ["personal"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = False
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+    settings.skills.manifest_path = manifest_path
+    settings.skills.repos_root = home / "repos"
+
+    app = build_gateway_app(settings)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8090"
+    ) as cli:
+        cfg_resp = await cli.get("/api/v1/clients/configs")
+        assert cfg_resp.status_code == 200
+        configs = cfg_resp.json()["configs"]
+        assert "omnigent" in configs
+        omni_yaml = yaml.safe_load(configs["omnigent"])
+        assert any(s["id"] == "mcp-core" for s in omni_yaml["services"])
+
+        audit_resp = await cli.get("/api/v1/clients/audit")
+        assert audit_resp.status_code == 200
+        assert "summary" in audit_resp.json()
+
+        skills_resp = await cli.get("/api/v1/skills")
+        assert skills_resp.status_code == 200
+        skills_data = skills_resp.json()
+        assert skills_data["available"] is True
+        assert skills_data["summary"]["canonicalSkills"] == 1
+        assert skills_data["targets"]["claude-code"]["counts"]["missing"] == 1
+
+        dry_sync = await cli.post(
+            "/api/v1/actions/skills-sync",
+            json={"dry_run": True},
+            headers={"X-Requested-With": "mcp-ui"},
+        )
+        assert dry_sync.status_code == 200
+        assert dry_sync.json()["dryRun"] is True
+        assert dry_sync.json()["symlinkedCount"] == 1
+        assert not (home / ".claude/skills/demo-skill").exists()
+
+        apply_sync = await cli.post(
+            "/api/v1/actions/skills-sync",
+            json={"dry_run": False},
+            headers={"X-Requested-With": "mcp-ui"},
+        )
+        assert apply_sync.status_code == 200
+        assert apply_sync.json()["dryRun"] is False
+        assert (home / ".claude/skills/demo-skill").is_symlink()
+
+
+async def test_ui_trust_tailnet_subpaths_api_and_samesite_lax_passthrough(
+    make_settings,
+) -> None:
+    tok = "tok_tailnet_subpath"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.ui_trust_tailnet = True
+    settings.gateway.ui_session_ttl_s = 2592000
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+
+    app = build_gateway_app(settings)
+    # 1. Direct localhost HTTP visit to /ui/chat mints HttpOnly SameSite=lax cookie (without Secure)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 55200)),
+        base_url="http://127.0.0.1:8090",
+    ) as cli_local:
+        chat = await cli_local.get("/ui/chat")
+        assert chat.status_code == 200
+        set_cookie = chat.headers.get("set-cookie", "")
+        assert f"{UI_SESSION_COOKIE}=" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "SameSite=lax" in set_cookie
+        assert "Secure" not in set_cookie
+
+    # 2. Direct /api/v1/auth/me and /api/v1/profiles work before visiting /ui
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 55201)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_api:
+        me = await cli_api.get(
+            "/api/v1/auth/me",
+            headers={"X-Forwarded-For": "100.86.47.76", "X-Forwarded-Proto": "https"},
+        )
+        assert me.status_code == 200
+        assert me.json()["authenticated"] is True
+        assert me.json()["authMethod"] == "tailnet"
+        me_cookie = me.headers.get("set-cookie", "")
+        assert f"{UI_SESSION_COOKIE}=" in me_cookie
+        assert "SameSite=lax" in me_cookie
+        assert "Secure" in me_cookie
+
+        profs = await cli_api.get(
+            "/api/v1/profiles",
+            headers={"X-Forwarded-For": "100.86.47.76", "X-Forwarded-Proto": "https"},
+        )
+        assert profs.status_code == 200
+
+        mcp_unauth = await cli_api.get("/mcp")
+        assert mcp_unauth.status_code == 401
+
+    # 3. Untrusted public IP cannot use /ui/chat, /api/v1/auth/me, /api/v1/profiles, or /mcp
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("8.8.8.8", 55202)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_pub:
+        chat_pub = await cli_pub.get("/ui/chat")
+        assert chat_pub.status_code == 200
+        assert UI_SESSION_COOKIE not in chat_pub.cookies
+
+        me_pub = await cli_pub.get("/api/v1/auth/me")
+        assert me_pub.status_code == 200
+        assert me_pub.json()["authenticated"] is False
+        assert UI_SESSION_COOKIE not in me_pub.headers.get("set-cookie", "")
+
+        profs_pub = await cli_pub.get("/api/v1/profiles")
+        assert profs_pub.status_code == 401
+
+        mcp_pub = await cli_pub.get("/mcp")
+        assert mcp_pub.status_code == 401
+
+        assert (
+            await cli_pub.post(
+                "/api/v1/actions/refresh-uc",
+            )
+        ).status_code == 401
+
+
+async def test_ui_trust_forward_auth_mints_cookie_across_subpath_and_api_and_blocks_spoof(
+    make_settings,
+) -> None:
+    tok = "tok_fwd_passthrough"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.ui_trust_tailnet = False
+    settings.gateway.ui_trust_forward_auth = True
+    settings.gateway.ui_allowed_emails = ["spencer@slcc2c.com"]
+    settings.gateway.ui_session_ttl_s = 2592000
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+
+    app = build_gateway_app(settings)
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 55210)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_ok:
+        chat_ok = await cli_ok.get(
+            "/ui/chat",
+            headers={"X-Auth-Email": "Spencer@slcc2c.com", "X-Forwarded-Proto": "https"},
+        )
+        assert chat_ok.status_code == 200
+        assert "SameSite=lax" in chat_ok.headers.get("set-cookie", "")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 55211)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_api:
+        profs_ok = await cli_api.get(
+            "/api/v1/profiles",
+            headers={"X-Auth-Email": "spencer@slcc2c.com", "X-Forwarded-Proto": "https"},
+        )
+        assert profs_ok.status_code == 200
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 55212)),
+        base_url="https://mcp.slcc2c.com",
+    ) as cli_bad_email:
+        me_bad = await cli_bad_email.get(
+            "/api/v1/auth/me",
+            headers={"X-Auth-Email": "other@gmail.com", "X-Forwarded-Proto": "https"},
+        )
+        assert me_bad.status_code == 200
+        assert me_bad.json()["authenticated"] is False
+        assert (
+            await cli_bad_email.get(
+                "/api/v1/profiles",
+                headers={"X-Auth-Email": "other@gmail.com"},
+            )
+        ).status_code == 401
+
+        assert (await cli_bad_email.get("/mcp")).status_code == 401

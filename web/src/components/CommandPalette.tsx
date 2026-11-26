@@ -53,11 +53,13 @@ export function CommandPalette({
     const q = query.trim().toLowerCase();
     const views: Array<{ id: NavTab; label: string }> = [
       { id: "overview", label: "Go to Overview" },
+      { id: "chat", label: "Go to Omnigent Chat" },
       { id: "playground", label: "Go to Tool Playground" },
       { id: "traces", label: "Go to Traces & Evals" },
       { id: "registry", label: "Go to MLflow Registry" },
       { id: "upstreams", label: "Go to Upstreams Admin" },
       { id: "clients", label: "Go to Agents & Clients" },
+      { id: "skills", label: "Go to Skills & Sync" },
     ];
     const matchedPresets = presets
       .filter(

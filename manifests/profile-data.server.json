@@ -3,7 +3,7 @@
   "name": "io.github.slcc2c/mcp-profile-data",
   "title": "MCP Profile: Data",
   "description": "Curated MCP toolset profile 'data' (unity-catalog, mlflow, postgresql, redis, mongodb, neo4j, jupyter)",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -14,7 +14,7 @@
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "transport": {
         "type": "streamable-http"
       }

@@ -56,6 +56,8 @@ class GatewaySettings(BaseModel):
     ui_session_ttl_s: int = 43200
     ui_session_secret: SecretStr | None = None
     ui_trust_tailnet: bool = False
+    ui_trust_forward_auth: bool = False
+    ui_allowed_emails: list[str] = Field(default_factory=list)
     eval_regression_threshold: float = 1.0
     admin_tools_enabled: bool = False
     presets_path: Path | None = None
@@ -77,6 +79,7 @@ class GatewaySettings(BaseModel):
             "neo4j",
             "kubernetes",
             "jupyter",
+            "omnigent",
         ]
     )
     enable_photos_on_macos: bool = True
@@ -102,7 +105,7 @@ class GatewaySettings(BaseModel):
                 "neo4j",
                 "jupyter",
             ],
-            "ops": ["docker", "kubernetes", "filesystem", "github"],
+            "ops": ["docker", "kubernetes", "filesystem", "github", "omnigent"],
             "macos": ["photos", "xcodebuild", "filesystem"],
         }
     )
@@ -292,6 +295,26 @@ class XcodeSettings(BaseModel):
     timeout_seconds: float = 300.0
 
 
+class OmnigentSettings(BaseModel):
+    """Local or Tailscale Omnigent hub REST/SSE MCP bridge configuration."""
+
+    base_url: str = "http://127.0.0.1:6767"
+    public_url: str | None = None
+    token: SecretStr | None = None
+    default_agent_id: str | None = None
+    default_host_id: str | None = None
+    allow_mutations: bool = False
+    timeout_seconds: float = 20.0
+
+
+class SkillsSettings(BaseModel):
+    """Cross-harness skill manifest, audit, and recoverable quarantine settings."""
+
+    manifest_path: Path = Path("~/repos/atelier/templates/agents/skills-manifest.yaml")
+    quarantine_dir: Path = Path("~/.local/share/mcp-stack/skill-quarantine")
+    repos_root: Path = Path("~/repos")
+
+
 class SecretsSettings(BaseModel):
     """Secret resolution & optional 1Password CLI configuration."""
 
@@ -328,7 +351,10 @@ class MCPStackSettings(BaseSettings):
     kubernetes: KubernetesSettings = Field(default_factory=KubernetesSettings)
     jupyter: JupyterSettings = Field(default_factory=JupyterSettings)
     xcode: XcodeSettings = Field(default_factory=XcodeSettings)
+    omnigent: OmnigentSettings = Field(default_factory=OmnigentSettings)
+    skills: SkillsSettings = Field(default_factory=SkillsSettings)
     secrets: SecretsSettings = Field(default_factory=SecretsSettings)
+    omnigent_registry_path: Path = Path("~/.omnigent/mcp_registry.yaml")
 
     @property
     def effective_mlflow_registry_uri(self) -> str:
@@ -384,6 +410,7 @@ def _default_clients() -> dict[str, ClientPolicy]:
         ("claude", "Claude Desktop / Code", "MCP_CLAUDE_AUTH_TOKEN", ["*"], 200),
         ("cursor", "Cursor IDE", "MCP_CURSOR_AUTH_TOKEN", ["*"], 150),
         ("codex", "Codex CLI", "MCP_CODEX_AUTH_TOKEN", ["*"], 200),
+        ("omnigent", "Omnigent Hub", "MCP_OMNIGENT_AUTH_TOKEN", ["*"], 200),
         ("openai", "OpenAI", "MCP_OPENAI_AUTH_TOKEN", ["github", "filesystem", "memory"], 100),
         ("default", "Default Client", "MCP_DEFAULT_AUTH_TOKEN", ["github", "filesystem"], 50),
         ("legacy", "Legacy Client", "AUTH_TOKEN", ["*"], 100),
@@ -445,6 +472,8 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         "kubernetes": {},
         "jupyter": {},
         "xcode": {},
+        "omnigent": {},
+        "skills": {},
         "secrets": {},
     }
 
@@ -468,6 +497,10 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         env_overrides["gateway"]["ui_session_secret"] = val
     if (b := _parse_bool(os.getenv("MCP_UI_TRUST_TAILNET"))) is not None:
         env_overrides["gateway"]["ui_trust_tailnet"] = b
+    if (b := _parse_bool(os.getenv("MCP_UI_TRUST_FORWARD_AUTH"))) is not None:
+        env_overrides["gateway"]["ui_trust_forward_auth"] = b
+    if (items := _split_csv(os.getenv("MCP_UI_ALLOWED_EMAILS"))) is not None:
+        env_overrides["gateway"]["ui_allowed_emails"] = [e.lower() for e in items]
     if val := os.getenv("GATEWAY_EVAL_REGRESSION_THRESHOLD"):
         env_overrides["gateway"]["eval_regression_threshold"] = float(val)
     if (b := _parse_bool(os.getenv("MCP_GATEWAY_ADMIN_TOOLS_ENABLED"))) is not None:
@@ -631,6 +664,30 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         env_overrides["xcode"]["allow_mutations"] = b
     if val := os.getenv("XCODE_TIMEOUT_S"):
         env_overrides["xcode"]["timeout_seconds"] = float(val)
+
+    if val := os.getenv("OMNIGENT_BASE_URL"):
+        env_overrides["omnigent"]["base_url"] = val.strip().rstrip("/")
+    if val := os.getenv("OMNIGENT_PUBLIC_URL"):
+        env_overrides["omnigent"]["public_url"] = val.strip().rstrip("/")
+    if val := os.getenv("OMNIGENT_API_TOKEN"):
+        env_overrides["omnigent"]["token"] = val.strip()
+    if val := os.getenv("OMNIGENT_DEFAULT_AGENT_ID"):
+        env_overrides["omnigent"]["default_agent_id"] = val.strip()
+    if val := os.getenv("OMNIGENT_DEFAULT_HOST_ID"):
+        env_overrides["omnigent"]["default_host_id"] = val.strip()
+    if (b := _parse_bool(os.getenv("OMNIGENT_ALLOW_MUTATIONS"))) is not None:
+        env_overrides["omnigent"]["allow_mutations"] = b
+    if val := os.getenv("OMNIGENT_TIMEOUT_SECONDS"):
+        env_overrides["omnigent"]["timeout_seconds"] = float(val)
+    if val := os.getenv("MCP_OMNIGENT_REGISTRY_PATH"):
+        raw["omnigent_registry_path"] = Path(val.strip()).expanduser()
+
+    if val := os.getenv("MCP_SKILLS_MANIFEST_PATH"):
+        env_overrides["skills"]["manifest_path"] = Path(val.strip()).expanduser()
+    if val := os.getenv("MCP_SKILLS_QUARANTINE_DIR"):
+        env_overrides["skills"]["quarantine_dir"] = Path(val.strip()).expanduser()
+    if val := os.getenv("MCP_SKILLS_REPOS_ROOT"):
+        env_overrides["skills"]["repos_root"] = Path(val.strip()).expanduser()
 
     if (b := _parse_bool(os.getenv("OP_ENABLED"))) is not None:
         env_overrides["secrets"]["onepassword_enabled"] = b

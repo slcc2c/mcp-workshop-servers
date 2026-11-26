@@ -9,6 +9,7 @@ import sys
 import webbrowser
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import typer
@@ -16,6 +17,8 @@ import uvicorn
 
 from mcp_stack import __version__
 from mcp_stack.client_configs import (
+    audit_client_configs,
+    discover_live_tool_catalog,
     generate_client_configs,
     install_client_configs,
     install_shell_hook,
@@ -43,6 +46,14 @@ from mcp_stack.service import (
     rotate_service_logs,
     tail_service_logs,
 )
+from mcp_stack.skills import (
+    audit_skills,
+    load_skills_manifest,
+    promote_skill,
+    resolve_manifest_path,
+    rollback_quarantine,
+    sync_skills,
+)
 from mcp_stack.uc_bootstrap import bootstrap_oss_unity_catalog
 from mcp_stack.watchdog import run_watchdog_once
 
@@ -58,6 +69,9 @@ eval_app = typer.Typer(help="Run MLflow 3.x GenAI trace evaluations.")
 uc_app = typer.Typer(help="Unity Catalog bootstrap and helper commands.")
 ui_app = typer.Typer(help="Open and manage the Gateway Web Dashboard.")
 upstream_app = typer.Typer(help="Inspect, probe, and onboard federated external MCP servers.")
+skills_app = typer.Typer(
+    help="Audit, sync, promote, and de-duplicate agent skills across harnesses."
+)
 app.add_typer(registry_app, name="registry")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
@@ -65,6 +79,7 @@ app.add_typer(eval_app, name="eval")
 app.add_typer(uc_app, name="uc")
 app.add_typer(ui_app, name="ui")
 app.add_typer(upstream_app, name="upstream")
+app.add_typer(skills_app, name="skills")
 
 
 @app.command("serve")
@@ -74,7 +89,7 @@ def serve(
         help=(
             "Server name: gateway, unity-catalog, mlflow, memory, filesystem, "
             "github, docker, postgresql, redis, mongodb, neo4j, kubernetes, jupyter, "
-            "photos, xcodebuild"
+            "photos, xcodebuild, omnigent"
         ),
     ),
     transport: Literal["stdio", "http"] = typer.Option(
@@ -252,7 +267,7 @@ def config_generate(
         "--target",
         help=(
             "Target client: all | antigravity | claude-code | claude-desktop | "
-            "codex | cursor | gemini-cli"
+            "codex | cursor | gemini-cli | omnigent"
         ),
     ),
     write: bool = typer.Option(
@@ -263,19 +278,32 @@ def config_generate(
         "--profile",
         help="Gateway toolset profile (discover | core | studio | data | ops | macos | full)",
     ),
+    live_tools: bool = typer.Option(
+        True,
+        "--live-tools/--no-live-tools",
+        help="Query running gateway /api/v1/tools when generating Omnigent registry",
+    ),
     repo_root: Path = typer.Option(
         Path("."), "--repo-root", help="Repository root for launcher paths"
     ),
 ) -> None:
-    """Generate MCP client configs for Antigravity, Codex, Claude, Cursor, and Gemini CLI."""
+    """Generate MCP client configs for Antigravity, Codex, Claude, Cursor, Gemini, and Omnigent."""
     settings = load_settings()
+    tool_catalog: dict[str, list[str]] | None = None
+    if live_tools and target in {"all", "omnigent"}:
+        try:
+            tool_catalog = discover_live_tool_catalog(settings)
+        except Exception:
+            tool_catalog = None
     if write:
         written = write_client_configs(
             settings, repo_root=repo_root, target=target, profile=profile
         )
         typer.echo(json.dumps({"written": [str(p) for p in written]}, indent=2))
     else:
-        rendered = generate_client_configs(settings, repo_root=repo_root, profile=profile)
+        rendered = generate_client_configs(
+            settings, repo_root=repo_root, profile=profile, tool_catalog=tool_catalog
+        )
         if target == "all":
             typer.echo(json.dumps(rendered, indent=2))
         else:
@@ -291,7 +319,7 @@ def config_install(
         "--client",
         help=(
             "Host client(s) to update: antigravity | codex | claude-code | "
-            "claude-desktop | cursor | gemini-cli"
+            "claude-desktop | cursor | gemini-cli | omnigent"
         ),
     ),
     profile: str | None = typer.Option(
@@ -300,13 +328,61 @@ def config_install(
         help="Gateway toolset profile (discover | core | studio | data | ops | macos | full)",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview targets without writing"),
+    prune_duplicates: bool = typer.Option(
+        False,
+        "--prune-duplicates",
+        help="Remove shadowed direct MCP entries already served by mcp-server gateway",
+    ),
+    live_tools: bool = typer.Option(
+        True,
+        "--live-tools/--no-live-tools",
+        help="Query running gateway /api/v1/tools when generating Omnigent registry",
+    ),
+    sync_atelier_template: bool = typer.Option(
+        False,
+        "--sync-atelier-template",
+        help="Mirror generated Omnigent registry into ~/repos/atelier/config/omnigent/",
+    ),
     repo_root: Path = typer.Option(Path("."), "--repo-root", help="Repository root path"),
 ) -> None:
-    """Safely install env-var Bearer/stdio entries into local host client configs."""
+    """Safely install env-var Bearer/stdio/registry entries into local host client configs."""
     settings = load_settings()
-    res = install_client_configs(
-        settings, repo_root=repo_root, clients=client, profile=profile, dry_run=dry_run
+    tool_catalog: dict[str, list[str]] | None = None
+    if live_tools and (
+        prune_duplicates or any(c.strip().lower() == "omnigent" for c in client)
+    ):
+        try:
+            tool_catalog = discover_live_tool_catalog(settings)
+        except Exception:
+            tool_catalog = None
+    atelier_tpl = (
+        (settings.skills.repos_root.expanduser() / "atelier/config/omnigent/mcp_registry.yaml")
+        if sync_atelier_template
+        else None
     )
+    res = install_client_configs(
+        settings,
+        repo_root=repo_root,
+        clients=client,
+        profile=profile,
+        dry_run=dry_run,
+        prune_duplicates=prune_duplicates,
+        tool_catalog=tool_catalog,
+        sync_atelier_template=atelier_tpl,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@config_app.command("audit")
+def config_audit(
+    repos_root: Path | None = typer.Option(
+        None, "--repos-root", help="Repos root to scan for repo-local .mcp.json/.codex shadows"
+    ),
+) -> None:
+    """Audit live MCP client configs and repo overrides for duplicated/shadowed servers."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = audit_client_configs(settings, repos_root=repos_root)
     typer.echo(json.dumps(res, indent=2))
 
 
@@ -315,7 +391,10 @@ def config_verify(
     client: str = typer.Option(
         "codex",
         "--client",
-        help="Client identity to test (antigravity | codex | claude-code | cursor | gemini-cli)",
+        help=(
+            "Client identity to test: antigravity | codex | claude-code | "
+            "cursor | gemini-cli | omnigent"
+        ),
     ),
     profile: str | None = typer.Option(
         None,
@@ -503,6 +582,9 @@ def ui_open(
     client: str | None = typer.Option(
         None, "--client", help="Client ID whose Gateway policy should sign into /ui (e.g. codex)"
     ),
+    public_url: str | None = typer.Option(
+        None, "--public-url", help="Override public origin for login link (e.g. https://mcp.slcc2c.com)"
+    ),
     no_browser: bool = typer.Option(
         False, "--no-browser", help="Print one-time login URL without opening system browser"
     ),
@@ -544,6 +626,20 @@ def ui_open(
     resp.raise_for_status()
     data = resp.json()
     login_url = str(data["url"])
+    override_origin = (public_url or settings.gateway.public_url or "").strip().rstrip("/")
+    if override_origin:
+        orig_parts = urlsplit(login_url)
+        target_parts = urlsplit(override_origin)
+        if target_parts.scheme and target_parts.netloc:
+            login_url = urlunsplit(
+                (
+                    target_parts.scheme,
+                    target_parts.netloc,
+                    orig_parts.path,
+                    orig_parts.query,
+                    orig_parts.fragment,
+                )
+            )
     opened = False
     if not no_browser:
         opened = bool(webbrowser.open(login_url))
@@ -686,6 +782,93 @@ def upstream_add(
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     typer.echo(json.dumps({"saved": clean_slug, "config_file": str(config_file)}, indent=2))
+
+
+@skills_app.command("audit")
+def skills_audit(
+    manifest: Path | None = typer.Option(
+        None, "--manifest", help="Path to skills-manifest.yaml"
+    ),
+    repos_root: Path | None = typer.Option(
+        None, "--repos-root", help="Repos root to scan for repo-local skill shadows"
+    ),
+) -> None:
+    """Run a 5-layer audit of canonical skills, harness symlinks, plugins, repos, and aliases."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    mpath = resolve_manifest_path(manifest, configured=settings.skills.manifest_path)
+    loaded = load_skills_manifest(mpath)
+    report = audit_skills(
+        loaded,
+        repos_root=repos_root or settings.skills.repos_root,
+    )
+    report["manifestPath"] = str(mpath)
+    typer.echo(json.dumps(report, indent=2))
+
+
+@skills_app.command("sync")
+def skills_sync(
+    apply: bool = typer.Option(
+        False, "--apply", help="Apply symlink projections & move replaced copies to quarantine"
+    ),
+    quarantine_legacy: bool = typer.Option(
+        False,
+        "--quarantine-legacy",
+        help="Also move stale skills from legacy_cleanup_roots into recoverable quarantine",
+    ),
+    target: list[str] = typer.Option(
+        [], "--target", help="Optional specific target ID(s) from manifest"
+    ),
+    manifest: Path | None = typer.Option(
+        None, "--manifest", help="Path to skills-manifest.yaml"
+    ),
+) -> None:
+    """Project canonical skill symlinks across harnesses (dry-run by default)."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    mpath = resolve_manifest_path(manifest, configured=settings.skills.manifest_path)
+    loaded = load_skills_manifest(mpath)
+    res = sync_skills(
+        loaded,
+        dry_run=not apply,
+        quarantine_legacy=quarantine_legacy,
+        targets=target or None,
+    )
+    res["manifestPath"] = str(mpath)
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("promote")
+def skills_promote(
+    source_or_name: str = typer.Argument(
+        ..., help="Skill path or quarantined/legacy skill name to promote into canonical store"
+    ),
+    name: str | None = typer.Option(None, "--name", help="Override target skill directory name"),
+    apply: bool = typer.Option(False, "--apply", help="Write changes instead of dry-run"),
+    manifest: Path | None = typer.Option(
+        None, "--manifest", help="Path to skills-manifest.yaml"
+    ),
+) -> None:
+    """Promote a skill into canonical atelier storage, register it, and project symlinks."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    mpath = resolve_manifest_path(manifest, configured=settings.skills.manifest_path)
+    res = promote_skill(mpath, source_or_name, skill_name=name, dry_run=not apply)
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("rollback")
+def skills_rollback(
+    quarantine_dir: Path = typer.Argument(
+        ..., help="Quarantine batch directory containing manifest.json"
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Restore quarantined entries instead of dry-run"
+    ),
+) -> None:
+    """Restore skills moved during a previous quarantine batch."""
+    res = rollback_quarantine(quarantine_dir, dry_run=not apply)
+    typer.echo(json.dumps(res, indent=2))
 
 
 if __name__ == "__main__":

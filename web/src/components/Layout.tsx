@@ -6,8 +6,10 @@ import {
   Compass,
   Database,
   HelpCircle,
+  Layers,
   LogOut,
   Menu,
+  MessageSquare,
   Moon,
   Network,
   RefreshCw,
@@ -22,11 +24,13 @@ import { StatusBadge } from "./StatusDot";
 
 const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: ReactNode }> = [
   { id: "overview", label: "Overview", icon: <Compass className="w-4 h-4" /> },
+  { id: "chat", label: "Omnigent Chat", icon: <MessageSquare className="w-4 h-4" /> },
   { id: "playground", label: "Playground", icon: <Terminal className="w-4 h-4" /> },
   { id: "traces", label: "Traces & Evals", icon: <Activity className="w-4 h-4" /> },
   { id: "registry", label: "MLflow Registry", icon: <Database className="w-4 h-4" /> },
   { id: "upstreams", label: "Upstreams", icon: <Network className="w-4 h-4" /> },
   { id: "clients", label: "Agents & Clients", icon: <Bot className="w-4 h-4" /> },
+  { id: "skills", label: "Skills & Sync", icon: <Layers className="w-4 h-4" /> },
 ];
 
 export function Layout({

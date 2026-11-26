@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-postgresql",
   "title": "MCP Postgresql Server",
   "description": "PostgreSQL relational SQL server with READ ONLY default transactions",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "transport": {
         "type": "stdio"
       },

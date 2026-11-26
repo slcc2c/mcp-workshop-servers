@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import re
 import secrets
@@ -114,6 +115,80 @@ def find_client_by_id(settings: MCPStackSettings, client_id: str) -> ClientPolic
         if policy.client_id == client_id:
             return policy
     return None
+
+
+_TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
+_TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+
+
+def is_tailnet_or_loopback(raw_ip: str) -> bool:
+    """Return True if raw_ip belongs to loopback or Tailscale CGNAT/ULA space."""
+    try:
+        ip_obj = ipaddress.ip_address(raw_ip.strip())
+    except ValueError:
+        return False
+    if ip_obj.is_loopback:
+        return True
+    if ip_obj.version == 4:
+        return ip_obj in _TAILNET_V4
+    return ip_obj in _TAILNET_V6
+
+
+def is_trusted_tailnet_ui(client_host: str, x_forwarded_for: str) -> bool:
+    """Verify peer and any X-Forwarded-For hops remain on loopback/Tailnet."""
+    if not is_tailnet_or_loopback(client_host):
+        return False
+    xff = x_forwarded_for.strip()
+    if not xff:
+        return True
+    hops = [h.strip() for h in xff.split(",") if h.strip()]
+    return bool(hops) and all(is_tailnet_or_loopback(h) for h in hops)
+
+
+def is_trusted_forward_auth_ui(
+    client_host: str,
+    x_forwarded_for: str,
+    x_auth_email: str,
+    allowed_emails: list[str] | tuple[str, ...],
+) -> bool:
+    """Verify reverse proxy peer + allowlisted X-Auth-Email header."""
+    if not is_trusted_tailnet_ui(client_host, x_forwarded_for):
+        return False
+    email = x_auth_email.strip().lower()
+    if not email or "@" not in email:
+        return False
+    allowed = {e.strip().lower() for e in allowed_emails if e.strip()}
+    return not (allowed and email not in allowed)
+
+
+def resolve_trusted_ui_method(
+    client_host: str,
+    headers: dict[str, str],
+    settings: MCPStackSettings,
+) -> str | None:
+    """Return the trusted UI passthrough method ('forward_auth' or 'tailnet') if authorized."""
+    xff = headers.get("x-forwarded-for", "")
+    if settings.gateway.ui_trust_forward_auth and is_trusted_forward_auth_ui(
+        client_host,
+        xff,
+        headers.get("x-auth-email", ""),
+        settings.gateway.ui_allowed_emails,
+    ):
+        return "forward_auth"
+    if settings.gateway.ui_trust_tailnet and is_trusted_tailnet_ui(client_host, xff):
+        return "tailnet"
+    return None
+
+
+def resolve_owner_ui_client(settings: MCPStackSettings) -> tuple[str, ClientPolicy | None]:
+    """Return the default interactive owner client_id and ClientPolicy."""
+    for policy in settings.gateway.clients.values():
+        if policy.client_id == "codex":
+            return policy.client_id, policy
+    first = next(iter(settings.gateway.clients.values()), None)
+    if first is not None:
+        return first.client_id, first
+    return "local", None
 
 
 def parse_ui_session_cookie(cookie_header: str) -> str | None:
@@ -251,6 +326,18 @@ class GatewayAuthMiddleware:
                 cookie_client_id = verify_ui_session(cookie_val, self._settings)
                 if cookie_client_id:
                     client_policy = find_client_by_id(self._settings, cookie_client_id)
+                if client_policy is not None:
+                    auth_method = "cookie"
+                else:
+                    client_info = scope.get("client")
+                    client_host = client_info[0] if client_info else ""
+                    trusted_method = resolve_trusted_ui_method(
+                        client_host, headers, self._settings
+                    )
+                    if trusted_method is not None:
+                        _, client_policy = resolve_owner_ui_client(self._settings)
+                        if client_policy is not None:
+                            auth_method = trusted_method
                 if client_policy is None:
                     await self._send_json(
                         send,
@@ -273,7 +360,6 @@ class GatewayAuthMiddleware:
                         },
                     )
                     return
-                auth_method = "cookie"
             else:
                 await self._send_json(
                     send,

@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-docker",
   "title": "MCP Docker Server",
   "description": "Docker Engine container, image, volume, and network management server",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "transport": {
         "type": "stdio"
       },

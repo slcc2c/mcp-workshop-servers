@@ -2,7 +2,19 @@
 set -euo pipefail
 cd /Users/spencer/repos/mcp-server
 
+if [ -f "$HOME/.config/mcp-stack/gateway.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$HOME/.config/mcp-stack/gateway.env"
+  set +a
+fi
+
 export MCP_AUTH_ENABLED=true
+export MCP_GATEWAY_PUBLIC_URL="https://mcp.slcc2c.com"
+export GATEWAY_UI_SESSION_TTL_S=2592000
+export MCP_UI_TRUST_TAILNET=true
+export MCP_UI_TRUST_FORWARD_AUTH=true
+export MCP_UI_ALLOWED_EMAILS="${MCP_UI_ALLOWED_EMAILS:-spork76@gmail.com,spencer@slcc2c.com}"
 export MLFLOW_TRACKING_URI=http://localhost:5002
 export MLFLOW_MCP_URL=http://127.0.0.1:9012/mcp
 export UC_BASE_URL=http://localhost:8082

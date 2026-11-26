@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, Play } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Play, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
+import type { ClientAuditResponse } from "../types";
 import { CopyButton } from "../components/CopyButton";
 import { StatusBadge } from "../components/StatusDot";
 
@@ -11,6 +12,7 @@ const CLIENT_ORDER = [
   { id: "cursor", label: "Cursor" },
   { id: "gemini-cli", label: "Gemini CLI" },
   { id: "claude-desktop", label: "Claude Desktop" },
+  { id: "omnigent", label: "Omnigent" },
 ] as const;
 
 export function ClientsView({ profileCounts }: { profileCounts: Record<string, number> }) {
@@ -18,6 +20,8 @@ export function ClientsView({ profileCounts }: { profileCounts: Record<string, n
   const [selectedClient, setSelectedClient] = useState("antigravity");
   const [profiles, setProfiles] = useState<Array<{ name: string; route: string; servers: string[] }>>([]);
   const [configs, setConfigs] = useState<Record<string, string>>({});
+  const [audit, setAudit] = useState<ClientAuditResponse | null>(null);
+  const [auditLoading, setAuditLoading] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verifyRes, setVerifyRes] = useState<{
     ok: boolean;
@@ -37,9 +41,23 @@ export function ClientsView({ profileCounts }: { profileCounts: Record<string, n
     setConfigs(res.configs || {});
   }, []);
 
+  const loadAudit = useCallback(async () => {
+    setAuditLoading(true);
+    try {
+      const res = await api.clientAudit();
+      setAudit(res);
+    } finally {
+      setAuditLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     load(selectedProfile).catch(() => {});
   }, [selectedProfile, load]);
+
+  useEffect(() => {
+    loadAudit().catch(() => {});
+  }, [loadAudit]);
 
   async function handleVerify() {
     setVerifying(true);
@@ -176,6 +194,83 @@ export function ClientsView({ profileCounts }: { profileCounts: Record<string, n
             <CopyButton text={verifyCmd} label="Copy" compact />
           </div>
         </div>
+      </section>
+
+      {/* MCP Duplication Audit */}
+      <section className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-5 space-y-3">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div>
+            <h3 className="text-[13.5px] font-semibold m-0">MCP Duplication & Shadow Audit</h3>
+            <p className="text-[12px] text-[var(--text-secondary)] m-0 mt-0.5">
+              Detects direct client or repo-local MCP entries already served by the gateway.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {audit && (
+              <StatusBadge
+                label={
+                  audit.summary.shadowedClientEntries === 0
+                    ? "0 CLIENT DUPLICATES"
+                    : `${audit.summary.shadowedClientEntries} SHADOWED`
+                }
+                tone={audit.summary.shadowedClientEntries === 0 ? "ok" : "warn"}
+              />
+            )}
+            <button
+              type="button"
+              onClick={() => loadAudit()}
+              disabled={auditLoading}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] text-[12px] cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${auditLoading ? "animate-spin" : ""}`} />
+              Refresh Audit
+            </button>
+          </div>
+        </div>
+
+        {audit && audit.duplicates.length > 0 && (
+          <div className="space-y-2">
+            {audit.duplicates.map((dup) => (
+              <div
+                key={`${dup.client}:${dup.server}`}
+                className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[var(--warn-soft)] px-3 py-2 text-[12px] flex items-start justify-between gap-2"
+              >
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-[var(--warn)] shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-mono font-semibold">
+                      {dup.client} / {dup.server}
+                    </span>
+                    <span className="text-[var(--text-secondary)]"> — {dup.reason}</span>
+                    <div className="font-mono text-[11px] text-[var(--text-muted)]">{dup.target}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+            <div className="rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-subtle)] p-3 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[11px] text-[var(--text-muted)]">Prune Shadowed Client Entries</div>
+                <div className="font-mono text-[11.5px] truncate">
+                  uv run mcp-stack config install --client codex --client claude-code --prune-duplicates
+                </div>
+              </div>
+              <CopyButton
+                text="uv run mcp-stack config install --client codex --client claude-code --prune-duplicates"
+                label="Copy"
+                compact
+              />
+            </div>
+          </div>
+        )}
+
+        {audit && audit.repoShadows.length > 0 && (
+          <div className="text-[12px] text-[var(--text-secondary)]">
+            <span className="font-semibold text-[var(--text-primary)]">
+              Repo-local shadows ({audit.repoShadows.length}):
+            </span>{" "}
+            {audit.repoShadows.map((r) => `${r.repo}/${r.server}`).join(", ")}
+          </div>
+        )}
       </section>
     </div>
   );
