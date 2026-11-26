@@ -1,0 +1,39 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.slcc2c/mcp-mac-mini",
+  "title": "MCP Mac Mini Server",
+  "description": "Mac mini SSH delegation server for isolated git-worktree Antigravity coding jobs",
+  "version": "2.5.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcp-workshop-stack",
+      "version": "2.5.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "uv",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        },
+        {
+          "type": "positional",
+          "value": "mac-mini"
+        },
+        {
+          "type": "named",
+          "name": "--transport",
+          "value": "stdio"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8090/servers/mac-mini/mcp"
+    }
+  ]
+}

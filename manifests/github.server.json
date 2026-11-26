@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-github",
   "title": "MCP Github Server",
   "description": "Async GitHub REST API v3 repository, issue, PR, and workflow server",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "transport": {
         "type": "stdio"
       },

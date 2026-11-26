@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import json
+import os
 import shutil
 import sys
 import webbrowser
@@ -35,6 +37,19 @@ from mcp_stack.evals import (
     sync_golden_dataset,
 )
 from mcp_stack.gateway.app import build_gateway_app, build_server_instance
+from mcp_stack.gateway.public_omnigent import (
+    DEFAULT_ENV_FILE as PUBLIC_OMNIGENT_ENV_FILE,
+)
+from mcp_stack.gateway.public_omnigent import (
+    DEFAULT_OFF_FILE as PUBLIC_OMNIGENT_OFF_FILE,
+)
+from mcp_stack.gateway.public_omnigent import (
+    DEFAULT_PUBLIC_URL as PUBLIC_OMNIGENT_DEFAULT_URL,
+)
+from mcp_stack.gateway.public_omnigent import (
+    build_public_omnigent_app,
+    load_public_omnigent_config,
+)
 from mcp_stack.gateway.upstreams import probe_all_upstreams
 from mcp_stack.registry import sync_mcp_registry
 from mcp_stack.servers.mlflow_server import probe_mcp_http_endpoint
@@ -72,6 +87,12 @@ upstream_app = typer.Typer(help="Inspect, probe, and onboard federated external 
 skills_app = typer.Typer(
     help="Audit, sync, promote, and de-duplicate agent skills across harnesses."
 )
+omnigent_public_app = typer.Typer(
+    help="Manage the public Google OAuth 2.1 Omnigent MCP connector."
+)
+mini_app = typer.Typer(
+    help="Deploy and verify the Mac mini headless Antigravity delegation runner."
+)
 app.add_typer(registry_app, name="registry")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
@@ -80,6 +101,8 @@ app.add_typer(uc_app, name="uc")
 app.add_typer(ui_app, name="ui")
 app.add_typer(upstream_app, name="upstream")
 app.add_typer(skills_app, name="skills")
+app.add_typer(omnigent_public_app, name="omnigent-public")
+app.add_typer(mini_app, name="mini")
 
 
 @app.command("serve")
@@ -87,9 +110,9 @@ def serve(
     target: str = typer.Argument(
         ...,
         help=(
-            "Server name: gateway, unity-catalog, mlflow, memory, filesystem, "
+            "Server name: gateway, omnigent-public, unity-catalog, mlflow, memory, filesystem, "
             "github, docker, postgresql, redis, mongodb, neo4j, kubernetes, jupyter, "
-            "photos, xcodebuild, omnigent"
+            "photos, xcodebuild, omnigent, mac-mini"
         ),
     ),
     transport: Literal["stdio", "http"] = typer.Option(
@@ -101,6 +124,9 @@ def serve(
     host: str | None = typer.Option(None, "--host", help="Bind host for HTTP servers"),
     port: int | None = typer.Option(None, "--port", help="Bind port for HTTP servers"),
     reload: bool = typer.Option(False, "--reload", help="Enable uvicorn auto-reload (gateway)"),
+    check: bool = typer.Option(
+        False, "--check", help="Validate public connector config and exit (omnigent-public)"
+    ),
 ) -> None:
     """Serve the unified HTTP gateway or an individual MCP server over stdio or HTTP."""
     settings = load_settings()
@@ -134,6 +160,54 @@ def serve(
                 loop="asyncio",
                 log_config=None,
             )
+        return
+
+    if normalized == "agent":
+        from mcp_stack.agent_server import create_agent_server_app
+
+        bind_host = host or "127.0.0.1"
+        bind_port = port or 8091
+        agent_app = create_agent_server_app(settings)
+        uvicorn.run(
+            agent_app,
+            host=bind_host,
+            port=bind_port,
+            loop="asyncio",
+            log_config=None,
+        )
+        return
+
+    if normalized == "omnigent-public":
+        try:
+            pub_cfg = load_public_omnigent_config()
+        except ValueError as exc:
+            typer.echo(json.dumps({"ok": False, "error": str(exc)}, indent=2), err=True)
+            raise typer.Exit(code=1) from None
+        if check:
+            typer.echo(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "public_url": pub_cfg.public_url,
+                        "host": pub_cfg.host,
+                        "port": pub_cfg.port,
+                        "allowed_emails_count": len(pub_cfg.allowed_emails),
+                        "off_file_exists": pub_cfg.off_file.exists(),
+                    },
+                    indent=2,
+                )
+            )
+            return
+        bind_host = host or pub_cfg.host
+        bind_port = port or pub_cfg.port
+        pub_app = build_public_omnigent_app(settings, pub_cfg)
+        uvicorn.run(
+            pub_app,
+            host=bind_host,
+            port=bind_port,
+            loop="asyncio",
+            log_config=None,
+        )
         return
 
     server, _adapter = build_server_instance(normalized, settings)
@@ -223,6 +297,36 @@ async def _run_doctor(
         checks["docker"] = {"ok": True, "host": settings.docker.host}
     except Exception as exc:
         checks["docker"] = {"ok": False, "host": settings.docker.host, "error": str(exc)}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            settings.mac_mini.ssh_bin,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=3",
+            settings.mac_mini.ssh_host,
+            f"{settings.mac_mini.remote_bin} doctor",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        if proc.returncode == 0:
+            checks["mac_mini"] = json.loads(out_b.decode("utf-8", errors="replace"))
+        else:
+            checks["mac_mini"] = {
+                "ok": False,
+                "host": settings.mac_mini.ssh_host,
+                "exit_code": proc.returncode,
+                "error": err_b.decode("utf-8", errors="replace").strip(),
+            }
+    except Exception as exc:
+        checks["mac_mini"] = {
+            "ok": False,
+            "host": settings.mac_mini.ssh_host,
+            "error": str(exc),
+        }
 
     return checks
 
@@ -869,6 +973,245 @@ def skills_rollback(
     """Restore skills moved during a previous quarantine batch."""
     res = rollback_quarantine(quarantine_dir, dry_run=not apply)
     typer.echo(json.dumps(res, indent=2))
+
+
+def _parse_env_file_map(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        val = v.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in {"'", '"'}:
+            val = val[1:-1]
+        out[k.strip()] = val
+    return out
+
+
+@omnigent_public_app.command("check")
+def omnigent_public_check(
+    env_file: Path = typer.Option(
+        PUBLIC_OMNIGENT_ENV_FILE, "--env-file", help="Path to omnigent-public env file"
+    ),
+) -> None:
+    """Validate public Omnigent Google OAuth config without printing secrets."""
+    merged = {**_parse_env_file_map(env_file), **os.environ}
+    try:
+        cfg = load_public_omnigent_config(merged)
+    except ValueError as exc:
+        typer.echo(json.dumps({"ok": False, "error": str(exc)}, indent=2), err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(
+        json.dumps(
+            {
+                "ok": True,
+                "env_file": str(env_file),
+                "public_url": cfg.public_url,
+                "host": cfg.host,
+                "port": cfg.port,
+                "allowed_emails_count": len(cfg.allowed_emails),
+                "off_file_exists": cfg.off_file.exists(),
+            },
+            indent=2,
+        )
+    )
+
+
+@omnigent_public_app.command("status")
+def omnigent_public_status(
+    env_file: Path = typer.Option(
+        PUBLIC_OMNIGENT_ENV_FILE, "--env-file", help="Path to omnigent-public env file"
+    ),
+    off_file: Path = typer.Option(
+        PUBLIC_OMNIGENT_OFF_FILE, "--off-file", help="Kill-switch OFF file path"
+    ),
+) -> None:
+    """Show public Omnigent connector config, kill-switch, and loopback health."""
+    configured = env_file.is_file()
+    kill_switch = off_file.exists()
+    health_ok = False
+    detail: str | None = None
+    try:
+        r = httpx.get("http://127.0.0.1:8768/healthz", timeout=3.0)
+        health_ok = r.status_code == 200
+        if not health_ok:
+            detail = f"HTTP {r.status_code}"
+    except Exception as exc:
+        detail = str(exc)
+    typer.echo(
+        json.dumps(
+            {
+                "configured": configured,
+                "kill_switch_off": kill_switch,
+                "health_ok": health_ok,
+                "detail": detail,
+            },
+            indent=2,
+        )
+    )
+
+
+@omnigent_public_app.command("off")
+def omnigent_public_off(
+    off_file: Path = typer.Option(
+        PUBLIC_OMNIGENT_OFF_FILE, "--off-file", help="Kill-switch OFF file path"
+    ),
+) -> None:
+    """Immediately disable public /mcp traffic (HTTP 503) without restarting launchd."""
+    off_file.parent.mkdir(parents=True, exist_ok=True)
+    off_file.write_text("disabled by operator\n", encoding="utf-8")
+    os.chmod(off_file, 0o600)
+    typer.echo(json.dumps({"kill_switch_off": True, "off_file": str(off_file)}, indent=2))
+
+
+@omnigent_public_app.command("on")
+def omnigent_public_on(
+    off_file: Path = typer.Option(
+        PUBLIC_OMNIGENT_OFF_FILE, "--off-file", help="Kill-switch OFF file path"
+    ),
+) -> None:
+    """Remove kill-switch OFF file so public /mcp resumes serving."""
+    existed = off_file.exists()
+    if existed:
+        off_file.unlink()
+    typer.echo(
+        json.dumps(
+            {"kill_switch_off": False, "removed": existed, "off_file": str(off_file)},
+            indent=2,
+        )
+    )
+
+
+@omnigent_public_app.command("configure")
+def omnigent_public_configure(
+    from_printer_env: Path | None = typer.Option(
+        None,
+        "--from-printer-env",
+        help="Optional printer native.env to reuse Google OAuth client ID/secret and email allowlist",
+    ),
+    use_default_printer_env: bool = typer.Option(
+        False,
+        "--use-printer-env",
+        help="Reuse Google OAuth credentials from /Users/spencer/repos/printer/config/native.env",
+    ),
+    client_id: str | None = typer.Option(None, "--client-id", help="Google OAuth Web Client ID"),
+    client_secret: str | None = typer.Option(
+        None, "--client-secret", help="Google OAuth Web Client Secret"
+    ),
+    allowed_emails: str | None = typer.Option(
+        None, "--allowed-emails", help="Comma-separated Google emails allowed to sign in"
+    ),
+    public_url: str = typer.Option(
+        PUBLIC_OMNIGENT_DEFAULT_URL, "--public-url", help="Public HTTPS base URL"
+    ),
+    env_file: Path = typer.Option(
+        PUBLIC_OMNIGENT_ENV_FILE, "--env-file", help="Destination 0600 env file"
+    ),
+) -> None:
+    """Write validated 0600 credentials for omnigent-public-mcp without printing secrets."""
+    src_map: dict[str, str] = {}
+    printer_path = from_printer_env or (
+        Path("/Users/spencer/repos/printer/config/native.env") if use_default_printer_env else None
+    )
+    if printer_path is not None:
+        if not printer_path.is_file():
+            typer.echo(f"Printer env file not found: {printer_path}", err=True)
+            raise typer.Exit(code=1)
+        src_map = _parse_env_file_map(printer_path)
+
+    cid = (client_id or src_map.get("PRINTER_MCP_GOOGLE_CLIENT_ID") or "").strip()
+    csec = (client_secret or src_map.get("PRINTER_MCP_GOOGLE_CLIENT_SECRET") or "").strip()
+    emails = (allowed_emails or src_map.get("PRINTER_MCP_ALLOWED_EMAILS") or "").strip()
+
+    if not cid:
+        if not sys.stdin.isatty():
+            typer.echo("Missing Google client ID (pass --client-id or --use-printer-env)", err=True)
+            raise typer.Exit(code=1)
+        cid = typer.prompt("Google OAuth Client ID").strip()
+    if not csec:
+        if not sys.stdin.isatty():
+            typer.echo("Missing Google client secret (pass --client-secret or --use-printer-env)", err=True)
+            raise typer.Exit(code=1)
+        csec = getpass.getpass("Google OAuth Client Secret: ").strip()
+    if not emails:
+        if not sys.stdin.isatty():
+            typer.echo("Missing allowed emails (pass --allowed-emails or --use-printer-env)", err=True)
+            raise typer.Exit(code=1)
+        emails = typer.prompt("Allowed Google email(s)").strip()
+
+    candidate_env = {
+        "OMNIGENT_PUBLIC_GOOGLE_CLIENT_ID": cid,
+        "OMNIGENT_PUBLIC_GOOGLE_CLIENT_SECRET": csec,
+        "OMNIGENT_PUBLIC_MCP_URL": public_url,
+        "OMNIGENT_PUBLIC_ALLOWED_EMAILS": emails,
+    }
+    cfg = load_public_omnigent_config(candidate_env)
+
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(env_file.parent, 0o700)
+    lines = [
+        f"OMNIGENT_PUBLIC_GOOGLE_CLIENT_ID={cfg.google_client_id}",
+        f"OMNIGENT_PUBLIC_GOOGLE_CLIENT_SECRET={cfg.google_client_secret}",
+        f"OMNIGENT_PUBLIC_MCP_URL={cfg.public_url}",
+        f"OMNIGENT_PUBLIC_ALLOWED_EMAILS={','.join(sorted(cfg.allowed_emails))}",
+        f"OMNIGENT_PUBLIC_HOST={cfg.host}",
+        f"OMNIGENT_PUBLIC_PORT={cfg.port}",
+    ]
+    tmp = env_file.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    tmp.replace(env_file)
+    os.chmod(env_file, 0o600)
+
+    typer.echo(
+        json.dumps(
+            {
+                "configured": True,
+                "env_file": str(env_file),
+                "public_url": cfg.public_url,
+                "allowed_emails_count": len(cfg.allowed_emails),
+                "redirect_uri_to_add_in_gcp": f"{cfg.public_url}/auth/callback",
+            },
+            indent=2,
+        )
+    )
+
+
+@mini_app.command("deploy")
+def mini_deploy(
+    host: str | None = typer.Option(
+        None, "--host", help="SSH host alias for Mac mini (default: MAC_MINI_SSH_HOST)"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview deployment without writing"),
+    verify: bool = typer.Option(
+        True, "--verify/--no-verify", help="Run remote unit tests and doctor after deploy"
+    ),
+) -> None:
+    """Deploy scripts/mini_agy_runner.py and its tests to the Mac mini."""
+    import subprocess
+
+    settings = load_settings()
+    configure_logging("WARNING")
+    target_host = host or settings.mac_mini.ssh_host
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "deploy_mini_agy_runner.py"
+    if not script_path.is_file():
+        typer.echo(f"Deploy script not found: {script_path}", err=True)
+        raise typer.Exit(code=1)
+    cmd = [sys.executable, str(script_path), "--host", target_host]
+    if dry_run:
+        cmd.append("--dry-run")
+    if verify:
+        cmd.append("--verify")
+    completed = subprocess.run(cmd, check=False)
+    if completed.returncode != 0:
+        raise typer.Exit(code=completed.returncode)
 
 
 if __name__ == "__main__":

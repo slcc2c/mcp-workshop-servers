@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   ExternalLink,
+  KeyRound,
   Play,
   RefreshCw,
   ShieldAlert,
@@ -14,12 +15,36 @@ import type {
   AuthState,
   EvalRunItem,
   HealthResponse,
+  OpsMetricsBucket,
+  OpsMetricsSeriesResponse,
   ReadyResponse,
+  SecretsHealthResponse,
   ServerInventoryItem,
   WatchdogResponse,
 } from "../types";
 import { CopyButton } from "../components/CopyButton";
 import { StatusBadge, connectionTone } from "../components/StatusDot";
+
+function LatencySparkline({ buckets }: { buckets: OpsMetricsBucket[] }) {
+  if (buckets.length === 0) return null;
+  const w = Math.max(180, buckets.length * 16);
+  const h = 38;
+  const maxMs = Math.max(10, ...buckets.map((b) => b.p95Ms || 0));
+  const stepX = buckets.length > 1 ? (w - 12) / (buckets.length - 1) : 0;
+  const points = buckets
+    .map((b, idx) => {
+      const x = 6 + idx * stepX;
+      const y = 6 + (1 - Math.min(1, (b.p95Ms || 0) / maxMs)) * (h - 12);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-label="P95 latency trend" className="overflow-visible">
+      <polyline fill="none" stroke="var(--accent)" strokeWidth="1.75" points={points} />
+    </svg>
+  );
+}
 
 function EvalSparkline({ runs }: { runs: EvalRunItem[] }) {
   const pts = [...runs].reverse();
@@ -84,6 +109,29 @@ export function OverviewView({
   const [withJudge, setWithJudge] = useState(false);
   const [judgeModel, setJudgeModel] = useState("ollama:/qwen3.8:27b");
   const [probingSlug, setProbingSlug] = useState<string | null>(null);
+  const [metricsSeries, setMetricsSeries] = useState<OpsMetricsSeriesResponse | null>(null);
+  const [secretsHealth, setSecretsHealth] = useState<SecretsHealthResponse | null>(null);
+  const [reprobingAuth, setReprobingAuth] = useState(false);
+
+  useEffect(() => {
+    if (!auth.authenticated && auth.authEnabled) return;
+    let active = true;
+    api
+      .opsMetricsSeries()
+      .then((res) => {
+        if (active) setMetricsSeries(res);
+      })
+      .catch(() => {});
+    api
+      .secretsHealth()
+      .then((res) => {
+        if (active) setSecretsHealth(res);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [auth.authenticated, auth.authEnabled, health?.timestamp]);
 
   const mlflowUiUrl = resolveMlflowUiUrl(health?.mlflowUiUrl);
   const gatewayBaseUrl = resolveGatewayBaseUrl();
@@ -359,6 +407,97 @@ export function OverviewView({
           </pre>
         )}
       </section>
+
+      {/* Ops Telemetry & 1Password Health */}
+      {(secretsHealth || metricsSeries) && (
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-4 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[13.5px] font-semibold">
+                <KeyRound className="w-4 h-4 text-[var(--accent)]" />
+                1Password & Secrets Health
+              </div>
+              <StatusBadge
+                label={secretsHealth?.mode || "env"}
+                tone={
+                  secretsHealth?.lastErrorCode
+                    ? "warn"
+                    : secretsHealth?.onepasswordEnabled
+                      ? "ok"
+                      : "neutral"
+                }
+              />
+            </div>
+            {secretsHealth && (
+              <div className="text-[12px] text-[var(--text-secondary)] space-y-1">
+                <div className="font-mono text-[11.5px]">
+                  serviceAccount={String(secretsHealth.serviceAccountConfigured)} · cli=
+                  {secretsHealth.cliAvailable ? "ready" : "missing"} · cache=
+                  {secretsHealth.cacheEntries}
+                </div>
+                {secretsHealth.lastError && (
+                  <div className="text-[var(--warn)] break-words">
+                    {secretsHealth.lastErrorCode ? `[${secretsHealth.lastErrorCode}] ` : ""}
+                    {secretsHealth.lastError}
+                  </div>
+                )}
+                {secretsHealth.authRequiredUpstreams.length > 0 && (
+                  <div className="pt-1 flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[var(--warn)]">
+                      {secretsHealth.authRequiredUpstreams.length} auth_required upstream(s):{" "}
+                      {secretsHealth.authRequiredUpstreams.map((u) => u.slug).join(", ")}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={reprobingAuth}
+                      onClick={async () => {
+                        setReprobingAuth(true);
+                        try {
+                          await api.reprobeAuthRequired();
+                          await onAfterAction();
+                        } finally {
+                          setReprobingAuth(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:border-[var(--border-strong)] text-[11.5px] cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${reprobingAuth ? "animate-spin" : ""}`} />
+                      {reprobingAuth ? "Re-probing..." : "Re-probe auth_required"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-4 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[13.5px] font-semibold">Gateway Latency & Errors</div>
+              <span className="font-mono text-[11px] text-[var(--text-muted)]">
+                {metricsSeries?.totalRecorded ?? 0} tool calls
+              </span>
+            </div>
+            <LatencySparkline buckets={metricsSeries?.buckets || []} />
+            {metricsSeries && metricsSeries.buckets.length > 0 && (
+              <div className="flex items-center gap-4 text-[11.5px] font-mono text-[var(--text-secondary)]">
+                <span>
+                  Latest P50: {metricsSeries.buckets[metricsSeries.buckets.length - 1].p50Ms} ms
+                </span>
+                <span>
+                  P95: {metricsSeries.buckets[metricsSeries.buckets.length - 1].p95Ms} ms
+                </span>
+                <span>
+                  Err:{" "}
+                  {(
+                    metricsSeries.buckets[metricsSeries.buckets.length - 1].errorRate * 100
+                  ).toFixed(1)}
+                  %
+                </span>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Mounted Servers & Upstreams */}
       <section className="space-y-3">

@@ -229,6 +229,50 @@ def _default_eval_regression_probe(
     }
 
 
+def _default_auto_reprobe_auth_required(
+    settings: MCPStackSettings,
+    *,
+    last_attempt_ts: float,
+    min_interval_s: float = 120.0,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Rate-limited reprobe for auth_required upstreams when 1Password CLI is ready."""
+    cur_now = now if now is not None else time.time()
+    if (cur_now - last_attempt_ts) < min_interval_s:
+        return {"skipped": True, "reason": "cooldown"}
+
+    base = f"http://{settings.gateway.host}:{settings.gateway.port}".rstrip("/")
+    token = next(iter(settings.gateway.clients.keys()), "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    reprobed: list[dict[str, Any]] = []
+    try:
+        with httpx.Client(timeout=4.0, headers=headers) as client:
+            up_resp = client.get(f"{base}/api/v1/upstreams")
+            if up_resp.status_code != 200:
+                return {"skipped": True, "reason": f"upstreams HTTP {up_resp.status_code}"}
+            items = up_resp.json().get("upstreams") or []
+            pending = [u for u in items if u.get("connectionStatus") == "auth_required"]
+            if not pending:
+                return {"skipped": False, "attempted": 0, "reprobed": []}
+            for item in pending:
+                slug = str(item.get("slug") or "")
+                if not slug:
+                    continue
+                p_resp = client.post(f"{base}/api/v1/upstreams/{slug}/probe", timeout=15.0)
+                if p_resp.status_code == 200:
+                    up_item = (p_resp.json().get("upstream") or {})
+                    reprobed.append(
+                        {
+                            "slug": slug,
+                            "connectionStatus": up_item.get("connectionStatus"),
+                            "toolCount": up_item.get("toolCount", 0),
+                        }
+                    )
+        return {"skipped": False, "attempted": len(pending), "reprobed": reprobed}
+    except Exception as exc:
+        return {"skipped": False, "attempted": len(reprobed), "error": str(exc)[:180]}
+
+
 def run_watchdog_once(
     settings: MCPStackSettings,
     *,
@@ -307,6 +351,18 @@ def run_watchdog_once(
     state["eval_regression"] = eval_regression
     if eval_regression.get("status") == "regression" and prev_eval_status != "regression":
         should_log = True
+
+    auth_reprobe: dict[str, Any] = {"skipped": True, "reason": "dry_run"}
+    if not dry_run:
+        last_reprobe_ts = float(state.get("last_auth_reprobe_ts") or 0.0)
+        auth_reprobe = _default_auto_reprobe_auth_required(
+            settings, last_attempt_ts=last_reprobe_ts, now=now
+        )
+        if not auth_reprobe.get("skipped"):
+            state["last_auth_reprobe_ts"] = now
+            if auth_reprobe.get("reprobed"):
+                should_log = True
+    state["auth_reprobe"] = auth_reprobe
     _save_state(state_path, state)
 
     summary: dict[str, Any] = {
@@ -315,6 +371,7 @@ def run_watchdog_once(
         "actions": actions,
         "components": components_state,
         "eval_regression": eval_regression,
+        "auth_reprobe": auth_reprobe,
     }
     if recovery_details:
         summary["recoveries"] = recovery_details

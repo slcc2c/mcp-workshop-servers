@@ -26,9 +26,12 @@ def test_client_configs_omit_auth_headers_when_loopback_unauthenticated(
     rendered = generate_client_configs(settings, tmp_path)
     claude_cfg = json.loads(rendered["claude-code"])
     cursor_cfg = json.loads(rendered["cursor"])
+    antigravity_cfg = json.loads(rendered["antigravity"])
 
     assert "headers" not in claude_cfg["mcpServers"]["mcp-workshop-gateway"]
     assert "headers" not in cursor_cfg["mcpServers"]["mcp-workshop-gateway"]
+    assert "url" in antigravity_cfg["mcpServers"]["mcp-workshop-gateway"]
+    assert "serverUrl" not in antigravity_cfg["mcpServers"]["mcp-workshop-gateway"]
     assert "bearer_token_env_var" not in rendered["codex"]
 
 

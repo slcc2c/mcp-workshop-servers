@@ -95,7 +95,7 @@ def test_audit_and_prune_duplicates_plus_omnigent_install(
         encoding="utf-8",
     )
     # Empty 0-byte antigravity config must not crash audit/install
-    ag_path = home / ".gemini/antigravity/mcp_config.json"
+    ag_path = home / ".gemini/config/mcp_config.json"
     ag_path.parent.mkdir(parents=True, exist_ok=True)
     ag_path.write_text("", encoding="utf-8")
 

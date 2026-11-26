@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
   "name": "io.github.slcc2c/mcp-profile-ops",
   "title": "MCP Profile: Ops",
-  "description": "Curated MCP toolset profile 'ops' (docker, kubernetes, filesystem, github, omnigent)",
-  "version": "2.4.0",
+  "description": "Curated MCP toolset profile 'ops' (docker, kubernetes, filesystem, github, omnigent, mac-mini)",
+  "version": "2.5.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -14,7 +14,7 @@
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "transport": {
         "type": "streamable-http"
       }

@@ -3,28 +3,34 @@ import { api } from "./lib/api";
 import { parseWorkbenchUrl, syncWorkbenchUrl } from "./lib/urlState";
 import { resolveMlflowUiUrl } from "./lib/urls";
 import type {
+  ActivityEvent,
   AuthState,
   EvalRunItem,
   HealthResponse,
   NavTab,
   PlaygroundPresetItem,
   PlaygroundReplayRequest,
+  PlaygroundSubTab,
   ReadyResponse,
   RegistryResponse,
+  RegistrySubTab,
   ThemeMode,
   ToolItem,
+  UpstreamsSubTab,
   WatchdogResponse,
 } from "./types";
+import { ActivityDrawer } from "./components/ActivityDrawer";
+import { AgentChatPanel } from "./components/AgentChatPanel";
 import { AuthModal } from "./components/AuthModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { Layout } from "./components/Layout";
 import { ShortcutsModal } from "./components/ShortcutsModal";
 import { ChatView } from "./views/ChatView";
 import { ClientsView } from "./views/ClientsView";
+import { EvalsView } from "./views/EvalsView";
 import { OverviewView } from "./views/OverviewView";
 import { PlaygroundView } from "./views/PlaygroundView";
 import { RegistryView } from "./views/RegistryView";
-import { SkillsView } from "./views/SkillsView";
 import { TracesView } from "./views/TracesView";
 import { UpstreamsView } from "./views/UpstreamsView";
 
@@ -72,22 +78,42 @@ class WorkbenchErrorBoundary extends Component<
 
 const G_NAV_MAP: Record<string, NavTab> = {
   o: "overview",
-  a: "chat",
   p: "playground",
   t: "traces",
+  e: "evals",
   r: "registry",
   u: "upstreams",
   c: "clients",
-  s: "skills",
 };
+
+function resolveInitialSub<T extends string>(raw: string | null | undefined, allowed: T[], fallback: T): T {
+  return raw && (allowed as string[]).includes(raw) ? (raw as T) : fallback;
+}
 
 export function App() {
   const initialUrlState = useMemo(() => parseWorkbenchUrl(window.location), []);
   const [activeTab, setActiveTab] = useState<NavTab>(initialUrlState.tab);
+  const [playgroundSubTab, setPlaygroundSubTab] = useState<PlaygroundSubTab>(() =>
+    resolveInitialSub(initialUrlState.sub, ["tools", "agent", "omnigent"], "tools"),
+  );
+  const [registrySubTab, setRegistrySubTab] = useState<RegistrySubTab>(() =>
+    resolveInitialSub(initialUrlState.sub, ["servers", "prompts", "models", "skills"], "servers"),
+  );
+  const [upstreamsSubTab, setUpstreamsSubTab] = useState<UpstreamsSubTab>(() =>
+    resolveInitialSub(initialUrlState.sub, ["upstreams", "profiles"], "upstreams"),
+  );
   const [theme, setTheme] = useState<ThemeMode>(readInitialTheme);
   const [autoRefreshMs, setAutoRefreshMs] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [activityPaused, setActivityPaused] = useState(false);
+  const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
+  const [activityStreamState, setActivityStreamState] = useState<"live" | "connecting" | "offline">(
+    "offline",
+  );
+  const activityPausedRef = useRef(false);
+  activityPausedRef.current = activityPaused;
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -142,8 +168,17 @@ export function App() {
 
   // Keep URL synchronized with deep-linkable workbench state
   useEffect(() => {
+    const activeSub =
+      activeTab === "playground"
+        ? playgroundSubTab
+        : activeTab === "registry"
+          ? registrySubTab
+          : activeTab === "upstreams"
+            ? upstreamsSubTab
+            : null;
     syncWorkbenchUrl({
       tab: activeTab,
+      sub: activeSub,
       session: selectedChatSessionId,
       profile: profileFilter,
       server: serverFilter,
@@ -154,6 +189,9 @@ export function App() {
     });
   }, [
     activeTab,
+    playgroundSubTab,
+    registrySubTab,
+    upstreamsSubTab,
     selectedChatSessionId,
     profileFilter,
     serverFilter,
@@ -168,6 +206,23 @@ export function App() {
     function onPopState() {
       const parsed = parseWorkbenchUrl(window.location);
       setActiveTab(parsed.tab);
+      if (parsed.tab === "playground") {
+        setPlaygroundSubTab(
+          resolveInitialSub<PlaygroundSubTab>(parsed.sub, ["tools", "agent", "omnigent"], "tools"),
+        );
+      } else if (parsed.tab === "registry") {
+        setRegistrySubTab(
+          resolveInitialSub<RegistrySubTab>(
+            parsed.sub,
+            ["servers", "prompts", "models", "skills"],
+            "servers",
+          ),
+        );
+      } else if (parsed.tab === "upstreams") {
+        setUpstreamsSubTab(
+          resolveInitialSub<UpstreamsSubTab>(parsed.sub, ["upstreams", "profiles"], "upstreams"),
+        );
+      }
       setSelectedChatSessionId(parsed.session || null);
       if (parsed.profile !== undefined) setProfileFilter(parsed.profile || "");
       if (parsed.server !== undefined) setServerFilter(parsed.server || "");
@@ -233,8 +288,26 @@ export function App() {
       }
 
       if (gChordActiveRef.current) {
-        const dest = G_NAV_MAP[e.key.toLowerCase()];
+        const key = e.key.toLowerCase();
         clearGChord();
+        if (key === "l") {
+          e.preventDefault();
+          setActivityOpen((v) => !v);
+          return;
+        }
+        if (key === "a") {
+          e.preventDefault();
+          setPlaygroundSubTab("agent");
+          navigateTab("playground");
+          return;
+        }
+        if (key === "s") {
+          e.preventDefault();
+          setRegistrySubTab("skills");
+          navigateTab("registry");
+          return;
+        }
+        const dest = G_NAV_MAP[key];
         if (dest) {
           e.preventDefault();
           navigateTab(dest);
@@ -343,6 +416,45 @@ export function App() {
     }
   }, [profileFilter, serverFilter, auth.authenticated, auth.authEnabled, loadToolsOnly]);
 
+  useEffect(() => {
+    if (!auth.authenticated && auth.authEnabled) {
+      setActivityStreamState("offline");
+      return;
+    }
+    if (typeof EventSource === "undefined") return;
+    setActivityStreamState("connecting");
+    const es = new EventSource("/api/v1/ops/stream", { withCredentials: true });
+    es.addEventListener("snapshot", (evt) => {
+      setActivityStreamState("live");
+      if (activityPausedRef.current) return;
+      try {
+        const parsed = JSON.parse((evt as MessageEvent).data) as { events?: ActivityEvent[] };
+        if (Array.isArray(parsed.events)) {
+          setActivityEvents(parsed.events.slice(-200));
+        }
+      } catch {
+        // ignore malformed frame
+      }
+    });
+    es.addEventListener("activity", (evt) => {
+      setActivityStreamState("live");
+      if (activityPausedRef.current) return;
+      try {
+        const ev = JSON.parse((evt as MessageEvent).data) as ActivityEvent;
+        setActivityEvents((prev) => [...prev.slice(-199), ev]);
+      } catch {
+        // ignore malformed frame
+      }
+    });
+    es.onerror = () => {
+      setActivityStreamState("offline");
+    };
+    return () => {
+      es.close();
+      setActivityStreamState("offline");
+    };
+  }, [auth.authenticated, auth.authEnabled]);
+
   async function handleLoginToken(token: string) {
     setAuthError(null);
     try {
@@ -375,6 +487,7 @@ export function App() {
     setServerFilter("");
     setSelectedToolKey(`${req.server}.${req.tool}`);
     setReplayRequest({ ...req, nonce: replayNonceRef.current });
+    setPlaygroundSubTab("tools");
     navigateTab("playground");
   }
 
@@ -386,7 +499,7 @@ export function App() {
       onSelectTab={navigateTab}
       theme={theme}
       onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-      version={health?.version || "2.4.0"}
+      version={health?.version || "2.5.0"}
       readyStatus={ready?.status || "checking"}
       auth={auth}
       autoRefreshMs={autoRefreshMs}
@@ -399,6 +512,9 @@ export function App() {
         setAuthModalOpen(true);
       }}
       onLogout={handleLogout}
+      activityCount={activityEvents.length}
+      activityLive={activityStreamState === "live"}
+      onOpenActivity={() => setActivityOpen(true)}
     >
       {auth.authEnabled && !auth.authenticated && (
         <div className="rounded-xl border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[var(--warn-soft)] p-4 flex items-center justify-between gap-3 flex-wrap">
@@ -427,6 +543,7 @@ export function App() {
             setProfileFilter("");
             setServerFilter(slug);
             setSelectedToolKey(null);
+            setPlaygroundSubTab("tools");
             navigateTab("playground");
           }}
           onProbeUpstream={async (slug) => {
@@ -438,38 +555,73 @@ export function App() {
         />
       )}
 
-      {activeTab === "chat" && (
-        <ChatView
-          authenticated={auth.authenticated || !auth.authEnabled}
-          initialSessionId={selectedChatSessionId}
-          onSelectSessionId={setSelectedChatSessionId}
-          onInspectTrace={handleInspectTrace}
-        />
-      )}
-
       {activeTab === "playground" && (
-        <PlaygroundView
-          tools={tools}
-          servers={health?.servers || []}
-          profiles={health?.profiles || []}
-          presets={presets}
-          profileFilter={profileFilter}
-          serverFilter={serverFilter}
-          selectedToolKey={selectedToolKey}
-          replayRequest={replayRequest}
-          onChangeProfileFilter={(p) => {
-            setProfileFilter(p);
-            setSelectedToolKey(null);
-          }}
-          onChangeServerFilter={(s) => {
-            setServerFilter(s);
-            setSelectedToolKey(null);
-          }}
-          onSelectToolKey={setSelectedToolKey}
-          onPresetsChanged={reloadPresets}
-          onInspectTrace={handleInspectTrace}
-          onAfterRun={() => refreshAll()}
-        />
+        <div className="space-y-4">
+          <div className="inline-flex rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-0.5">
+            {(
+              [
+                ["tools", "Tool Playground"],
+                ["agent", "Agent Server"],
+                ["omnigent", "Omnigent Chat"],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setPlaygroundSubTab(id)}
+                className={`px-3 py-1.5 rounded-md text-[12.5px] font-medium cursor-pointer transition-colors ${
+                  playgroundSubTab === id
+                    ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {playgroundSubTab === "tools" && (
+            <PlaygroundView
+              tools={tools}
+              servers={health?.servers || []}
+              profiles={health?.profiles || []}
+              presets={presets}
+              profileFilter={profileFilter}
+              serverFilter={serverFilter}
+              selectedToolKey={selectedToolKey}
+              replayRequest={replayRequest}
+              onChangeProfileFilter={(p) => {
+                setProfileFilter(p);
+                setSelectedToolKey(null);
+              }}
+              onChangeServerFilter={(s) => {
+                setServerFilter(s);
+                setSelectedToolKey(null);
+              }}
+              onSelectToolKey={setSelectedToolKey}
+              onPresetsChanged={reloadPresets}
+              onInspectTrace={handleInspectTrace}
+              onAfterRun={() => refreshAll()}
+            />
+          )}
+
+          {playgroundSubTab === "agent" && (
+            <AgentChatPanel
+              profiles={health?.profiles || []}
+              prompts={registry?.prompts || []}
+              onInspectTrace={handleInspectTrace}
+            />
+          )}
+
+          {playgroundSubTab === "omnigent" && (
+            <ChatView
+              authenticated={auth.authenticated || !auth.authEnabled}
+              initialSessionId={selectedChatSessionId}
+              onSelectSessionId={setSelectedChatSessionId}
+              onInspectTrace={handleInspectTrace}
+            />
+          )}
+        </div>
       )}
 
       {activeTab === "traces" && (
@@ -481,12 +633,22 @@ export function App() {
         />
       )}
 
+      {activeTab === "evals" && (
+        <EvalsView
+          profiles={health?.profiles || []}
+          onInspectTrace={handleInspectTrace}
+          onAfterRun={refreshAll}
+        />
+      )}
+
       {activeTab === "registry" && (
         <RegistryView
           registry={registry}
+          initialSubTab={registrySubTab}
           initialPromptName={selectedPromptName}
           initialPromptVersion={selectedPromptVersion}
           mlflowUiBase={mlflowUiBase}
+          onChangeSubTab={setRegistrySubTab}
           onSelectPrompt={(name, ver) => {
             setSelectedPromptName(name);
             setSelectedPromptVersion(ver || null);
@@ -498,11 +660,18 @@ export function App() {
         />
       )}
 
-      {activeTab === "upstreams" && <UpstreamsView onAfterChange={refreshAll} />}
+      {activeTab === "upstreams" && (
+        <UpstreamsView
+          initialSubTab={upstreamsSubTab}
+          onChangeSubTab={setUpstreamsSubTab}
+          profiles={health?.profiles || []}
+          servers={health?.servers || []}
+          profileCounts={profileCounts}
+          onAfterChange={refreshAll}
+        />
+      )}
 
       {activeTab === "clients" && <ClientsView profileCounts={profileCounts} />}
-
-      {activeTab === "skills" && <SkillsView />}
 
       <CommandPalette
         open={paletteOpen}
@@ -525,13 +694,26 @@ export function App() {
           setProfileFilter("");
           setServerFilter(srv);
           setSelectedToolKey(toolName ? `${srv}.${toolName}` : null);
+          setPlaygroundSubTab("tools");
           navigateTab("playground");
         }}
         onSelectPrompt={(name) => {
           setSelectedPromptName(name);
           setSelectedPromptVersion(null);
+          setRegistrySubTab("prompts");
           navigateTab("registry");
         }}
+      />
+
+      <ActivityDrawer
+        open={activityOpen}
+        onClose={() => setActivityOpen(false)}
+        events={activityEvents}
+        paused={activityPaused}
+        streamState={activityStreamState}
+        onTogglePause={() => setActivityPaused((p) => !p)}
+        onClear={() => setActivityEvents([])}
+        onInspectTrace={handleInspectTrace}
       />
 
       <ShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />

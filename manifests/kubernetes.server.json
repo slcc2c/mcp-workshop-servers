@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-kubernetes",
   "title": "MCP Kubernetes Server",
   "description": "Kubernetes cluster server with namespace allowlists and read-only defaults",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.4.0",
+      "version": "2.5.0",
       "transport": {
         "type": "stdio"
       },

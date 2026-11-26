@@ -5,13 +5,13 @@ import {
   Boxes,
   Compass,
   Database,
+  FlaskConical,
   HelpCircle,
-  Layers,
   LogOut,
   Menu,
-  MessageSquare,
   Moon,
   Network,
+  Radio,
   RefreshCw,
   Search,
   Sun,
@@ -22,16 +22,35 @@ import { useState } from "react";
 import type { AuthState, NavTab, ThemeMode } from "../types";
 import { StatusBadge } from "./StatusDot";
 
-const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: ReactNode }> = [
-  { id: "overview", label: "Overview", icon: <Compass className="w-4 h-4" /> },
-  { id: "chat", label: "Omnigent Chat", icon: <MessageSquare className="w-4 h-4" /> },
-  { id: "playground", label: "Playground", icon: <Terminal className="w-4 h-4" /> },
-  { id: "traces", label: "Traces & Evals", icon: <Activity className="w-4 h-4" /> },
-  { id: "registry", label: "MLflow Registry", icon: <Database className="w-4 h-4" /> },
-  { id: "upstreams", label: "Upstreams", icon: <Network className="w-4 h-4" /> },
-  { id: "clients", label: "Agents & Clients", icon: <Bot className="w-4 h-4" /> },
-  { id: "skills", label: "Skills & Sync", icon: <Layers className="w-4 h-4" /> },
+const NAV_GROUPS: Array<{
+  title: string;
+  items: Array<{ id: NavTab; label: string; icon: ReactNode }>;
+}> = [
+  {
+    title: "Operate",
+    items: [
+      { id: "overview", label: "Overview", icon: <Compass className="w-4 h-4" /> },
+      { id: "playground", label: "Playground & Agent", icon: <Terminal className="w-4 h-4" /> },
+    ],
+  },
+  {
+    title: "MLflow GenAI",
+    items: [
+      { id: "traces", label: "Traces", icon: <Activity className="w-4 h-4" /> },
+      { id: "evals", label: "Evals & Datasets", icon: <FlaskConical className="w-4 h-4" /> },
+      { id: "registry", label: "Registry & Skills", icon: <Database className="w-4 h-4" /> },
+    ],
+  },
+  {
+    title: "Connect",
+    items: [
+      { id: "upstreams", label: "Upstreams & Profiles", icon: <Network className="w-4 h-4" /> },
+      { id: "clients", label: "Clients", icon: <Bot className="w-4 h-4" /> },
+    ],
+  },
 ];
+
+const NAV_ITEMS = NAV_GROUPS.flatMap((g) => g.items);
 
 export function Layout({
   activeTab,
@@ -48,6 +67,9 @@ export function Layout({
   onOpenShortcuts,
   onOpenAuthModal,
   onLogout,
+  activityCount = 0,
+  activityLive = false,
+  onOpenActivity,
   children,
 }: {
   activeTab: NavTab;
@@ -64,6 +86,9 @@ export function Layout({
   onOpenShortcuts: () => void;
   onOpenAuthModal: () => void;
   onLogout: () => void;
+  activityCount?: number;
+  activityLive?: boolean;
+  onOpenActivity?: () => void;
   children: ReactNode;
 }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -82,28 +107,35 @@ export function Layout({
           </div>
         </div>
 
-        <nav className="space-y-0.5" aria-label="Control Plane sections">
-          {NAV_ITEMS.map((item) => {
-            const isActive = item.id === activeTab;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  onSelectTab(item.id);
-                  setMobileNavOpen(false);
-                }}
-                className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${
-                  isActive
-                    ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
-                }`}
-              >
-                {item.icon}
-                <span className="truncate">{item.label}</span>
-              </button>
-            );
-          })}
+        <nav className="space-y-3" aria-label="Control Plane sections">
+          {NAV_GROUPS.map((group) => (
+            <div key={group.title} className="space-y-0.5">
+              <div className="px-2.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                {group.title}
+              </div>
+              {group.items.map((item) => {
+                const isActive = item.id === activeTab;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => {
+                      onSelectTab(item.id);
+                      setMobileNavOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[13px] font-medium transition-colors cursor-pointer ${
+                      isActive
+                        ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                        : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                    }`}
+                  >
+                    {item.icon}
+                    <span className="truncate">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </nav>
       </div>
 
@@ -163,6 +195,22 @@ export function Layout({
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {onOpenActivity && (
+              <button
+                type="button"
+                onClick={onOpenActivity}
+                aria-label="Live Activity"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:border-[var(--border-strong)] text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+              >
+                <Radio className={`w-3.5 h-3.5 ${activityLive ? "text-[var(--ok)]" : "text-[var(--text-muted)]"}`} />
+                <span className="hidden md:inline">Activity</span>
+                {activityCount > 0 && (
+                  <span className="px-1.5 rounded bg-[var(--bg-subtle)] font-mono text-[10.5px] tabular-nums">
+                    {activityCount}
+                  </span>
+                )}
+              </button>
+            )}
             <button
               type="button"
               onClick={onOpenPalette}

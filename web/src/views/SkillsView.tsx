@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, FolderGit2, Play, RefreshCw, ShieldAlert } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FolderGit2, Play, RefreshCw, ShieldAlert, Upload } from "lucide-react";
 import { api } from "../lib/api";
 import type { SkillAuditResponse, SkillSyncResponse } from "../types";
 import { StatusBadge } from "../components/StatusDot";
@@ -21,6 +21,8 @@ export function SkillsView() {
   const [sourceFilter, setSourceFilter] = useState("all");
   const [onlyIssues, setOnlyIssues] = useState(false);
   const [quarantineLegacy, setQuarantineLegacy] = useState(true);
+  const [publishingSkill, setPublishingSkill] = useState<string | null>(null);
+  const [publishMsg, setPublishMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -213,6 +215,12 @@ export function SkillsView() {
           </div>
         )}
 
+        {publishMsg && (
+          <div className="rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-subtle)] px-3 py-2 text-[12px] text-[var(--accent)]">
+            {publishMsg}
+          </div>
+        )}
+
         {syncResult && (
           <div className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] p-3 text-[12px] space-y-1">
             <div className="font-semibold">
@@ -314,6 +322,7 @@ export function SkillsView() {
                     {tid}
                   </th>
                 ))}
+                <th className="py-2 pr-3 font-medium">MLflow</th>
               </tr>
             </thead>
             <tbody>
@@ -336,6 +345,28 @@ export function SkillsView() {
                       </td>
                     );
                   })}
+                  <td className="py-2 pr-3">
+                    <button
+                      type="button"
+                      disabled={publishingSkill === sk.name}
+                      onClick={async () => {
+                        setPublishingSkill(sk.name);
+                        setPublishMsg(null);
+                        try {
+                          await api.publishMlflowSkill({ localSkillId: sk.name });
+                          setPublishMsg(`Published '${sk.name}' to MLflow Skill Registry.`);
+                        } catch (err) {
+                          setPublishMsg(err instanceof Error ? err.message : String(err));
+                        } finally {
+                          setPublishingSkill(null);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] disabled:opacity-50 text-[11px] cursor-pointer"
+                    >
+                      <Upload className="w-3 h-3" />
+                      {publishingSkill === sk.name ? "Publishing..." : "Publish"}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -450,13 +450,13 @@ def generate_client_configs(
         ]
     )
 
-    antigravity_entry: dict[str, Any] = {"serverUrl": gw_url}
+    antigravity_entry: dict[str, Any] = {"url": gw_url}
     if auth_enabled:
         antigravity_entry["headers"] = {"Authorization": "Bearer ${MCP_ANTIGRAVITY_AUTH_TOKEN}"}
     antigravity_payload = {
         "mcpServers": {
             "mcp-workshop-gateway": antigravity_entry,
-            "mlflow": {"serverUrl": settings.mlflow.mcp_url},
+            "mlflow": {"url": settings.mlflow.mcp_url},
         }
     }
 
@@ -655,7 +655,11 @@ def audit_client_configs(
     json_clients = [
         ("claude-code", home / ".claude.json"),
         ("cursor", home / ".cursor/mcp.json"),
-        ("antigravity", home / ".gemini/antigravity/mcp_config.json"),
+        ("antigravity", home / ".gemini/config/mcp_config.json"),
+        (
+            "antigravity-legacy",
+            home / ".gemini/antigravity/mcp_config.json",
+        ),
         (
             "antigravity-migrated",
             home / ".gemini/config/plugins/migrated-settings/mcp_config.json",
@@ -1047,7 +1051,7 @@ def install_client_configs(
                 "entries": sorted(src_cd.keys()),
             }
         elif key == "antigravity":
-            target = home / ".gemini/antigravity/mcp_config.json"
+            target = home / ".gemini/config/mcp_config.json"
             doc, _ = _safe_load_json_dict(target)
             servers = dict(doc.get("mcpServers") or {})
             src_ag = json.loads(rendered["antigravity"])["mcpServers"]

@@ -34,6 +34,8 @@ class UpstreamServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     cwd: Path | None = None
     env: dict[str, SecretStr] = Field(default_factory=dict)
+    allow_tools: list[str] = Field(default_factory=list)
+    deny_tools: list[str] = Field(default_factory=list)
     enabled: bool = True
     compose_into_full: bool = True
     profiles: list[str] = Field(default_factory=lambda: ["studio"])
@@ -80,6 +82,7 @@ class GatewaySettings(BaseModel):
             "kubernetes",
             "jupyter",
             "omnigent",
+            "mac_mini",
         ]
     )
     enable_photos_on_macos: bool = True
@@ -95,6 +98,7 @@ class GatewaySettings(BaseModel):
                 "memory",
                 "filesystem",
                 "github",
+                "mac_mini",
             ],
             "data": [
                 "unity_catalog",
@@ -105,8 +109,8 @@ class GatewaySettings(BaseModel):
                 "neo4j",
                 "jupyter",
             ],
-            "ops": ["docker", "kubernetes", "filesystem", "github", "omnigent"],
-            "macos": ["photos", "xcodebuild", "filesystem"],
+            "ops": ["docker", "kubernetes", "filesystem", "github", "omnigent", "mac_mini"],
+            "macos": ["photos", "xcodebuild", "filesystem", "mac_mini"],
         }
     )
     clients: dict[str, ClientPolicy] = Field(default_factory=dict)
@@ -307,6 +311,16 @@ class OmnigentSettings(BaseModel):
     timeout_seconds: float = 20.0
 
 
+class MacMiniSettings(BaseModel):
+    """Mac mini SSH delegation runner MCP server configuration."""
+
+    ssh_host: str = "spencers-mac-mini"
+    ssh_bin: str = "ssh"
+    remote_bin: str = "mini-agy-runner"
+    ssh_timeout_s: float = 30.0
+    allow_mutations: bool = True
+
+
 class SkillsSettings(BaseModel):
     """Cross-harness skill manifest, audit, and recoverable quarantine settings."""
 
@@ -324,6 +338,18 @@ class SecretsSettings(BaseModel):
         default_factory=lambda: ["AI", "Server-Configurations"]
     )
     cache_ttl_seconds: int = 300
+
+
+class AgentServerSettings(BaseModel):
+    """Co-hosted MLflow ResponsesAgent runtime and OpenAI-compatible LLM routing."""
+
+    url: str = "http://127.0.0.1:8091"
+    llm_base_url: str | None = None
+    llm_model: str = "gpt-4o-mini"
+    llm_api_key: SecretStr | None = None
+    default_profile: str = "discover"
+    max_tool_rounds: int = 8
+    timeout_seconds: float = 90.0
 
 
 class MCPStackSettings(BaseSettings):
@@ -352,8 +378,10 @@ class MCPStackSettings(BaseSettings):
     jupyter: JupyterSettings = Field(default_factory=JupyterSettings)
     xcode: XcodeSettings = Field(default_factory=XcodeSettings)
     omnigent: OmnigentSettings = Field(default_factory=OmnigentSettings)
+    mac_mini: MacMiniSettings = Field(default_factory=MacMiniSettings)
     skills: SkillsSettings = Field(default_factory=SkillsSettings)
     secrets: SecretsSettings = Field(default_factory=SecretsSettings)
+    agent: AgentServerSettings = Field(default_factory=AgentServerSettings)
     omnigent_registry_path: Path = Path("~/.omnigent/mcp_registry.yaml")
 
     @property
@@ -473,8 +501,10 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         "jupyter": {},
         "xcode": {},
         "omnigent": {},
+        "mac_mini": {},
         "skills": {},
         "secrets": {},
+        "agent": {},
     }
 
     if val := os.getenv("MCP_GATEWAY_HOST"):
@@ -682,6 +712,17 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
     if val := os.getenv("MCP_OMNIGENT_REGISTRY_PATH"):
         raw["omnigent_registry_path"] = Path(val.strip()).expanduser()
 
+    if val := os.getenv("MAC_MINI_SSH_HOST"):
+        env_overrides["mac_mini"]["ssh_host"] = val.strip()
+    if val := os.getenv("MAC_MINI_SSH_BIN"):
+        env_overrides["mac_mini"]["ssh_bin"] = val.strip()
+    if val := os.getenv("MAC_MINI_REMOTE_BIN"):
+        env_overrides["mac_mini"]["remote_bin"] = val.strip()
+    if val := os.getenv("MAC_MINI_SSH_TIMEOUT_S"):
+        env_overrides["mac_mini"]["ssh_timeout_s"] = float(val)
+    if (b := _parse_bool(os.getenv("MAC_MINI_ALLOW_MUTATIONS"))) is not None:
+        env_overrides["mac_mini"]["allow_mutations"] = b
+
     if val := os.getenv("MCP_SKILLS_MANIFEST_PATH"):
         env_overrides["skills"]["manifest_path"] = Path(val.strip()).expanduser()
     if val := os.getenv("MCP_SKILLS_QUARANTINE_DIR"):
@@ -697,6 +738,21 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         env_overrides["secrets"]["onepassword_allowed_vaults"] = items
     if val := os.getenv("OP_CACHE_TTL_SECONDS"):
         env_overrides["secrets"]["cache_ttl_seconds"] = int(val)
+
+    if val := os.getenv("MCP_AGENT_URL"):
+        env_overrides["agent"]["url"] = val.strip().rstrip("/")
+    if val := os.getenv("MCP_AGENT_LLM_BASE_URL"):
+        env_overrides["agent"]["llm_base_url"] = val.strip().rstrip("/")
+    if val := os.getenv("MCP_AGENT_LLM_MODEL"):
+        env_overrides["agent"]["llm_model"] = val.strip()
+    if val := os.getenv("MCP_AGENT_LLM_API_KEY"):
+        env_overrides["agent"]["llm_api_key"] = val.strip()
+    if val := os.getenv("MCP_AGENT_DEFAULT_PROFILE"):
+        env_overrides["agent"]["default_profile"] = val.strip()
+    if val := os.getenv("MCP_AGENT_MAX_TOOL_ROUNDS"):
+        env_overrides["agent"]["max_tool_rounds"] = int(val)
+    if val := os.getenv("MCP_AGENT_TIMEOUT_S"):
+        env_overrides["agent"]["timeout_seconds"] = float(val)
 
     cleaned_overrides = {k: v for k, v in env_overrides.items() if v}
     merged = _deep_merge(raw, cleaned_overrides)
@@ -758,6 +814,10 @@ def serialize_upstream_config(cfg: UpstreamServerConfig) -> dict[str, Any]:
         payload["cwd"] = str(cfg.cwd)
     if cfg.env:
         payload["env"] = {k: v.get_secret_value() for k, v in cfg.env.items()}
+    if cfg.allow_tools:
+        payload["allow_tools"] = list(cfg.allow_tools)
+    if cfg.deny_tools:
+        payload["deny_tools"] = list(cfg.deny_tools)
     if cfg.registry_name:
         payload["registry_name"] = cfg.registry_name
     if cfg.description:
@@ -765,31 +825,11 @@ def serialize_upstream_config(cfg: UpstreamServerConfig) -> dict[str, Any]:
     return payload
 
 
-def save_local_upstreams(
-    path: Path,
-    upstreams: dict[str, UpstreamServerConfig],
-) -> Path:
-    """Atomically write upstream_servers into gitignored local YAML config."""
+def _atomic_write_yaml(path: Path, data: dict[str, Any]) -> Path:
     import tempfile
 
-    raw: dict[str, Any] = {}
-    if path.exists():
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            raw = loaded
-    gw_sec = raw.setdefault("gateway", {})
-    if not isinstance(gw_sec, dict):
-        gw_sec = {}
-        raw["gateway"] = gw_sec
-
-    serialized: dict[str, Any] = {}
-    for slug, cfg in upstreams.items():
-        clean_slug = slug.strip().replace("_", "-").lower()
-        serialized[clean_slug] = serialize_upstream_config(cfg)
-    gw_sec["upstream_servers"] = serialized
-
     path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = yaml.safe_dump(raw, sort_keys=False)
+    rendered = yaml.safe_dump(data, sort_keys=False)
     fd, tmp_name = tempfile.mkstemp(prefix=".gateway-local-", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -800,3 +840,44 @@ def save_local_upstreams(
             os.unlink(tmp_name)
         raise
     return path
+
+
+def _load_local_gateway_yaml(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw: dict[str, Any] = {}
+    if path.exists():
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            raw = loaded
+    gw_sec = raw.setdefault("gateway", {})
+    if not isinstance(gw_sec, dict):
+        gw_sec = {}
+        raw["gateway"] = gw_sec
+    return raw, gw_sec
+
+
+def save_local_upstreams(
+    path: Path,
+    upstreams: dict[str, UpstreamServerConfig],
+) -> Path:
+    """Atomically write upstream_servers into gitignored local YAML config."""
+    raw, gw_sec = _load_local_gateway_yaml(path)
+    serialized: dict[str, Any] = {}
+    for slug, cfg in upstreams.items():
+        clean_slug = slug.strip().replace("_", "-").lower()
+        serialized[clean_slug] = serialize_upstream_config(cfg)
+    gw_sec["upstream_servers"] = serialized
+    return _atomic_write_yaml(path, raw)
+
+
+def save_local_profiles(
+    path: Path,
+    profiles: dict[str, list[str]],
+) -> Path:
+    """Atomically write custom gateway profiles into gitignored local YAML config."""
+    raw, gw_sec = _load_local_gateway_yaml(path)
+    gw_sec["profiles"] = {
+        k.strip(): [str(m).strip() for m in v if str(m).strip()]
+        for k, v in profiles.items()
+        if k.strip()
+    }
+    return _atomic_write_yaml(path, raw)
