@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,7 @@ from fastmcp.exceptions import ToolError
 
 from mcp_stack.servers.photos import create_photos_server
 from mcp_stack.servers.photos_jxa import (
+    PHOTOS_JXA_SCRIPT,
     OsaExecResult,
     OsaScriptPhotosRunner,
     PhotosOperation,
@@ -113,3 +117,17 @@ async def test_photos_osascript_runner_parses_payload_and_maps_errors() -> None:
     with pytest.raises(PhotosScriptError) as exc_info:
         await denied_runner.run_operation("list_albums", {})
     assert exc_info.value.photos_code == "PHOTOS_AUTOMATION_DENIED"
+
+
+def test_photos_jxa_script_preserves_js_escapes_and_compiles(tmp_path: Path) -> None:
+    assert "application can\\'t be found" in PHOTOS_JXA_SCRIPT
+    if sys.platform == "darwin" and shutil.which("osacompile"):
+        out_scpt = tmp_path / "photos_check.scpt"
+        proc = subprocess.run(
+            ["osacompile", "-l", "JavaScript", "-o", str(out_scpt), "-"],
+            input=PHOTOS_JXA_SCRIPT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr

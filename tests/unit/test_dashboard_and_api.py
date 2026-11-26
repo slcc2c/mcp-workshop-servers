@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
 import types
+from pathlib import Path
 
 import httpx
+from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from mcp_stack.cli import app as cli_app
 from mcp_stack.core.auth import UI_SESSION_COOKIE
-from mcp_stack.core.config import ClientPolicy
+from mcp_stack.core.config import ClientPolicy, UpstreamServerConfig, load_settings
 from mcp_stack.gateway.app import build_gateway_app
 
 
@@ -695,3 +698,159 @@ def test_cli_ui_open_mints_login_link_without_printing_token(make_settings, monk
     parsed = json.loads(result.stdout)
     assert parsed["url"] == "http://127.0.0.1:8090/ui/login?nonce=abc123"
     assert tok not in result.stdout
+
+
+async def test_federated_upstream_proxy_local_yaml_and_multi_experiment(
+    make_settings, tmp_path: Path, monkeypatch
+) -> None:
+    echo_srv = tmp_path / "echo_mcp.py"
+    echo_srv.write_text(
+        "\n".join(
+            [
+                "from fastmcp import FastMCP",
+                "m = FastMCP('echo-up')",
+                "@m.tool()",
+                "def up_ping(msg: str = 'pong') -> str:",
+                "    return f'up:{msg}'",
+                "if __name__ == '__main__':",
+                "    m.run(transport='stdio', show_banner=False)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    local_yaml = tmp_path / "gateway.local.yaml"
+    res_add = CliRunner().invoke(
+        cli_app,
+        [
+            "upstream",
+            "add",
+            "local-echo",
+            "--transport",
+            "stdio",
+            "--command",
+            sys.executable,
+            "--arg",
+            str(echo_srv),
+            "--profile",
+            "studio",
+            "--config-file",
+            str(local_yaml),
+        ],
+    )
+    assert res_add.exit_code == 0, res_add.stdout
+
+    monkeypatch.setenv("MCP_LOCAL_CONFIG_PATH", str(local_yaml))
+    monkeypatch.setenv("MCP_AUTH_ENABLED", "false")
+    loaded = load_settings(load_dotenv=False)
+    assert "local-echo" in loaded.gateway.upstream_servers
+
+    tok = "tok_fed_test_123"
+    settings = make_settings()
+    settings.gateway.enabled_servers = ["memory"]
+    settings.gateway.enable_photos_on_macos = False
+    settings.gateway.enable_xcode_on_macos = False
+    settings.gateway.auth_enabled = True
+    settings.gateway.clients = {
+        tok: ClientPolicy(client_id="codex", client_name="Codex", allowed_servers=["*"])
+    }
+    settings.mlflow.proxy_upstream_mcp = False
+    settings.unity_catalog.dynamic_function_tools = False
+    settings.gateway.upstream_servers = {
+        "local-echo": UpstreamServerConfig(
+            transport="stdio",
+            command=sys.executable,
+            args=[str(echo_srv)],
+            profiles=["studio"],
+        ),
+        "linear": UpstreamServerConfig(
+            transport="http",
+            url="https://mcp.linear.app/mcp",
+            headers={"Authorization": SecretStr("Bearer env:MISSING_LINEAR_KEY_999")},
+            profiles=["studio"],
+        ),
+    }
+
+    init_uris: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, tracking_uri: str, registry_uri: str | None = None) -> None:
+            init_uris.append({"tracking_uri": tracking_uri, "registry_uri": registry_uri})
+
+        def search_experiments(self, **_kw):
+            return [
+                types.SimpleNamespace(
+                    experiment_id="52", name="mcp-workshop-servers", lifecycle_stage="active"
+                ),
+                types.SimpleNamespace(
+                    experiment_id="77", name="Music-brain-retrieval", lifecycle_stage="active"
+                ),
+            ]
+
+        def get_experiment_by_name(self, name: str):
+            return types.SimpleNamespace(experiment_id="77" if "Music" in name else "52", name=name)
+
+        def search_traces(self, **_kw):
+            return []
+
+        def search_runs(self, *_args, **_kw):
+            return []
+
+        def search_mcp_servers(self, **_kw):
+            return [
+                types.SimpleNamespace(
+                    name="io.github.slcc2c/printer",
+                    url=None,
+                    version="1.0",
+                    description="Printer",
+                    aliases={"production": "1.0"},
+                    tags={"gateway_route": "http://127.0.0.1:8090/servers/printer/mcp"},
+                )
+            ]
+
+        def search_prompt_versions(self, **_kw):
+            return []
+
+        def search_registered_models(self, **_kw):
+            return []
+
+        def search_logged_models(self, **_kw):
+            return []
+
+    import mlflow
+    import mlflow.genai
+
+    monkeypatch.setattr(mlflow, "MlflowClient", FakeClient)
+    monkeypatch.setattr(mlflow, "set_tracking_uri", lambda _u: None)
+    monkeypatch.setattr(mlflow.genai, "search_prompts", lambda **_kw: [])
+
+    app = build_gateway_app(settings)
+    headers = {"Authorization": f"Bearer {tok}"}
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as cli:
+        h = (await cli.get("/health")).json()
+        srv_map = {s["slug"]: s for s in h["servers"]}
+        assert srv_map["local-echo"]["connectionStatus"] == "connected"
+        assert srv_map["linear"]["connectionStatus"] == "auth_required"
+
+        tools_res = (await cli.get("/api/v1/tools?server=local-echo", headers=headers)).json()
+        assert [t["name"] for t in tools_res["tools"]] == ["up_ping"]
+
+        call_res = await cli.post(
+            "/api/v1/actions/call-tool",
+            json={"server": "local-echo", "tool": "up_ping", "arguments": {"msg": "hi"}},
+            headers=headers,
+        )
+        assert call_res.status_code == 200
+        assert "up:hi" in str(call_res.json()["result"])
+
+        tr = (
+            await cli.get("/api/v1/traces?experiment=Music-brain-retrieval", headers=headers)
+        ).json()
+        assert tr["experiment"] == "Music-brain-retrieval"
+        assert len(tr["experiments"]) == 2
+
+        reg = (await cli.get("/api/v1/mlflow/registry", headers=headers)).json()
+        assert reg["mcpServers"][0]["url"] == "http://127.0.0.1:8090/servers/printer/mcp"
+        assert any(u["registry_uri"] is None for u in init_uris)

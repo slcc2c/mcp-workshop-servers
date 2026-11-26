@@ -24,6 +24,25 @@ class ClientPolicy(BaseModel):
     rate_limit_window_s: int = 60
 
 
+class UpstreamServerConfig(BaseModel):
+    """External HTTP or stdio MCP server federated through the gateway."""
+
+    transport: Literal["http", "stdio"]
+    url: str | None = None
+    headers: dict[str, SecretStr] = Field(default_factory=dict)
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    cwd: Path | None = None
+    env: dict[str, SecretStr] = Field(default_factory=dict)
+    enabled: bool = True
+    compose_into_full: bool = True
+    profiles: list[str] = Field(default_factory=lambda: ["studio"])
+    timeout_s: float = 5.0
+    registry_name: str | None = None
+    governance: str = "external-proxy"
+    description: str = ""
+
+
 class GatewaySettings(BaseModel):
     """HTTP + Streamable HTTP gateway configuration."""
 
@@ -82,6 +101,7 @@ class GatewaySettings(BaseModel):
         }
     )
     clients: dict[str, ClientPolicy] = Field(default_factory=dict)
+    upstream_servers: dict[str, UpstreamServerConfig] = Field(default_factory=dict)
 
     @property
     def is_loopback(self) -> bool:
@@ -393,6 +413,13 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
         loaded = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             raw = loaded
+
+    local_cfg_raw = os.getenv("MCP_LOCAL_CONFIG_PATH")
+    local_yaml_path = Path(local_cfg_raw) if local_cfg_raw else Path("config/gateway.local.yaml")
+    if local_yaml_path.exists():
+        loaded_local = yaml.safe_load(local_yaml_path.read_text(encoding="utf-8"))
+        if isinstance(loaded_local, dict):
+            raw = _deep_merge(raw, loaded_local)
 
     env_overrides: dict[str, Any] = {
         "gateway": {},

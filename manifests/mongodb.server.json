@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-mongodb",
   "title": "MCP Mongodb Server",
   "description": "MongoDB document store and aggregation server with read-only defaults",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "transport": {
         "type": "stdio"
       },

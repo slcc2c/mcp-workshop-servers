@@ -31,6 +31,7 @@ from mcp_stack.evals import (
     sync_golden_dataset,
 )
 from mcp_stack.gateway.app import build_gateway_app, build_server_instance
+from mcp_stack.gateway.upstreams import probe_all_upstreams
 from mcp_stack.registry import sync_mcp_registry
 from mcp_stack.servers.mlflow_server import probe_mcp_http_endpoint
 from mcp_stack.servers.unity_catalog import UCClientAdapter
@@ -55,12 +56,14 @@ service_app = typer.Typer(help="Manage macOS LaunchAgents and log rotation.")
 eval_app = typer.Typer(help="Run MLflow 3.x GenAI trace evaluations.")
 uc_app = typer.Typer(help="Unity Catalog bootstrap and helper commands.")
 ui_app = typer.Typer(help="Open and manage the Gateway Web Dashboard.")
+upstream_app = typer.Typer(help="Inspect, probe, and onboard federated external MCP servers.")
 app.add_typer(registry_app, name="registry")
 app.add_typer(config_app, name="config")
 app.add_typer(service_app, name="service")
 app.add_typer(eval_app, name="eval")
 app.add_typer(uc_app, name="uc")
 app.add_typer(ui_app, name="ui")
+app.add_typer(upstream_app, name="upstream")
 
 
 @app.command("serve")
@@ -523,6 +526,102 @@ def ui_open(
             indent=2,
         )
     )
+
+
+@upstream_app.command("list")
+def upstream_list() -> None:
+    """List configured federated external MCP servers."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    items = [
+        {
+            "name": name,
+            "transport": cfg.transport,
+            "target": cfg.url if cfg.transport == "http" else cfg.command,
+            "args": cfg.args,
+            "cwd": str(cfg.cwd) if cfg.cwd else None,
+            "enabled": cfg.enabled,
+            "profiles": cfg.profiles,
+            "registry_name": cfg.registry_name,
+        }
+        for name, cfg in settings.gateway.upstream_servers.items()
+    ]
+    typer.echo(json.dumps({"upstreams": items}, indent=2))
+
+
+@upstream_app.command("probe")
+def upstream_probe() -> None:
+    """Probe live reachability and tool counts for configured external MCP servers."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = asyncio.run(probe_all_upstreams(settings))
+    typer.echo(json.dumps({"upstreams": res}, indent=2))
+
+
+@upstream_app.command("add")
+def upstream_add(
+    name: str = typer.Argument(..., help="Short slug for the upstream server (e.g. printer)"),
+    transport: Literal["http", "stdio"] = typer.Option("http", "--transport"),
+    url: str | None = typer.Option(None, "--url", help="Streamable HTTP endpoint URL"),
+    command: str | None = typer.Option(None, "--command", help="Stdio executable command"),
+    arg: list[str] = typer.Option([], "--arg", help="Repeatable stdio CLI arguments"),
+    cwd: Path | None = typer.Option(None, "--cwd", help="Optional stdio working directory"),
+    profile: list[str] = typer.Option(
+        ["studio"], "--profile", help="Profiles including this server"
+    ),
+    registry_name: str | None = typer.Option(
+        None, "--registry-name", help="Optional MLflow MCP Registry name"
+    ),
+    governance: str = typer.Option("external-proxy", "--governance"),
+    description: str = typer.Option("", "--description"),
+    config_file: Path = typer.Option(
+        Path("config/gateway.local.yaml"), "--config-file", help="Target local YAML file"
+    ),
+) -> None:
+    """Add or update an external MCP server inside gitignored config/gateway.local.yaml."""
+    import yaml
+
+    if transport == "http" and not url:
+        typer.echo("--url is required when --transport=http", err=True)
+        raise typer.Exit(code=2)
+    if transport == "stdio" and not command:
+        typer.echo("--command is required when --transport=stdio", err=True)
+        raise typer.Exit(code=2)
+
+    raw: dict[str, object] = {}
+    if config_file.exists():
+        loaded = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            raw = loaded
+    gw_sec = raw.setdefault("gateway", {})
+    assert isinstance(gw_sec, dict)
+    up_sec = gw_sec.setdefault("upstream_servers", {})
+    assert isinstance(up_sec, dict)
+
+    entry: dict[str, object] = {
+        "transport": transport,
+        "enabled": True,
+        "profiles": list(profile) or ["studio"],
+        "governance": governance,
+    }
+    if url:
+        entry["url"] = url
+    if command:
+        entry["command"] = command
+    if arg:
+        entry["args"] = list(arg)
+    if cwd is not None:
+        entry["cwd"] = str(cwd)
+    if registry_name:
+        entry["registry_name"] = registry_name
+    if description:
+        entry["description"] = description
+
+    clean_slug = name.strip().replace("_", "-").lower()
+    up_sec[clean_slug] = entry
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    typer.echo(json.dumps({"saved": clean_slug, "config_file": str(config_file)}, indent=2))
 
 
 if __name__ == "__main__":

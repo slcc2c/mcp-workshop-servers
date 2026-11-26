@@ -84,6 +84,10 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       font-weight: 600;
       background: var(--panel-alt);
       border: 1px solid var(--border);
+      max-width: 100%;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      white-space: normal;
     }
     .pill.ok { color: var(--ok); border-color: rgba(34, 197, 94, 0.4); }
     .pill.warn { color: var(--warn); border-color: rgba(245, 158, 11, 0.4); }
@@ -129,18 +133,30 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       display: grid;
       gap: 16px;
     }
-    .tab-panel { display: none; gap: 16px; }
+    .tab-panel { display: none; gap: 16px; min-width: 0; }
     .tab-panel.active { display: grid; }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
       gap: 14px;
+      min-width: 0;
+    }
+    #tab-registry .grid {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr));
     }
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 10px;
       padding: 16px;
+      min-width: 0;
+      overflow-x: auto;
+    }
+    .pill-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      align-items: center;
     }
     .card h2 {
       margin: 0 0 10px;
@@ -185,6 +201,7 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       vertical-align: top;
     }
     th { color: var(--muted); font-weight: 600; }
+    td code, td .muted { overflow-wrap: anywhere; word-break: break-word; }
     .toolbar, .actions {
       display: flex;
       flex-wrap: wrap;
@@ -323,6 +340,17 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
         </div>
         <pre id="action-output" style="display:none; margin-top:10px;"></pre>
       </section>
+
+      <section class="card">
+        <h2>
+          <span>
+            Mounted Servers &amp; External Upstreams
+            <span id="srv-inv-count" class="pill">0</span>
+          </span>
+          <span class="muted">Live connection status (gateway &amp; federated proxies)</span>
+        </h2>
+        <div id="servers-health-box" class="muted">Loading /health...</div>
+      </section>
     </section>
 
     <section id="tab-playground" class="tab-panel">
@@ -389,6 +417,9 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
           <span class="muted">Filter by server, user, model, or policy refusal</span>
         </h2>
         <div class="toolbar">
+          <select id="tr-experiment-filter" aria-label="MLflow experiment">
+            <option value="">Default Experiment</option>
+          </select>
           <select id="tr-server-filter"><option value="">All Servers</option></select>
           <select id="tr-user-filter"><option value="">All Users</option></select>
           <select id="tr-model-filter"><option value="">All LoggedModels</option></select>
@@ -659,7 +690,7 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
         }
         outEl.style.display = "block";
         outEl.textContent = JSON.stringify(res, null, 2);
-        await loadTraces();
+        loadTraces().catch(() => {});
       } catch (err) {
         latEl.className = "pill err";
         latEl.textContent = "failed";
@@ -702,9 +733,31 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       const srvSel = document.getElementById("server-filter");
       const prevSrv = srvSel.value;
       srvSel.innerHTML = '<option value="">All Servers</option>' + servers.map(
-        (s) => '<option value="' + esc(s.slug) + '">' + esc(s.slug) + "</option>"
+        (s) => '<option value="' + esc(s.slug) + '">' + esc(s.slug) +
+          (s.external ? " (external: " + esc(s.connectionStatus || s.status) + ")" : "") +
+          "</option>"
       ).join("");
       srvSel.value = prevSrv;
+
+      const invBox = document.getElementById("servers-health-box");
+      document.getElementById("srv-inv-count").textContent = servers.length;
+      invBox.innerHTML = servers.length
+        ? '<div class="grid">' + servers.map((s) => {
+            const st = s.connectionStatus || s.status || "enabled";
+            const cls = st === "connected" || st === "enabled"
+              ? "ok"
+              : (st === "auth_required" || st === "configured" ? "warn" : "err");
+            const extra = [];
+            if (s.external) extra.push('<span class="pill">external</span>');
+            if (typeof s.toolCount === "number") {
+              extra.push('<span class="pill">' + esc(s.toolCount) + " tools</span>");
+            }
+            return '<div class="kv"><div><code>' + esc(s.slug) + "</code> " +
+              extra.join(" ") +
+              (s.detail ? '<div class="muted">' + esc(s.detail) + "</div>" : "") +
+              '</div><span class="pill ' + cls + '">' + esc(st) + "</span></div>";
+          }).join("") + "</div>"
+        : "No servers mounted.";
 
       renderProfileRows();
     }
@@ -850,6 +903,7 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       const detailBox = document.getElementById("trace-detail-box");
       detailBox.style.display = "block";
       detailBox.textContent = "Loading spans for " + traceId + "...";
+      detailBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
       try {
         const tr = await apiFetch("/api/v1/traces/" + encodeURIComponent(traceId));
         const stPill = badge(String(tr.state).includes("OK"), "OK", tr.state);
@@ -983,10 +1037,10 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
         const ok = Number(r.min_score ?? 1) >= 1.0;
         const pills = Object.entries(r.metrics || {}).map(
           ([k, v]) => '<span class="pill">' + esc(k.replace("/mean", "")) + "=" + esc(v) + "</span>"
-        ).join(" ");
+        ).join("");
         return "<tr><td><code>" + esc(r.run_name || r.run_id) + "</code></td>" +
           "<td>" + badge(ok, "min=" + r.min_score, "min=" + r.min_score) + "</td>" +
-          "<td>" + pills + "</td></tr>";
+          '<td><div class="pill-wrap">' + pills + "</div></td></tr>";
       }).join("");
       histBody.innerHTML =
         "<table><thead><tr><th>Eval Run</th><th>Min Score</th><th>Scorers</th></tr></thead>" +
@@ -1007,12 +1061,15 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       const body = document.getElementById("traces-body");
       const evalEl = document.getElementById("eval-summary");
       const params = new URLSearchParams({ limit: "25" });
+      const expSel = document.getElementById("tr-experiment-filter");
+      const expName = expSel.value;
       const srv = document.getElementById("tr-server-filter").value;
       const usr = document.getElementById("tr-user-filter").value;
       const mdl = document.getElementById("tr-model-filter").value;
       const st = document.getElementById("tr-state-filter").value;
       const pr = document.getElementById("tr-refusal-filter").value;
       const q = document.getElementById("tr-search").value.trim();
+      if (expName) params.set("experiment", expName);
       if (srv) params.set("server", srv);
       if (usr) params.set("user", usr);
       if (mdl) params.set("model_id", mdl);
@@ -1029,6 +1086,12 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
           body.textContent = "MLflow unavailable: " + (data.error || "unknown error");
           return;
         }
+        const exps = (data.experiments || []).map((e) => e.name);
+        if (exps.length) {
+          const defExpLabel = "Default (" + (data.experiment || "") + ")";
+          updateFacetSelect("tr-experiment-filter", exps, defExpLabel);
+          if (expName && exps.includes(expName)) expSel.value = expName;
+        }
         const facets = data.facets || {};
         updateFacetSelect("tr-server-filter", facets.servers, "All Servers");
         updateFacetSelect("tr-user-filter", facets.users, "All Users");
@@ -1041,10 +1104,14 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
         if (latest && latest.metrics) {
           const pills = Object.entries(latest.metrics).map(
             ([k, v]) => '<span class="pill">' + esc(k) + "=" + esc(v) + "</span>"
-          ).join(" ");
+          ).join("");
+          const expIdPart = encodeURIComponent(String(data.experimentId || "0"));
+          const runUrl = "http://localhost:5002/#/experiments/" + expIdPart +
+            "/runs/" + encodeURIComponent(latest.run_id);
           evalEl.innerHTML =
-            "<strong>Latest Eval Run</strong> <code>" +
-            esc(latest.run_id) + "</code>: " + pills;
+            '<div class="pill-wrap"><strong>Latest Eval Run</strong> ' +
+            '<a href="' + runUrl + '" target="_blank" rel="noopener"><code>' +
+            esc(latest.run_id) + "</code></a>" + pills + "</div>";
         } else {
           evalEl.textContent =
             "Experiment: " + (data.experiment || "n/a") + " (no eval metrics logged yet)";
@@ -1089,15 +1156,19 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
       const box = document.getElementById("prompt-preview-box");
       box.style.display = "block";
       box.textContent = "Loading prompt " + name + "@" + versionOrAlias + "...";
+      box.scrollIntoView({ behavior: "smooth", block: "nearest" });
       try {
         const data = await apiFetch(
           "/api/v1/mlflow/prompts/" + encodeURIComponent(name) +
           "?version_or_alias=" + encodeURIComponent(String(versionOrAlias))
         );
+        const mlPromptUrl = "http://localhost:5002/#/prompts/" + encodeURIComponent(data.name);
         box.innerHTML =
-          '<div class="kv"><div><strong>Prompt:</strong> <code>' + esc(data.name) +
-          "</code> <span class='pill'>v" + esc(data.version) + "</span></div>" +
-          '<button id="close-prompt-btn" class="mini" type="button">Close</button></div>' +
+          '<div class="kv"><div><strong>Prompt:</strong> ' +
+          '<a href="' + mlPromptUrl + '" target="_blank" rel="noopener"><code>' +
+          esc(data.name) + "</code></a> <span class='pill'>v" + esc(data.version) +
+          '</span></div><button id="close-prompt-btn" class="mini" type="button">' +
+          "Close</button></div>" +
           (data.commitMessage ? '<div class="muted">' + esc(data.commitMessage) + "</div>" : "") +
           "<pre style='margin-top:8px;'>" + esc(data.template || "") + "</pre>";
         document.getElementById("close-prompt-btn").addEventListener("click", () => {
@@ -1156,7 +1227,8 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
                 ([k, v]) => '<span class="pill">' + esc(k) + "=" + esc(v) + "</span>"
               ).join(" ");
               return "<tr><td><code>" + esc(s.name) + "</code><div class='muted'>" +
-                esc(s.url || "") + "</div></td><td>" + aliases + " " + tags + "</td></tr>";
+                esc(s.url || "") + "</div></td><td><div class='pill-wrap'>" +
+                aliases + " " + tags + "</div></td></tr>";
             }).join("") + "</tbody></table>"
           : "No registered MCP servers.";
 
@@ -1328,8 +1400,10 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
     document.getElementById("pg-close-btn").addEventListener("click", () => {
       document.getElementById("playground-card").style.display = "none";
     });
+    document.getElementById("tr-experiment-filter").addEventListener("change", loadTraces);
     document.getElementById("tr-apply-btn").addEventListener("click", loadTraces);
     document.getElementById("tr-reset-btn").addEventListener("click", () => {
+      document.getElementById("tr-experiment-filter").value = "";
       document.getElementById("tr-server-filter").value = "";
       document.getElementById("tr-user-filter").value = "";
       document.getElementById("tr-model-filter").value = "";

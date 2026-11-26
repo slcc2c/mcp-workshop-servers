@@ -37,6 +37,7 @@ from mcp_stack.core.auth import (
 from mcp_stack.core.config import ClientPolicy, MCPStackSettings
 from mcp_stack.core.logging import get_logger
 from mcp_stack.core.metrics import render_metrics
+from mcp_stack.core.secrets import SecretResolver
 from mcp_stack.evals import (
     _POLICY_REFUSAL_MARKERS,
     GOLDEN_DATASET_NAME,
@@ -47,6 +48,7 @@ from mcp_stack.evals import (
     sync_golden_dataset,
 )
 from mcp_stack.gateway.dashboard import render_dashboard_html
+from mcp_stack.gateway.upstreams import build_upstream_proxy, probe_upstream_proxy
 from mcp_stack.servers.docker_server import create_docker_server
 from mcp_stack.servers.filesystem import create_filesystem_server
 from mcp_stack.servers.github import create_github_server
@@ -193,27 +195,60 @@ def build_gateway_app(
         factory = upstream_proxy_factory or create_mlflow_upstream_proxy
         upstream_proxy = factory(settings)
 
+    secret_resolver = SecretResolver(settings.secrets)
+    federated_proxies: dict[str, FastMCP] = {}
+    federated_meta: dict[str, dict[str, Any]] = {}
+    federated_cfg_map: dict[str, Any] = {}
+    for raw_up_name, up_cfg in settings.gateway.upstream_servers.items():
+        proxy_srv, up_info = build_upstream_proxy(
+            raw_up_name, up_cfg, settings, resolver=secret_resolver
+        )
+        slug = str(up_info["slug"])
+        federated_meta[slug] = up_info
+        federated_cfg_map[slug] = up_cfg
+        if proxy_srv is not None:
+            federated_proxies[slug] = proxy_srv
+
     composed_http = composed.http_app(path="/")
     per_server_http: dict[str, Any] = {
         _slug_for(key): srv.http_app(path="/") for key, srv in servers.items()
     }
     if upstream_proxy is not None:
         per_server_http["mlflow-upstream"] = upstream_proxy.http_app(path="/")
+    for fed_slug, fed_proxy in federated_proxies.items():
+        per_server_http[fed_slug] = fed_proxy.http_app(path="/")
+
+    effective_profiles: dict[str, list[str]] = {
+        k: list(v) for k, v in settings.gateway.profiles.items()
+    }
+    for fed_slug, up_cfg in federated_cfg_map.items():
+        if not up_cfg.enabled:
+            continue
+        for pname in up_cfg.profiles:
+            clean_p = pname.strip()
+            if not clean_p:
+                continue
+            members = effective_profiles.setdefault(clean_p, [])
+            if fed_slug not in members and fed_slug.replace("-", "_") not in members:
+                members.append(fed_slug)
 
     profile_apps: dict[str, FastMCP] = {}
     profile_http: dict[str, Any] = {}
     profile_wants_upstream: dict[str, bool] = {}
+    profile_wants_federated: dict[str, list[str]] = {}
     profile_inventory: list[dict[str, Any]] = []
 
-    for profile_name, raw_members in settings.gateway.profiles.items():
+    for profile_name, raw_members in effective_profiles.items():
         clean_profile = profile_name.strip()
         if not clean_profile:
             continue
         p_mcp = FastMCP(f"mcp-profile-{clean_profile}")
         resolved_slugs: list[str] = []
         wants_upstream = False
+        wants_fed: list[str] = []
         for member in raw_members:
             norm = member.strip().replace("-", "_")
+            fed_slug_cand = member.strip().replace("_", "-").lower()
             if norm == "mlflow_upstream":
                 if upstream_proxy is not None:
                     wants_upstream = True
@@ -221,9 +256,13 @@ def build_gateway_app(
             if norm in servers:
                 p_mcp.mount(servers[norm])
                 resolved_slugs.append(_slug_for(norm))
+            elif fed_slug_cand in federated_proxies:
+                wants_fed.append(fed_slug_cand)
+                resolved_slugs.append(fed_slug_cand)
         profile_apps[clean_profile] = p_mcp
         profile_http[clean_profile] = p_mcp.http_app(path="/")
         profile_wants_upstream[clean_profile] = wants_upstream
+        profile_wants_federated[clean_profile] = wants_fed
         profile_inventory.append(
             {
                 "name": clean_profile,
@@ -259,6 +298,11 @@ def build_gateway_app(
                 if should_compose is None:
                     probe = await probe_mcp_http_endpoint(settings.mlflow.mcp_url, timeout=1.5)
                     should_compose = bool(probe.get("reachable"))
+                inv_up = next(
+                    (s for s in server_inventory if s["slug"] == "mlflow-upstream"), None
+                )
+                if inv_up is not None:
+                    inv_up["connectionStatus"] = "connected" if should_compose else "unreachable"
                 if should_compose:
                     composed.mount(upstream_proxy)
                     for pname, p_mcp in profile_apps.items():
@@ -274,9 +318,44 @@ def build_gateway_app(
                         url=settings.mlflow.mcp_url,
                     )
 
-            await stack.enter_async_context(composed_http.lifespan(app))
             for _slug, sub_http in per_server_http.items():
                 await stack.enter_async_context(sub_http.lifespan(app))
+
+            if federated_proxies:
+                async def _probe_one(f_slug: str, f_proxy: FastMCP) -> tuple[str, dict[str, Any]]:
+                    cfg_obj = federated_cfg_map[f_slug]
+                    return f_slug, await probe_upstream_proxy(f_proxy, timeout_s=cfg_obj.timeout_s)
+
+                probe_results = await asyncio.gather(
+                    *(_probe_one(s, p) for s, p in federated_proxies.items())
+                )
+                for f_slug, f_res in probe_results:
+                    meta_ref = federated_meta[f_slug]
+                    meta_ref["connectionStatus"] = f_res["connectionStatus"]
+                    meta_ref["toolCount"] = f_res.get("toolCount", 0)
+                    if f_res.get("error"):
+                        meta_ref["error"] = f_res["error"]
+                    if f_res.get("reachable"):
+                        f_cfg = federated_cfg_map[f_slug]
+                        f_proxy = federated_proxies[f_slug]
+                        if f_cfg.compose_into_full:
+                            composed.mount(f_proxy)
+                        for pname, p_mcp in profile_apps.items():
+                            if f_slug in profile_wants_federated.get(pname, []):
+                                p_mcp.mount(f_proxy)
+                        logger.info(
+                            "Federated external MCP proxy",
+                            server=f_slug,
+                            tools=f_res.get("toolCount", 0),
+                        )
+                    else:
+                        logger.warning(
+                            "External MCP proxy unreachable at startup",
+                            server=f_slug,
+                            error=f_res.get("error"),
+                        )
+
+            await stack.enter_async_context(composed_http.lifespan(app))
             for _pname, p_http in profile_http.items():
                 await stack.enter_async_context(p_http.lifespan(app))
             yield
@@ -315,12 +394,14 @@ def build_gateway_app(
             return find_client_by_id(settings, cid), "cookie"
         return None, "anonymous"
 
-    server_inventory = [
+    server_inventory: list[dict[str, Any]] = [
         {
             "key": key,
             "slug": _slug_for(key),
             "route": f"/servers/{_slug_for(key)}/mcp",
             "status": "enabled",
+            "connectionStatus": "connected",
+            "external": False,
         }
         for key in servers
     ]
@@ -331,9 +412,13 @@ def build_gateway_app(
                 "slug": "mlflow-upstream",
                 "route": "/servers/mlflow-upstream/mcp",
                 "status": "proxy",
+                "connectionStatus": "configured",
+                "external": True,
                 "target": settings.mlflow.mcp_url,
             }
         )
+    for _fed_slug, meta in federated_meta.items():
+        server_inventory.append(meta)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -538,9 +623,11 @@ def build_gateway_app(
         resp.delete_cookie(key=UI_SESSION_COOKIE, path="/")
         return resp
 
-    async def _collect_tools_for_server(slug: str, srv: FastMCP) -> list[dict[str, Any]]:
+    async def _collect_tools_for_server(
+        slug: str, srv: FastMCP, *, timeout_s: float = 2.0
+    ) -> list[dict[str, Any]]:
         try:
-            items = await asyncio.wait_for(srv.list_tools(), timeout=2.0)
+            items = await asyncio.wait_for(srv.list_tools(), timeout=timeout_s)
         except Exception as exc:
             logger.debug("Tool inspection skipped for server", server=slug, error=str(exc))
             return []
@@ -570,6 +657,8 @@ def build_gateway_app(
         }
         if upstream_proxy is not None:
             target_slugs["mlflow-upstream"] = upstream_proxy
+        for fed_slug, fed_proxy in federated_proxies.items():
+            target_slugs[fed_slug] = fed_proxy
 
         allowed_by_profile: set[str] | None = None
         if profile:
@@ -580,9 +669,14 @@ def build_gateway_app(
             if prof_entry.get("includesUpstreamMcp"):
                 allowed_by_profile.add("mlflow-upstream")
 
-        per_server_tools: dict[str, list[dict[str, Any]]] = {}
-        for slug, srv in target_slugs.items():
-            per_server_tools[slug] = await _collect_tools_for_server(slug, srv)
+        async def _gather_one(slug: str, srv: FastMCP) -> tuple[str, list[dict[str, Any]]]:
+            t_out = federated_cfg_map[slug].timeout_s if slug in federated_cfg_map else 2.0
+            return slug, await _collect_tools_for_server(slug, srv, timeout_s=t_out)
+
+        gathered = await asyncio.gather(
+            *(_gather_one(slug, srv) for slug, srv in target_slugs.items())
+        )
+        per_server_tools: dict[str, list[dict[str, Any]]] = dict(gathered)
 
         profile_counts: dict[str, int] = {}
         for prof in profile_inventory:
@@ -647,6 +741,7 @@ def build_gateway_app(
     @app.get("/api/v1/traces")
     async def recent_traces_api(
         limit: int = 25,
+        experiment: str = "",
         server: str = "",
         user: str = "",
         model_id: str = "",
@@ -660,11 +755,25 @@ def build_gateway_app(
             import mlflow
 
             client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
-            exp = client.get_experiment_by_name(settings.mlflow.experiment_name)
+            target_exp_name = experiment.strip() or settings.mlflow.experiment_name
+            exp = client.get_experiment_by_name(target_exp_name)
+            experiments_out: list[dict[str, str]] = []
+            try:
+                for item in client.search_experiments(max_results=50):
+                    if getattr(item, "lifecycle_stage", "active") == "active":
+                        experiments_out.append(
+                            {
+                                "id": str(item.experiment_id),
+                                "name": str(item.name),
+                            }
+                        )
+            except Exception:
+                pass
             if exp is None:
                 return {
                     "available": True,
-                    "experiment": settings.mlflow.experiment_name,
+                    "experiment": target_exp_name,
+                    "experiments": experiments_out,
                     "traces": [],
                     "facets": {"servers": [], "users": [], "modelIds": []},
                     "latestEvalRun": None,
@@ -815,8 +924,9 @@ def build_gateway_app(
 
             return {
                 "available": True,
-                "experiment": settings.mlflow.experiment_name,
+                "experiment": target_exp_name,
                 "experimentId": exp.experiment_id,
+                "experiments": experiments_out,
                 "traces": filtered,
                 "facets": {
                     "servers": sorted(facet_servers),
@@ -833,7 +943,8 @@ def build_gateway_app(
         except Exception as exc:
             return {
                 "available": False,
-                "experiment": settings.mlflow.experiment_name,
+                "experiment": experiment.strip() or settings.mlflow.experiment_name,
+                "experiments": [],
                 "error": str(exc),
                 "traces": [],
                 "facets": {"servers": [], "users": [], "modelIds": []},
@@ -1164,22 +1275,38 @@ def build_gateway_app(
             import mlflow.genai
 
             mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
-            client = mlflow.MlflowClient(
-                tracking_uri=settings.mlflow.tracking_uri,
-                registry_uri=settings.effective_mlflow_registry_uri,
-            )
+            client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
 
             mcp_servers_out: list[dict[str, Any]] = []
             try:
                 for srv in client.search_mcp_servers(max_results=50):
+                    aliases_dict = dict(getattr(srv, "aliases", None) or {})
+                    tags_dict = dict(getattr(srv, "tags", None) or {})
+                    srv_url = getattr(srv, "url", None) or tags_dict.get("gateway_route") or ""
+                    if not srv_url and aliases_dict:
+                        first_ver = str(next(iter(aliases_dict.values())))
+                        try:
+                            mv = client.get_mcp_server_version(
+                                name=str(srv.name), version=first_ver
+                            )
+                            remotes = getattr(mv, "remotes", None) or []
+                            if remotes:
+                                r0 = remotes[0]
+                                srv_url = (
+                                    str(r0.get("url") or "")
+                                    if isinstance(r0, dict)
+                                    else str(getattr(r0, "url", "") or "")
+                                )
+                        except Exception:
+                            pass
                     mcp_servers_out.append(
                         {
                             "name": getattr(srv, "name", None),
-                            "url": getattr(srv, "url", None),
+                            "url": srv_url or None,
                             "version": getattr(srv, "version", None),
                             "description": getattr(srv, "description", None),
-                            "aliases": dict(getattr(srv, "aliases", None) or {}),
-                            "tags": dict(getattr(srv, "tags", None) or {}),
+                            "aliases": aliases_dict,
+                            "tags": tags_dict,
                         }
                     )
             except Exception:
@@ -1490,8 +1617,26 @@ def build_gateway_app(
                     },
                 )
 
-        target_srv = upstream_proxy if slug == "mlflow-upstream" else servers.get(key)
+        target_srv = (
+            upstream_proxy
+            if slug == "mlflow-upstream"
+            else (federated_proxies.get(slug) or servers.get(key))
+        )
         if target_srv is None:
+            fed_meta = federated_meta.get(slug)
+            if fed_meta is not None:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "code": "SERVER_UNAVAILABLE",
+                            "message": str(
+                                fed_meta.get("detail")
+                                or f"Upstream server '{slug}' is {fed_meta.get('connectionStatus')}"
+                            ),
+                        }
+                    },
+                )
             return JSONResponse(
                 status_code=404,
                 content={"error": {"code": "SERVER_NOT_FOUND", "message": f"Unknown '{slug}'"}},
