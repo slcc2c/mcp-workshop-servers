@@ -8,14 +8,16 @@ Never passes secret values on CLI arguments and never prints token values.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 DEFAULT_ENV_FILE = Path("/Users/spencer/repos/mcp-server/.env")
 DEFAULT_TITLE = "MCP Workshop Gateway"
@@ -95,7 +97,13 @@ def render_updated_env(existing_text: str, updates: dict[str, str]) -> str:
 def build_create_item_payload(tokens: dict[str, str], title: str, url: str) -> dict[str, Any]:
     """Build a 1Password LOGIN item JSON payload conforming to `op item template get login`."""
     fields: list[dict[str, Any]] = [
-        {"id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "codex"},
+        {
+            "id": "username",
+            "type": "STRING",
+            "purpose": "USERNAME",
+            "label": "username",
+            "value": "codex",
+        },
         {
             "id": "password",
             "type": "CONCEALED",
@@ -103,7 +111,13 @@ def build_create_item_payload(tokens: dict[str, str], title: str, url: str) -> d
             "label": "password",
             "value": tokens[PRIMARY_TOKEN_KEY],
         },
-        {"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": ITEM_NOTES},
+        {
+            "id": "notesPlain",
+            "type": "STRING",
+            "purpose": "NOTES",
+            "label": "notesPlain",
+            "value": ITEM_NOTES,
+        },
     ]
     for key in EXTRA_TOKEN_KEYS:
         if val := tokens.get(key, ""):
@@ -112,7 +126,10 @@ def build_create_item_payload(tokens: dict[str, str], title: str, url: str) -> d
                     "type": "CONCEALED",
                     "label": key,
                     "value": val,
-                    "section": {"id": CLIENT_TOKENS_SECTION_ID, "label": CLIENT_TOKENS_SECTION_LABEL},
+                    "section": {
+                        "id": CLIENT_TOKENS_SECTION_ID,
+                        "label": CLIENT_TOKENS_SECTION_LABEL,
+                    },
                 }
             )
     return {
@@ -149,7 +166,9 @@ def extract_item_tokens(item: dict[str, Any]) -> tuple[dict[str, str], str]:
     return tokens, primary_url
 
 
-def merge_item_payload(existing_item: dict[str, Any], tokens: dict[str, str], url: str) -> dict[str, Any]:
+def merge_item_payload(
+    existing_item: dict[str, Any], tokens: dict[str, str], url: str
+) -> dict[str, Any]:
     """Merge local tokens and URL into a deep copy of an existing 1Password item JSON."""
     merged = copy.deepcopy(existing_item)
     fields: list[dict[str, Any]] = list(merged.get("fields") or [])
@@ -157,8 +176,14 @@ def merge_item_payload(existing_item: dict[str, Any], tokens: dict[str, str], ur
 
     section_ref = {"id": CLIENT_TOKENS_SECTION_ID, "label": CLIENT_TOKENS_SECTION_LABEL}
     for sec in sections:
-        if sec.get("id") == CLIENT_TOKENS_SECTION_ID or sec.get("label") == CLIENT_TOKENS_SECTION_LABEL:
-            section_ref = {"id": sec.get("id", CLIENT_TOKENS_SECTION_ID), "label": sec.get("label", CLIENT_TOKENS_SECTION_LABEL)}
+        if (
+            sec.get("id") == CLIENT_TOKENS_SECTION_ID
+            or sec.get("label") == CLIENT_TOKENS_SECTION_LABEL
+        ):
+            section_ref = {
+                "id": sec.get("id", CLIENT_TOKENS_SECTION_ID),
+                "label": sec.get("label", CLIENT_TOKENS_SECTION_LABEL),
+            }
             break
     else:
         sections.append(dict(section_ref))
@@ -184,7 +209,15 @@ def merge_item_payload(existing_item: dict[str, Any], tokens: dict[str, str], ur
                 field["value"] = tokens[label]
 
     if not saw_user:
-        fields.append({"id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "codex"})
+        fields.append(
+            {
+                "id": "username",
+                "type": "STRING",
+                "purpose": "USERNAME",
+                "label": "username",
+                "value": "codex",
+            }
+        )
     if not saw_pw and PRIMARY_TOKEN_KEY in tokens:
         fields.append(
             {
@@ -197,7 +230,14 @@ def merge_item_payload(existing_item: dict[str, Any], tokens: dict[str, str], ur
         )
     for key in EXTRA_TOKEN_KEYS:
         if key not in saw_extra and tokens.get(key):
-            fields.append({"type": "CONCEALED", "label": key, "value": tokens[key], "section": dict(section_ref)})
+            fields.append(
+                {
+                    "type": "CONCEALED",
+                    "label": key,
+                    "value": tokens[key],
+                    "section": dict(section_ref),
+                }
+            )
 
     urls: list[dict[str, Any]] = list(merged.get("urls") or [])
     norm_target = url.rstrip("/")
@@ -267,10 +307,8 @@ def write_env_atomic(env_path: Path, content: str) -> None:
         os.chmod(tmp_name, 0o600)
         os.replace(tmp_name, env_path)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_name)
-        except OSError:
-            pass
         raise
 
 
@@ -287,39 +325,77 @@ def push_tokens(args: argparse.Namespace, *, run_fn: RunFn = subprocess.run) -> 
 
     if existing_summary is None:
         payload = build_create_item_payload(tokens, args.title, args.url)
-        field_labels = [PRIMARY_TOKEN_KEY if f.get("label") == "password" else f["label"] for f in payload["fields"] if f.get("type") == "CONCEALED"]
+        field_labels = [
+            PRIMARY_TOKEN_KEY if f.get("label") == "password" else f["label"]
+            for f in payload["fields"]
+            if f.get("type") == "CONCEALED"
+        ]
         if args.dry_run:
-            print(f"[dry-run] Would create '{args.title}' (url={args.url}) in vault '{vault}' with fields: {field_labels}")
+            print(
+                f"[dry-run] Would create '{args.title}' (url={args.url}) in vault "
+                f"'{vault}' with fields: {field_labels}"
+            )
             return 0
-        created = _run_op(["item", "create", "--vault", vault, "--format", "json", "-"], run_fn=run_fn, stdin_text=json.dumps(payload))
-        print(f"Created 1Password item {created.get('id')} '{created.get('title')}' in vault '{vault}' with fields: {field_labels}")
+        created = _run_op(
+            ["item", "create", "--vault", vault, "--format", "json", "-"],
+            run_fn=run_fn,
+            stdin_text=json.dumps(payload),
+        )
+        print(
+            f"Created 1Password item {created.get('id')} '{created.get('title')}' "
+            f"in vault '{vault}' with fields: {field_labels}"
+        )
         return 0
 
-    existing_full = _run_op(["item", "get", str(existing_summary["id"]), "--vault", vault, "--format", "json"], run_fn=run_fn)
-    op_tokens, op_url = extract_item_tokens(existing_full)
+    existing_full = _run_op(
+        ["item", "get", str(existing_summary["id"]), "--vault", vault, "--format", "json"],
+        run_fn=run_fn,
+    )
+    op_tokens, _op_url = extract_item_tokens(existing_full)
     missing, differing = diff_token_maps(tokens, op_tokens)
-    url_matches = any(str(u.get("href") or "").rstrip("/") == args.url.rstrip("/") for u in (existing_full.get("urls") or []))
+    target_url = args.url.rstrip("/")
+    url_matches = any(
+        str(u.get("href") or "").rstrip("/") == target_url
+        for u in (existing_full.get("urls") or [])
+    )
 
     if not missing and not differing and url_matches:
-        print(f"Already in sync: '{args.title}' ({existing_summary['id']}) in vault '{vault}' matches {len(tokens)} token(s).")
+        print(
+            f"Already in sync: '{args.title}' ({existing_summary['id']}) "
+            f"in vault '{vault}' matches {len(tokens)} token(s)."
+        )
         return 0
 
     if differing and not args.update:
         print(
-            f"Refusing to overwrite differing token(s) in '{args.title}' ({existing_summary['id']}): {differing}. "
+            f"Refusing to overwrite differing token(s) in '{args.title}' "
+            f"({existing_summary['id']}): {differing}. "
             "Re-run with --update to overwrite.",
             file=sys.stderr,
         )
         return 2
 
     if args.dry_run:
-        print(f"[dry-run] Would update '{args.title}' ({existing_summary['id']}) in vault '{vault}': missing={missing}, updated={differing if args.update else []}, add_url={not url_matches}")
+        updated_keys = differing if args.update else []
+        print(
+            f"[dry-run] Would update '{args.title}' ({existing_summary['id']}) in vault "
+            f"'{vault}': missing={missing}, updated={updated_keys}, "
+            f"add_url={not url_matches}"
+        )
         return 0
 
     merged = merge_item_payload(existing_full, tokens, args.url)
     # `op item edit` reads piped JSON stdin WITHOUT `-`
-    edited = _run_op(["item", "edit", str(existing_summary["id"]), "--vault", vault, "--format", "json"], run_fn=run_fn, stdin_text=json.dumps(merged))
-    print(f"Updated 1Password item {edited.get('id', existing_summary['id'])} '{args.title}' in vault '{vault}': added={missing}, overwritten={differing}")
+    edited = _run_op(
+        ["item", "edit", str(existing_summary["id"]), "--vault", vault, "--format", "json"],
+        run_fn=run_fn,
+        stdin_text=json.dumps(merged),
+    )
+    item_id = edited.get("id", existing_summary["id"])
+    print(
+        f"Updated 1Password item {item_id} '{args.title}' in vault '{vault}': "
+        f"added={missing}, overwritten={differing}"
+    )
     return 0
 
 
@@ -331,10 +407,16 @@ def pull_tokens(args: argparse.Namespace, *, run_fn: RunFn = subprocess.run) -> 
         print(f"Item '{args.title}' not found in vault '{vault}'", file=sys.stderr)
         return 1
 
-    item = _run_op(["item", "get", str(existing_summary["id"]), "--vault", vault, "--format", "json"], run_fn=run_fn)
+    item = _run_op(
+        ["item", "get", str(existing_summary["id"]), "--vault", vault, "--format", "json"],
+        run_fn=run_fn,
+    )
     op_tokens, _ = extract_item_tokens(item)
     if not op_tokens:
-        print(f"No MCP tokens found on 1Password item '{args.title}' ({existing_summary['id']})", file=sys.stderr)
+        print(
+            f"No MCP tokens found on 1Password item '{args.title}' ({existing_summary['id']})",
+            file=sys.stderr,
+        )
         return 1
 
     local_all = parse_env_file(args.env_file)
@@ -342,7 +424,10 @@ def pull_tokens(args: argparse.Namespace, *, run_fn: RunFn = subprocess.run) -> 
     missing, differing = diff_token_maps(op_tokens, local_tokens)
 
     if not missing and not differing:
-        print(f"Already in sync: {args.env_file} matches 1Password item '{args.title}' ({len(op_tokens)} token(s)).")
+        print(
+            f"Already in sync: {args.env_file} matches 1Password item '{args.title}' "
+            f"({len(op_tokens)} token(s))."
+        )
         return 0
 
     if differing and not args.update:
@@ -353,29 +438,62 @@ def pull_tokens(args: argparse.Namespace, *, run_fn: RunFn = subprocess.run) -> 
         )
         return 2
 
-    to_write = {k: v for k, v in op_tokens.items() if k in missing or (args.update and k in differing)}
+    to_write = {
+        k: v
+        for k, v in op_tokens.items()
+        if k in missing or (args.update and k in differing)
+    }
     if args.dry_run:
-        print(f"[dry-run] Would write keys {sorted(to_write)} to {args.env_file} from vault '{vault}'")
+        print(
+            f"[dry-run] Would write keys {sorted(to_write)} "
+            f"to {args.env_file} from vault '{vault}'"
+        )
         return 0
 
     existing_text = args.env_file.read_text(encoding="utf-8") if args.env_file.exists() else ""
     new_text = render_updated_env(existing_text, to_write)
     write_env_atomic(args.env_file, new_text)
-    print(f"Updated {args.env_file} from 1Password '{args.title}' (vault '{vault}'): keys={sorted(to_write)}")
+    print(
+        f"Updated {args.env_file} from 1Password '{args.title}' "
+        f"(vault '{vault}'): keys={sorted(to_write)}"
+    )
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Two-way secret-safe sync for MCP Workshop Gateway tokens with 1Password.")
+    p = argparse.ArgumentParser(
+        description="Two-way secret-safe sync for MCP Workshop Gateway tokens with 1Password."
+    )
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--push", action="store_true", help="Sync local .env -> 1Password (default)")
     mode.add_argument("--pull", action="store_true", help="Restore local .env <- 1Password")
-    p.add_argument("--vault", default=None, help="1Password vault name (defaults to Server-Configurations, then Private)")
-    p.add_argument("--title", default=DEFAULT_TITLE, help=f"1Password item title (default: {DEFAULT_TITLE!r})")
+    p.add_argument(
+        "--vault",
+        default=None,
+        help="1Password vault name (defaults to Server-Configurations, then Private)",
+    )
+    p.add_argument(
+        "--title",
+        default=DEFAULT_TITLE,
+        help=f"1Password item title (default: {DEFAULT_TITLE!r})",
+    )
     p.add_argument("--url", default=DEFAULT_URL, help=f"Login URL (default: {DEFAULT_URL!r})")
-    p.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE, help=f"Local .env file (default: {DEFAULT_ENV_FILE})")
-    p.add_argument("--update", action="store_true", help="Overwrite differing token values when drifting")
-    p.add_argument("--dry-run", action="store_true", help="Preview changes without modifying 1Password or .env")
+    p.add_argument(
+        "--env-file",
+        type=Path,
+        default=DEFAULT_ENV_FILE,
+        help=f"Local .env file (default: {DEFAULT_ENV_FILE})",
+    )
+    p.add_argument(
+        "--update",
+        action="store_true",
+        help="Overwrite differing token values when drifting",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without modifying 1Password or .env",
+    )
     return p
 
 
