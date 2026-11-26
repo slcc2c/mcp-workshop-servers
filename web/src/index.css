@@ -1,0 +1,183 @@
+@import "tailwindcss";
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-canvas: #0a0b0e;
+  --bg-surface: #111318;
+  --bg-elevated: #171a21;
+  --bg-subtle: rgba(255, 255, 255, 0.035);
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --border-hairline: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text-primary: #ededef;
+  --text-secondary: #9ba1a6;
+  --text-muted: #687076;
+  --accent: #3b82f6;
+  --accent-soft: rgba(59, 130, 246, 0.14);
+  --ok: #22c55e;
+  --ok-soft: rgba(34, 197, 94, 0.14);
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.14);
+  --err: #ef4444;
+  --err-soft: rgba(239, 68, 68, 0.14);
+  --code-bg: #08090c;
+  --scroll-thumb: rgba(255, 255, 255, 0.14);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-canvas: #f8f9fb;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f1f3f5;
+  --bg-subtle: rgba(17, 24, 39, 0.03);
+  --bg-hover: rgba(17, 24, 39, 0.055);
+  --border-hairline: #e4e6eb;
+  --border-strong: #cfd4dc;
+  --text-primary: #111827;
+  --text-secondary: #4b5563;
+  --text-muted: #6b7280;
+  --accent: #2563eb;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --ok: #16a34a;
+  --ok-soft: rgba(22, 163, 74, 0.1);
+  --warn: #d97706;
+  --warn-soft: rgba(217, 119, 6, 0.1);
+  --err: #dc2626;
+  --err-soft: rgba(220, 38, 38, 0.1);
+  --code-bg: #f3f4f6;
+  --scroll-thumb: rgba(17, 24, 39, 0.18);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  font-size: 13.5px;
+  line-height: 1.5;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+code,
+pre,
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom subtle scrollbars */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 999px;
+}
+
+/* Clean Markdown prose inside SmartOutput & tool descriptions */
+.wb-prose {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.wb-prose p {
+  margin: 0 0 0.75em;
+  white-space: pre-wrap;
+}
+
+.wb-prose p:last-child {
+  margin-bottom: 0;
+}
+
+.wb-prose h1,
+.wb-prose h2,
+.wb-prose h3 {
+  margin: 1em 0 0.45em;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.wb-prose h1:first-child,
+.wb-prose h2:first-child,
+.wb-prose h3:first-child {
+  margin-top: 0;
+}
+
+.wb-prose ul,
+.wb-prose ol {
+  margin: 0.4em 0 0.75em;
+  padding-left: 1.35em;
+}
+
+.wb-prose li {
+  margin: 0.25em 0;
+}
+
+.wb-prose pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border-hairline);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.wb-prose code {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-hairline);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+.wb-prose pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.wb-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  font-size: 12.5px;
+}
+
+.wb-prose th,
+.wb-prose td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.wb-prose blockquote {
+  margin: 0.6em 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--text-secondary);
+}

@@ -3,12 +3,12 @@
   "name": "io.github.slcc2c/mcp-jupyter",
   "title": "MCP Jupyter Server",
   "description": "Jupyter notebook inspection, export, and sandboxed kernel execution server",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.2.0",
+      "version": "2.3.0",
       "transport": {
         "type": "stdio"
       },

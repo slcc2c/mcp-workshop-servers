@@ -3,7 +3,7 @@
   "name": "io.github.slcc2c/mcp-workshop-gateway",
   "title": "MCP Workshop Stack Gateway",
   "description": "Unified FastMCP + FastAPI gateway composing MLflow, Unity Catalog, and core MCP tools",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -14,7 +14,7 @@
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.2.0",
+      "version": "2.3.0",
       "transport": {
         "type": "streamable-http"
       }

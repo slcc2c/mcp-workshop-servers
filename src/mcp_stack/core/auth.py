@@ -212,7 +212,10 @@ class GatewayAuthMiddleware:
             return
 
         path = scope.get("path", "")
-        if path in _EXEMPT_PATHS:
+        method = str(scope.get("method", "GET")).upper()
+        if path in _EXEMPT_PATHS or (
+            method in {"GET", "HEAD"} and (path == "/ui" or path.startswith("/ui/"))
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -230,7 +233,6 @@ class GatewayAuthMiddleware:
 
         client_policy: ClientPolicy | None = None
         auth_method = "open"
-        method = str(scope.get("method", "GET")).upper()
         if self._settings.gateway.effective_auth_enabled:
             if bearer_token:
                 client_policy = self._settings.gateway.clients.get(bearer_token)

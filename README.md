@@ -9,10 +9,10 @@ A modern Python 3.12 (`uv`) Model Context Protocol ecosystem built on **FastMCP 
 
 - **Unified Gateway (`:8090`)**: FastAPI + FastMCP Streamable HTTP gateway exposing:
   - `/mcp` — Full composed MCP endpoint across all enabled servers
-  - `/profiles/{core,data,ops,macos}/mcp` — Curated toolset profiles (`MCP_DEFAULT_CLIENT_PROFILE=core` default for Codex/Claude Code to keep context lean; override via `MCP_PROFILES_JSON`)
-  - `/servers/<slug>/mcp` — Isolated per-server Streamable HTTP endpoints
+  - `/profiles/{discover,core,data,ops,macos}/mcp` — Curated toolset profiles (`discover` offers lean 6-tool dynamic discovery & MLflow prompt bridging; `MCP_DEFAULT_CLIENT_PROFILE=core` default for Codex/Claude Code; override via `MCP_PROFILES_JSON`)
+  - `/servers/<slug>/mcp` — Isolated per-server Streamable HTTP endpoints (including `/servers/gateway/mcp` meta-tools & resources)
   - Zero-`307` path normalization on `/mcp`, `/profiles/<name>/mcp`, and `/servers/<slug>/mcp`
-  - `/ui` self-contained interactive Gateway Dashboard + `/health`, `/ready`, `/api/v1/{servers,profiles,tools,watchdog,traces}`, `/api/v1/actions/*`, and `/metrics` (Prometheus)
+  - `/ui` React + TypeScript + Vite Precision Control Plane (`mcp-stack ui build` / `mcp-stack ui open`) + `/health`, `/ready`, `/api/v1/{servers,profiles,tools,upstreams,clients,watchdog,traces}`, `/api/v1/actions/*`, and `/metrics` (Prometheus)
   - Pure ASGI Bearer auth (auto-enforced on non-loopback binds), client server allowlists, rate limiting, and `X-UC-Token` on-behalf-of passthrough
   - Fail-open MLflow 3.x `SpanType.TOOL` tracing middleware with native `update_current_trace()` context (`user`, `session_id`, `mcp.policy_refusal`), `LoggedModel` git-commit versioning, sensitive-key redaction, and a 60s circuit breaker
 - **Modern Data & AI Governance Servers**:

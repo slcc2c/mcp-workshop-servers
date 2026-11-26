@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 from collections.abc import AsyncIterator, Callable
@@ -15,13 +16,15 @@ from typing import Any
 import httpx
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from pydantic import SecretStr
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mcp_stack import __version__
-from mcp_stack.client_configs import generate_client_configs
+from mcp_stack.client_configs import generate_client_configs, verify_client_connection
 from mcp_stack.core.auth import (
     UI_SESSION_COOKIE,
     GatewayAuthMiddleware,
@@ -34,7 +37,14 @@ from mcp_stack.core.auth import (
     sign_ui_session,
     verify_ui_session,
 )
-from mcp_stack.core.config import ClientPolicy, MCPStackSettings
+from mcp_stack.core.config import (
+    ClientPolicy,
+    MCPStackSettings,
+    UpstreamServerConfig,
+    save_local_upstreams,
+    serialize_upstream_config,
+    validate_upstream_secret_refs,
+)
 from mcp_stack.core.logging import get_logger
 from mcp_stack.core.metrics import render_metrics
 from mcp_stack.core.secrets import SecretResolver
@@ -47,10 +57,14 @@ from mcp_stack.evals import (
     run_trace_evaluation,
     sync_golden_dataset,
 )
-from mcp_stack.gateway.dashboard import render_dashboard_html
+from mcp_stack.gateway.dashboard import get_static_dir, has_built_dashboard, render_dashboard_html
 from mcp_stack.gateway.upstreams import build_upstream_proxy, probe_upstream_proxy
 from mcp_stack.servers.docker_server import create_docker_server
 from mcp_stack.servers.filesystem import create_filesystem_server
+from mcp_stack.servers.gateway_meta import (
+    MLflowPromptRegistryProvider,
+    create_gateway_meta_server,
+)
 from mcp_stack.servers.github import create_github_server
 from mcp_stack.servers.jupyter_server import create_jupyter_server
 from mcp_stack.servers.kubernetes_server import create_kubernetes_server
@@ -186,19 +200,43 @@ def build_gateway_app(
         if adapter is not None:
             uc_adapter = adapter
 
+    meta_prompt_provider = MLflowPromptRegistryProvider(settings)
+    upstream_proxy: FastMCP | None = None
+    federated_proxies: dict[str, FastMCP] = {}
+    federated_meta: dict[str, dict[str, Any]] = {}
+    federated_cfg_map: dict[str, Any] = {}
+    server_inventory: list[dict[str, Any]] = []
+    profile_inventory: list[dict[str, Any]] = []
+
+    def _meta_state_snapshot() -> dict[str, Any]:
+        instances: dict[str, FastMCP] = {_slug_for(k): s for k, s in servers.items()}
+        if upstream_proxy is not None:
+            instances["mlflow-upstream"] = upstream_proxy
+        for fs, fp in federated_proxies.items():
+            instances[fs] = fp
+        return {
+            "servers": server_inventory,
+            "profiles": profile_inventory,
+            "server_instances": instances,
+            "settings": settings,
+        }
+
+    gateway_meta_server = create_gateway_meta_server(
+        settings,
+        _meta_state_snapshot,
+        prompt_provider=meta_prompt_provider,
+    )
+    servers["gateway"] = gateway_meta_server
+
     composed = FastMCP("mcp-workshop-gateway")
     for _key, srv in servers.items():
         composed.mount(srv)
 
-    upstream_proxy: FastMCP | None = None
     if settings.mlflow.proxy_upstream_mcp:
         factory = upstream_proxy_factory or create_mlflow_upstream_proxy
         upstream_proxy = factory(settings)
 
     secret_resolver = SecretResolver(settings.secrets)
-    federated_proxies: dict[str, FastMCP] = {}
-    federated_meta: dict[str, dict[str, Any]] = {}
-    federated_cfg_map: dict[str, Any] = {}
     for raw_up_name, up_cfg in settings.gateway.upstream_servers.items():
         proxy_srv, up_info = build_upstream_proxy(
             raw_up_name, up_cfg, settings, resolver=secret_resolver
@@ -236,7 +274,6 @@ def build_gateway_app(
     profile_http: dict[str, Any] = {}
     profile_wants_upstream: dict[str, bool] = {}
     profile_wants_federated: dict[str, list[str]] = {}
-    profile_inventory: list[dict[str, Any]] = []
 
     for profile_name, raw_members in effective_profiles.items():
         clean_profile = profile_name.strip()
@@ -394,7 +431,7 @@ def build_gateway_app(
             return find_client_by_id(settings, cid), "cookie"
         return None, "anonymous"
 
-    server_inventory: list[dict[str, Any]] = [
+    server_inventory.extend(
         {
             "key": key,
             "slug": _slug_for(key),
@@ -404,7 +441,7 @@ def build_gateway_app(
             "external": False,
         }
         for key in servers
-    ]
+    )
     if upstream_proxy is not None:
         server_inventory.append(
             {
@@ -503,7 +540,10 @@ def build_gateway_app(
 
     @app.get("/ui", response_class=HTMLResponse)
     async def dashboard_ui() -> HTMLResponse:
-        return HTMLResponse(content=render_dashboard_html(__version__))
+        return HTMLResponse(
+            content=render_dashboard_html(__version__),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.post("/api/v1/auth/login-link", response_model=None)
     async def ui_login_link_api(request: Request) -> dict[str, Any] | JSONResponse:
@@ -596,6 +636,7 @@ def build_gateway_app(
                 "allowedServers": ["*"],
                 "authMethod": "open",
                 "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+                "adminToolsEnabled": settings.gateway.admin_tools_enabled,
             }
         if policy is None:
             return {
@@ -606,6 +647,7 @@ def build_gateway_app(
                 "allowedServers": [],
                 "authMethod": "anonymous",
                 "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+                "adminToolsEnabled": settings.gateway.admin_tools_enabled,
             }
         return {
             "authenticated": True,
@@ -615,6 +657,7 @@ def build_gateway_app(
             "allowedServers": list(policy.allowed_servers),
             "authMethod": method,
             "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+            "adminToolsEnabled": settings.gateway.admin_tools_enabled,
         }
 
     @app.post("/api/v1/auth/logout")
@@ -1490,6 +1533,286 @@ def build_gateway_app(
                 content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
             )
 
+    @app.post("/api/v1/mlflow/prompts", response_model=None)
+    async def mlflow_prompt_create_api(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        if not settings.mlflow.allow_mutations:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "MLFLOW_MUTATIONS_DISABLED",
+                        "message": "Set MLFLOW_ALLOW_MUTATIONS=true to register or version prompts",
+                    }
+                },
+            )
+        body = payload if isinstance(payload, dict) else {}
+        name = str(body.get("name") or "").strip()
+        template = str(body.get("template") or "")
+        commit_msg = str(body.get("commitMessage") or "").strip()
+        alias = str(body.get("alias") or "").strip()
+        if not name or not template:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "code": "INVALID_REQUEST",
+                        "message": "Provide non-empty 'name' and 'template'",
+                    }
+                },
+            )
+
+        def _create() -> dict[str, Any]:
+            import mlflow
+            import mlflow.genai
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            pv = mlflow.genai.register_prompt(
+                name=name,
+                template=template,
+                commit_message=commit_msg or "Registered from Control Plane Workbench",
+            )
+            ver = getattr(pv, "version", None)
+            set_alias_fn = getattr(mlflow.genai, "set_prompt_alias", None)
+            if alias and ver is not None and callable(set_alias_fn):
+                set_alias_fn(name=name, alias=alias, version=int(ver))
+            meta_prompt_provider.invalidate_cache()
+            return {
+                "created": True,
+                "name": getattr(pv, "name", name),
+                "version": ver,
+                "alias": alias or None,
+                "template": getattr(pv, "template", template),
+                "commitMessage": getattr(pv, "commit_message", commit_msg),
+            }
+
+        try:
+            return await asyncio.to_thread(_create)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
+            )
+
+    def _local_upstreams_path() -> Path:
+        return Path(os.getenv("MCP_LOCAL_CONFIG_PATH") or "config/gateway.local.yaml")
+
+    def _serialize_upstream_item(raw_key: str, cfg: UpstreamServerConfig) -> dict[str, Any]:
+        slug = _slug_for(raw_key)
+        meta = dict(federated_meta.get(slug) or {})
+        safe_cfg = serialize_upstream_config(cfg)
+        return {
+            **safe_cfg,
+            "slug": slug,
+            "route": f"/servers/{slug}/mcp",
+            "connectionStatus": meta.get(
+                "connectionStatus", "disabled" if not cfg.enabled else "configured"
+            ),
+            "toolCount": meta.get("toolCount", 0),
+            "sampleTools": meta.get("sampleTools", []),
+            "missingEnv": meta.get("missingEnv", []),
+            "detail": meta.get("detail") or meta.get("error"),
+        }
+
+    def _parse_upstream_payload(body: dict[str, Any]) -> UpstreamServerConfig:
+        transport = str(body.get("transport") or "http").strip().lower()
+        if transport not in {"http", "stdio"}:
+            raise ValueError("transport must be 'http' or 'stdio'")
+        raw_headers = body.get("headers") or {}
+        raw_env = body.get("env") or {}
+        if not isinstance(raw_headers, dict) or not isinstance(raw_env, dict):
+            raise ValueError("headers and env must be JSON objects")
+        raw_args = body.get("args") or []
+        if isinstance(raw_args, str):
+            raw_args = [line for line in raw_args.splitlines() if line.strip()]
+        raw_profiles = body.get("profiles") or ["studio"]
+        if isinstance(raw_profiles, str):
+            raw_profiles = [p.strip() for p in raw_profiles.split(",") if p.strip()]
+        raw_cwd = str(body.get("cwd") or "").strip() or None
+        cfg = UpstreamServerConfig(
+            transport=transport,  # type: ignore[arg-type]
+            url=str(body.get("url") or "").strip() or None,
+            headers={str(k): SecretStr(str(v)) for k, v in raw_headers.items() if str(k).strip()},
+            command=str(body.get("command") or "").strip() or None,
+            args=[str(a) for a in raw_args],
+            cwd=Path(raw_cwd) if raw_cwd else None,
+            env={str(k): SecretStr(str(v)) for k, v in raw_env.items() if str(k).strip()},
+            enabled=bool(body.get("enabled", True)),
+            compose_into_full=bool(body.get("compose_into_full", True)),
+            profiles=[str(p).strip() for p in raw_profiles if str(p).strip()] or ["studio"],
+            timeout_s=float(body.get("timeout_s", 5.0)),
+            registry_name=str(body.get("registry_name") or "").strip() or None,
+            governance=str(body.get("governance") or "external-proxy").strip() or "external-proxy",
+            description=str(body.get("description") or "").strip(),
+        )
+        validate_upstream_secret_refs(cfg)
+        if cfg.transport == "http" and not cfg.url:
+            raise ValueError("url is required for http upstream")
+        if cfg.transport == "stdio" and not cfg.command:
+            raise ValueError("command is required for stdio upstream")
+        return cfg
+
+    async def _sync_upstream_runtime(slug: str, cfg: UpstreamServerConfig | None) -> dict[str, Any]:
+        nonlocal federated_meta, federated_proxies, federated_cfg_map
+        target_key = next(
+            (k for k in list(settings.gateway.upstream_servers.keys()) if _slug_for(k) == slug),
+            slug,
+        )
+        if cfg is None:
+            settings.gateway.upstream_servers.pop(target_key, None)
+            federated_proxies.pop(slug, None)
+            federated_meta.pop(slug, None)
+            federated_cfg_map.pop(slug, None)
+            server_inventory[:] = [
+                s for s in server_inventory if not (s.get("external") and s.get("slug") == slug)
+            ]
+            save_local_upstreams(_local_upstreams_path(), settings.gateway.upstream_servers)
+            return {"deleted": slug}
+
+        if target_key != slug and target_key in settings.gateway.upstream_servers:
+            settings.gateway.upstream_servers.pop(target_key, None)
+        settings.gateway.upstream_servers[slug] = cfg
+        save_local_upstreams(_local_upstreams_path(), settings.gateway.upstream_servers)
+
+        proxy_srv, up_info = build_upstream_proxy(
+            slug, cfg, settings, resolver=SecretResolver(settings.secrets)
+        )
+        federated_cfg_map[slug] = cfg
+        if proxy_srv is not None:
+            federated_proxies[slug] = proxy_srv
+            probe_res = await probe_upstream_proxy(proxy_srv, timeout_s=cfg.timeout_s)
+            up_info["connectionStatus"] = probe_res["connectionStatus"]
+            up_info["toolCount"] = probe_res.get("toolCount", 0)
+            up_info["sampleTools"] = probe_res.get("sampleTools", [])
+            if probe_res.get("error"):
+                up_info["error"] = probe_res["error"]
+        else:
+            federated_proxies.pop(slug, None)
+
+        federated_meta[slug] = up_info
+        existing_idx = next(
+            (
+                idx
+                for idx, s in enumerate(server_inventory)
+                if s.get("external") and s.get("slug") == slug
+            ),
+            None,
+        )
+        if existing_idx is not None:
+            server_inventory[existing_idx] = up_info
+        else:
+            server_inventory.append(up_info)
+        return _serialize_upstream_item(slug, cfg)
+
+    @app.get("/api/v1/upstreams")
+    async def list_upstreams_api() -> dict[str, Any]:
+        items = [
+            _serialize_upstream_item(k, cfg)
+            for k, cfg in settings.gateway.upstream_servers.items()
+        ]
+        return {"configPath": str(_local_upstreams_path()), "upstreams": items}
+
+    @app.post("/api/v1/upstreams", response_model=None)
+    async def create_upstream_api(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        body = payload if isinstance(payload, dict) else {}
+        slug = _slug_for(str(body.get("slug") or body.get("name") or ""))
+        if not slug:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_REQUEST", "message": "Provide 'slug'"}},
+            )
+        try:
+            cfg = _parse_upstream_payload(body)
+        except ValueError as exc:
+            code = "RAW_SECRET_REJECTED" if "raw secret" in str(exc) else "INVALID_REQUEST"
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": code, "message": str(exc)}},
+            )
+        item = await _sync_upstream_runtime(slug, cfg)
+        return {"upstream": item}
+
+    @app.put("/api/v1/upstreams/{slug}", response_model=None)
+    async def update_upstream_api(
+        slug: str,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        clean_slug = _slug_for(slug)
+        body = payload if isinstance(payload, dict) else {}
+        try:
+            cfg = _parse_upstream_payload(body)
+        except ValueError as exc:
+            code = "RAW_SECRET_REJECTED" if "raw secret" in str(exc) else "INVALID_REQUEST"
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": code, "message": str(exc)}},
+            )
+        item = await _sync_upstream_runtime(clean_slug, cfg)
+        return {"upstream": item}
+
+    @app.delete("/api/v1/upstreams/{slug}", response_model=None)
+    async def delete_upstream_api(slug: str) -> dict[str, Any] | JSONResponse:
+        clean_slug = _slug_for(slug)
+        if not any(_slug_for(k) == clean_slug for k in settings.gateway.upstream_servers):
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "UPSTREAM_NOT_FOUND",
+                        "message": f"Unknown '{clean_slug}'",
+                    }
+                },
+            )
+        return await _sync_upstream_runtime(clean_slug, None)
+
+    @app.post("/api/v1/upstreams/{slug}/probe", response_model=None)
+    async def probe_single_upstream_api(slug: str) -> dict[str, Any] | JSONResponse:
+        clean_slug = _slug_for(slug)
+        cfg = next(
+            (v for k, v in settings.gateway.upstream_servers.items() if _slug_for(k) == clean_slug),
+            None,
+        )
+        if cfg is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "UPSTREAM_NOT_FOUND",
+                        "message": f"Unknown '{clean_slug}'",
+                    }
+                },
+            )
+        item = await _sync_upstream_runtime(clean_slug, cfg)
+        return {"upstream": item}
+
+    @app.get("/api/v1/clients/configs")
+    async def client_configs_api(profile: str | None = None) -> dict[str, Any]:
+        selected = (
+            profile.strip()
+            if isinstance(profile, str) and profile.strip()
+            else settings.gateway.default_client_profile
+        )
+        configs = generate_client_configs(settings, repo_root=Path.cwd(), profile=selected)
+        return {
+            "defaultProfile": settings.gateway.default_client_profile,
+            "selectedProfile": selected,
+            "profiles": profile_inventory,
+            "configs": configs,
+        }
+
+    @app.post("/api/v1/clients/verify", response_model=None)
+    async def client_verify_api(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
+        body = payload if isinstance(payload, dict) else {}
+        client_name = str(body.get("client") or "codex").strip().lower()
+        raw_profile = body.get("profile")
+        prof = str(raw_profile).strip() if isinstance(raw_profile, str) and raw_profile else None
+        return await verify_client_connection(settings, client=client_name, profile=prof)
+
     @app.post("/api/v1/mlflow/models/{name}/alias", response_model=None)
     async def mlflow_model_alias_api(
         name: str,
@@ -1669,7 +1992,44 @@ def build_gateway_app(
             )
             elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
             blocks = getattr(tool_res, "content", None) or []
-            raw_text = "".join(str(getattr(b, "text", b)) for b in blocks)
+            content_blocks: list[dict[str, Any]] = []
+            text_parts: list[str] = []
+            for block in blocks:
+                b_type = getattr(block, "type", None)
+                b_text = getattr(block, "text", None)
+                b_data = getattr(block, "data", None)
+                b_mime = getattr(block, "mimeType", None)
+                if b_type == "image" or (isinstance(b_data, str) and isinstance(b_mime, str)):
+                    content_blocks.append(
+                        {
+                            "type": "image",
+                            "mimeType": str(b_mime or "image/png"),
+                            "data": str(b_data or "")[:5_000_000],
+                        }
+                    )
+                elif b_type == "resource" or getattr(block, "resource", None) is not None:
+                    res_obj = getattr(block, "resource", None) or block
+                    res_text = getattr(res_obj, "text", None)
+                    content_blocks.append(
+                        {
+                            "type": "resource",
+                            "uri": str(getattr(res_obj, "uri", "") or ""),
+                            "mimeType": getattr(res_obj, "mimeType", None),
+                            "text": str(res_text) if res_text is not None else None,
+                        }
+                    )
+                    if isinstance(res_text, str):
+                        text_parts.append(res_text)
+                elif b_text is not None:
+                    txt = str(b_text)
+                    content_blocks.append({"type": "text", "text": txt})
+                    text_parts.append(txt)
+                else:
+                    txt = str(block)
+                    content_blocks.append({"type": "text", "text": txt})
+                    text_parts.append(txt)
+
+            raw_text = "\n".join(text_parts)
             structured = getattr(tool_res, "structured_content", None)
             if not raw_text and structured is not None:
                 raw_text = json.dumps(structured, default=str)
@@ -1692,6 +2052,8 @@ def build_gateway_app(
                 "durationMs": elapsed_ms,
                 "truncated": truncated,
                 "result": parsed_out,
+                "structuredContent": structured,
+                "contentBlocks": content_blocks,
             }
         except ToolError as exc:
             elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
@@ -1722,6 +2084,24 @@ def build_gateway_app(
     async def metrics() -> Response:
         payload, content_type = render_metrics()
         return Response(content=payload, media_type=content_type)
+
+    if has_built_dashboard():
+        static_root = get_static_dir().resolve()
+        assets_dir = static_root / "assets"
+        if assets_dir.is_dir():
+            app.mount("/ui/assets", StaticFiles(directory=str(assets_dir)), name="ui-assets")
+
+    @app.get("/ui/{subpath:path}", response_model=None)
+    async def dashboard_ui_subpath(subpath: str) -> Response:
+        static_root = get_static_dir().resolve()
+        if subpath and has_built_dashboard(static_root):
+            candidate = (static_root / subpath).resolve()
+            if candidate.is_relative_to(static_root) and candidate.is_file():
+                return FileResponse(candidate)
+        return HTMLResponse(
+            content=render_dashboard_html(__version__, static_dir=static_root),
+            headers={"Cache-Control": "no-store"},
+        )
 
     app.mount("/mcp", composed_http)
     for slug, sub_http in per_server_http.items():

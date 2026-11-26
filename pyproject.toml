@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-workshop-stack"
-version = "2.2.0"
+version = "2.3.0"
 description = "Modern Python FastMCP + MLflow 3.x + Unity Catalog MCP Stack"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -57,6 +57,7 @@ mcp-stack = "mcp_stack.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_stack"]
+artifacts = ["src/mcp_stack/gateway/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

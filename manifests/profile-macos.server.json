@@ -3,7 +3,7 @@
   "name": "io.github.slcc2c/mcp-profile-macos",
   "title": "MCP Profile: Macos",
   "description": "Curated MCP toolset profile 'macos' (photos, xcodebuild, filesystem)",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "remotes": [
     {
       "type": "streamable-http",
@@ -14,7 +14,7 @@
     {
       "registryType": "pypi",
       "identifier": "mcp-workshop-stack",
-      "version": "2.2.0",
+      "version": "2.3.0",
       "transport": {
         "type": "streamable-http"
       }

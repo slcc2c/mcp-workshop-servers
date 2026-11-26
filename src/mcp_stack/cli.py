@@ -19,6 +19,7 @@ from mcp_stack.client_configs import (
     generate_client_configs,
     install_client_configs,
     install_shell_hook,
+    verify_client_connection,
     write_client_configs,
 )
 from mcp_stack.core.config import load_settings
@@ -249,19 +250,24 @@ def config_generate(
     target: str = typer.Option(
         "all",
         "--target",
-        help="Target client: all | claude-code | claude-desktop | codex | cursor",
+        help=(
+            "Target client: all | antigravity | claude-code | claude-desktop | "
+            "codex | cursor | gemini-cli"
+        ),
     ),
     write: bool = typer.Option(
         False, "--write", help="Write generated configuration files to the workspace"
     ),
     profile: str | None = typer.Option(
-        None, "--profile", help="Gateway toolset profile (core | data | ops | macos | full)"
+        None,
+        "--profile",
+        help="Gateway toolset profile (discover | core | studio | data | ops | macos | full)",
     ),
     repo_root: Path = typer.Option(
         Path("."), "--repo-root", help="Repository root for launcher paths"
     ),
 ) -> None:
-    """Generate MCP client configs for Claude Code, Claude Desktop, Codex, and Cursor."""
+    """Generate MCP client configs for Antigravity, Codex, Claude, Cursor, and Gemini CLI."""
     settings = load_settings()
     if write:
         written = write_client_configs(
@@ -283,10 +289,15 @@ def config_install(
     client: list[str] = typer.Option(
         ...,
         "--client",
-        help="Host client(s) to update with backup: codex | claude-code | claude-desktop",
+        help=(
+            "Host client(s) to update: antigravity | codex | claude-code | "
+            "claude-desktop | cursor | gemini-cli"
+        ),
     ),
     profile: str | None = typer.Option(
-        None, "--profile", help="Gateway toolset profile (core | data | ops | macos | full)"
+        None,
+        "--profile",
+        help="Gateway toolset profile (discover | core | studio | data | ops | macos | full)",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview targets without writing"),
     repo_root: Path = typer.Option(Path("."), "--repo-root", help="Repository root path"),
@@ -297,6 +308,28 @@ def config_install(
         settings, repo_root=repo_root, clients=client, profile=profile, dry_run=dry_run
     )
     typer.echo(json.dumps(res, indent=2))
+
+
+@config_app.command("verify")
+def config_verify(
+    client: str = typer.Option(
+        "codex",
+        "--client",
+        help="Client identity to test (antigravity | codex | claude-code | cursor | gemini-cli)",
+    ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help="Gateway toolset profile to probe (defaults to configured profile)",
+    ),
+) -> None:
+    """Perform a live Streamable HTTP MCP initialize + tools/list probe against the gateway."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = asyncio.run(verify_client_connection(settings, client=client, profile=profile))
+    typer.echo(json.dumps(res, indent=2))
+    if not res.get("ok"):
+        raise typer.Exit(code=1)
 
 
 @config_app.command("install-shell-hook")
@@ -522,6 +555,37 @@ def ui_open(
                 "url": login_url,
                 "client_id": data.get("clientId", chosen_id),
                 "expires_in_seconds": data.get("expiresInSeconds", 60),
+            },
+            indent=2,
+        )
+    )
+
+
+@ui_app.command("build")
+def ui_build(
+    web_dir: Path = typer.Option(Path("web"), "--web-dir", help="Frontend SPA workspace directory"),
+    install: bool = typer.Option(False, "--install", help="Run pnpm install before building"),
+) -> None:
+    """Build the React + Vite Control Plane SPA into src/mcp_stack/gateway/static."""
+    import subprocess
+
+    pnpm = shutil.which("pnpm")
+    if not pnpm:
+        typer.echo("pnpm is required to build the UI (`corepack enable pnpm`).", err=True)
+        raise typer.Exit(code=1)
+    if not web_dir.exists():
+        typer.echo(f"Frontend workspace not found: {web_dir}", err=True)
+        raise typer.Exit(code=1)
+
+    if install:
+        subprocess.run([pnpm, "--dir", str(web_dir), "install", "--frozen-lockfile"], check=True)
+    subprocess.run([pnpm, "--dir", str(web_dir), "build"], check=True)
+    static_dir = Path("src/mcp_stack/gateway/static")
+    typer.echo(
+        json.dumps(
+            {
+                "built": (static_dir / "index.html").exists(),
+                "output_dir": str(static_dir.resolve()),
             },
             indent=2,
         )

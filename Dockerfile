@@ -1,5 +1,18 @@
 # syntax=docker/dockerfile:1
 
+FROM node:22-slim AS web-builder
+
+WORKDIR /app
+
+RUN npm install -g pnpm@12.23.0
+
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./web/
+RUN pnpm --dir web install --frozen-lockfile
+
+COPY web ./web
+RUN pnpm --dir web build
+
+
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
@@ -9,6 +22,7 @@ WORKDIR /app
 
 COPY pyproject.toml .python-version README.md ./
 COPY src ./src
+COPY --from=web-builder /app/src/mcp_stack/gateway/static ./src/mcp_stack/gateway/static
 
 RUN uv sync --no-dev --no-editable
 

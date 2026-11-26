@@ -32,20 +32,26 @@ uv run mcp-stack eval run --experiment mcp-workshop-servers --limit 20
 uv run mcp-stack registry sync --dry-run
 uv run mcp-stack registry sync
 
-# Client config generation, live install & silent ~/.zshrc token hook (with backups)
+# Client config generation, live install, handshake probe & silent ~/.zshrc token hook (with backups)
 uv run mcp-stack config generate --target all --write
-uv run mcp-stack config install --client codex --client claude-code --client claude-desktop
+uv run mcp-stack config install --client codex --client claude-code --client antigravity
+uv run mcp-stack config verify --client codex --profile studio
 uv run mcp-stack config install-shell-hook
 
+# Build & open Precision Control Plane UI (web/ -> src/mcp_stack/gateway/static/)
+uv run mcp-stack ui build --install
+uv run mcp-stack ui open
+
 # Quality & tests
-uv run ruff check src tests
+uv run ruff check src tests scripts
 uv run mypy src
 uv run pytest -m "not live and not databricks" -v
+pnpm --dir web typecheck && pnpm --dir web lint && pnpm --dir web test && pnpm --dir web build
 ```
 
 ## Conventions & Guardrails
 - **Stdio cleanliness**: Never write logs to `stdout`. All logging goes to `sys.stderr` via `mcp_stack.core.logging`.
-- **Tool profiles & routing**: Curated `/profiles/{core,data,ops,macos}/mcp` routes (and full `/mcp`) normalize trailing slashes in ASGI without `307` redirects.
+- **Tool profiles & routing**: Curated `/profiles/{discover,core,data,ops,macos}/mcp` routes (and full `/mcp`) normalize trailing slashes in ASGI without `307` redirects.
 - **Safe defaults**: `UC_ALLOW_MUTATIONS=false` and `MLFLOW_ALLOW_MUTATIONS=false` by default; `UC_FUNCTION_ALLOWLIST` defaults to `unity.default,workshop.default`.
 - **Gateway auth**: Disabled on loopback (`127.0.0.1`/`localhost`) unless `MCP_AUTH_ENABLED=true`; automatically enforced on non-loopback binds (e.g., `0.0.0.0` in Docker).
 - **MLflow tracing**: Fail-open middleware with a 60s circuit breaker (`SpanType.TOOL` under `MLFLOW_EXPERIMENT_NAME`).
