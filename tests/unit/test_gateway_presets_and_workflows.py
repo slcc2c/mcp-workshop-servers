@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -11,11 +12,14 @@ import httpx
 import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
+from pydantic import SecretStr
 
 from mcp_stack.core.config import ClientPolicy
+from mcp_stack.core.secrets import CommandResult, SecretResolver
 from mcp_stack.core.tracing import last_trace_id_var
 from mcp_stack.gateway.app import build_gateway_app
 from mcp_stack.gateway.presets import PresetStore
+from mcp_stack.gateway.upstreams import probe_upstream_proxy, resolve_secret_mapping
 
 pytestmark = pytest.mark.unit
 
@@ -168,9 +172,12 @@ async def test_presets_rest_and_mcp_resource_plus_trace_id(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         ) as cli:
-            # Unauthenticated presets access rejected
+            # Unauthenticated presets access rejected, while /favicon.ico is public
             unauth = await cli.get("/api/v1/presets")
             assert unauth.status_code == 401
+            fav = await cli.get("/favicon.ico")
+            assert fav.status_code == 200
+            assert "image/svg+xml" in fav.headers["content-type"]
 
             health = await cli.get("/health")
             assert health.status_code == 200
@@ -239,3 +246,61 @@ async def test_presets_rest_and_mcp_resource_plus_trace_id(
 
     # Verify MLflowTracingMiddleware ContextVar does not leak outside call
     assert last_trace_id_var.get() is None
+
+
+def test_resolve_secret_mapping_prefixed_onepassword_with_spaces(make_settings) -> None:
+    settings = make_settings()
+    settings.secrets.onepassword_enabled = True
+    settings.secrets.onepassword_allowed_vaults = ["Server-Configurations"]
+
+    def _ok_runner(args: list[str]) -> CommandResult:
+        assert args == [
+            "op",
+            "read",
+            "op://Server-Configurations/Linear API Key/credential",
+        ]
+        return CommandResult(returncode=0, stdout="lin_demo_token_abc\n", stderr="")
+
+    ref = "Bearer op://Server-Configurations/Linear API Key/credential"
+    ok_resolver = SecretResolver(settings.secrets, runner=_ok_runner)
+    resolved, missing = resolve_secret_mapping(
+        {"Authorization": SecretStr(ref)},
+        ok_resolver,
+    )
+    assert resolved == {"Authorization": "Bearer lin_demo_token_abc"}
+    assert missing == []
+
+    def _missing_runner(_args: list[str]) -> CommandResult:
+        return CommandResult(returncode=1, stdout="", stderr="ERROR: item not found")
+
+    miss_resolver = SecretResolver(settings.secrets, runner=_missing_runner)
+    resolved2, missing2 = resolve_secret_mapping(
+        {"Authorization": SecretStr(ref)},
+        miss_resolver,
+    )
+    assert resolved2 == {}
+    assert len(missing2) == 1
+    assert "op://Server-Configurations/Linear API Key/credential" in missing2[0]
+
+    def _timeout_runner(_args: list[str]) -> CommandResult:
+        raise subprocess.TimeoutExpired(cmd=["op", "read"], timeout=10)
+
+    to_resolver = SecretResolver(settings.secrets, runner=_timeout_runner)
+    resolved3, missing3 = resolve_secret_mapping(
+        {"Authorization": SecretStr(ref)},
+        to_resolver,
+    )
+    assert resolved3 == {}
+    assert len(missing3) == 1
+    assert "op://Server-Configurations/Linear API Key/credential" in missing3[0]
+
+
+async def test_probe_upstream_proxy_includes_sample_tools() -> None:
+    class _FakeProxy:
+        async def list_tools(self):
+            return [types.SimpleNamespace(name=f"tool_{i}") for i in range(7)]
+
+    res = await probe_upstream_proxy(_FakeProxy(), timeout_s=1.0)
+    assert res["reachable"] is True
+    assert res["toolCount"] == 7
+    assert res["sampleTools"] == ["tool_0", "tool_1", "tool_2", "tool_3", "tool_4"]

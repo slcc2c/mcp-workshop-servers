@@ -374,6 +374,9 @@ def build_gateway_app(
                     meta_ref = federated_meta[f_slug]
                     meta_ref["connectionStatus"] = f_res["connectionStatus"]
                     meta_ref["toolCount"] = f_res.get("toolCount", 0)
+                    meta_ref["sampleTools"] = list(
+                        f_res.get("sampleTools") or f_res.get("tools", [])[:5]
+                    )
                     if f_res.get("error"):
                         meta_ref["error"] = f_res["error"]
                     if f_res.get("reachable"):
@@ -461,6 +464,20 @@ def build_gateway_app(
     for _fed_slug, meta in federated_meta.items():
         server_inventory.append(meta)
 
+    @app.get("/favicon.ico")
+    async def favicon() -> Response:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+            '<rect width="32" height="32" rx="7" fill="#0f172a"/>'
+            '<path d="M8 10h6v6H8zm10 0h6v6h-6zM8 20h6v6H8zm10 0h6v6h-6z" fill="#38bdf8"/>'
+            "</svg>"
+        )
+        return Response(
+            content=svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {
@@ -543,25 +560,29 @@ def build_gateway_app(
             "clientSnippets": generate_client_configs(settings, repo_root=Path.cwd()),
         }
 
-    def _is_trusted_tailnet_ui_request(request: Request) -> bool:
-        client_host = request.client.host if request.client else ""
+    _tailnet_v4 = ipaddress.ip_network("100.64.0.0/10")
+    _tailnet_v6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+
+    def _is_tailnet_or_loopback(raw_ip: str) -> bool:
         try:
-            client_ip = ipaddress.ip_address(client_host)
+            ip_obj = ipaddress.ip_address(raw_ip.strip())
         except ValueError:
             return False
-        if not client_ip.is_loopback:
-            return False
+        if ip_obj.is_loopback:
+            return True
+        if ip_obj.version == 4:
+            return ip_obj in _tailnet_v4
+        return ip_obj in _tailnet_v6
 
+    def _is_trusted_tailnet_ui_request(request: Request) -> bool:
+        client_host = request.client.host if request.client else ""
+        if not _is_tailnet_or_loopback(client_host):
+            return False
         xff = request.headers.get("x-forwarded-for", "").strip()
         if not xff:
             return True
-        first_hop = xff.split(",", 1)[0].strip()
-        try:
-            hop_ip = ipaddress.ip_address(first_hop)
-        except ValueError:
-            return False
-        tailnet_net = ipaddress.ip_network("100.64.0.0/10")
-        return hop_ip.is_loopback or (hop_ip.version == 4 and hop_ip in tailnet_net)
+        hops = [h.strip() for h in xff.split(",") if h.strip()]
+        return bool(hops) and all(_is_tailnet_or_loopback(h) for h in hops)
 
     @app.get("/ui", response_class=HTMLResponse)
     async def dashboard_ui(request: Request) -> HTMLResponse:

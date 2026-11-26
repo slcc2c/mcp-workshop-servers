@@ -92,6 +92,12 @@ export function OverviewView({
   const connectedCount = servers.filter((s) =>
     ["connected", "configured", "enabled"].includes((s.connectionStatus || s.status || "").toLowerCase()),
   ).length;
+  const authReqCount = servers.filter(
+    (s) => (s.connectionStatus || "").toLowerCase() === "auth_required",
+  ).length;
+  const downCount = servers.filter(
+    (s) => (s.connectionStatus || "").toLowerCase() === "unreachable",
+  ).length;
   const reg = watchdog?.evalRegression ?? watchdog?.eval_regression;
   const isRegression = reg?.status === "regression";
   const latestScore = reg?.min_score ?? evalHistory[0]?.min_score ?? evalHistory[0]?.minScore ?? null;
@@ -179,7 +185,14 @@ export function OverviewView({
             </span>
           </div>
           <div className="text-[11.5px] text-[var(--text-muted)]">
-            {servers.filter((s) => s.external).length} external proxies · /mcp active
+            {servers.filter((s) => s.external).length} external ·{" "}
+            {authReqCount > 0 ? (
+              <span className="text-[var(--warn)]">{authReqCount} auth needed</span>
+            ) : downCount > 0 ? (
+              <span className="text-[var(--err)]">{downCount} unreachable</span>
+            ) : (
+              <span>/mcp active</span>
+            )}
           </div>
         </div>
 
