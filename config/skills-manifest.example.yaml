@@ -1,0 +1,40 @@
+version: 1
+quarantine_root: ~/.local/share/mcp-stack/skill-quarantine
+
+sources:
+  personal:
+    path: ~/repos/shared-agent-skills/skills
+    kind: canonical-repo
+    owner: personal
+    include_all: true
+
+targets:
+  claude-code:
+    dir: ~/.claude/skills
+    sources: [personal]
+    ignore_names: [synced]
+  codex:
+    dir: ~/.codex/skills
+    sources: [personal]
+    ignore_names: [.system]
+  cursor:
+    dir: ~/.cursor/skills
+    sources: [personal]
+  antigravity-personal:
+    dir: ~/.gemini/config/plugins/migrated-settings/skills
+    sources: [personal]
+
+legacy_cleanup_roots:
+  - path: ~/.agents/skills
+    reason: "Legacy shared skills root superseded by canonical repo + symlinks"
+
+plugin_owned_skills:
+  - grilling
+  - pdf
+  - skill-creator
+
+alias_groups:
+  - id: grilling
+    names: [grilling, grill-me]
+    canonical_owner: plugin/builtin
+    recommendation: "Keep plugin/built-in grilling; quarantine user-dir copies."

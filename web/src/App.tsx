@@ -19,10 +19,12 @@ import { AuthModal } from "./components/AuthModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { Layout } from "./components/Layout";
 import { ShortcutsModal } from "./components/ShortcutsModal";
+import { ChatView } from "./views/ChatView";
 import { ClientsView } from "./views/ClientsView";
 import { OverviewView } from "./views/OverviewView";
 import { PlaygroundView } from "./views/PlaygroundView";
 import { RegistryView } from "./views/RegistryView";
+import { SkillsView } from "./views/SkillsView";
 import { TracesView } from "./views/TracesView";
 import { UpstreamsView } from "./views/UpstreamsView";
 
@@ -70,11 +72,13 @@ class WorkbenchErrorBoundary extends Component<
 
 const G_NAV_MAP: Record<string, NavTab> = {
   o: "overview",
+  a: "chat",
   p: "playground",
   t: "traces",
   r: "registry",
   u: "upstreams",
   c: "clients",
+  s: "skills",
 };
 
 export function App() {
@@ -118,6 +122,9 @@ export function App() {
   const [selectedPromptVersion, setSelectedPromptVersion] = useState<string | null>(
     initialUrlState.version || null,
   );
+  const [selectedChatSessionId, setSelectedChatSessionId] = useState<string | null>(
+    initialUrlState.session || null,
+  );
   const [replayRequest, setReplayRequest] = useState<PlaygroundReplayRequest | null>(null);
 
   const gChordActiveRef = useRef(false);
@@ -137,6 +144,7 @@ export function App() {
   useEffect(() => {
     syncWorkbenchUrl({
       tab: activeTab,
+      session: selectedChatSessionId,
       profile: profileFilter,
       server: serverFilter,
       tool: selectedToolKey,
@@ -146,6 +154,7 @@ export function App() {
     });
   }, [
     activeTab,
+    selectedChatSessionId,
     profileFilter,
     serverFilter,
     selectedToolKey,
@@ -159,6 +168,7 @@ export function App() {
     function onPopState() {
       const parsed = parseWorkbenchUrl(window.location);
       setActiveTab(parsed.tab);
+      setSelectedChatSessionId(parsed.session || null);
       if (parsed.profile !== undefined) setProfileFilter(parsed.profile || "");
       if (parsed.server !== undefined) setServerFilter(parsed.server || "");
       setSelectedToolKey(parsed.tool || null);
@@ -428,6 +438,15 @@ export function App() {
         />
       )}
 
+      {activeTab === "chat" && (
+        <ChatView
+          authenticated={auth.authenticated || !auth.authEnabled}
+          initialSessionId={selectedChatSessionId}
+          onSelectSessionId={setSelectedChatSessionId}
+          onInspectTrace={handleInspectTrace}
+        />
+      )}
+
       {activeTab === "playground" && (
         <PlaygroundView
           tools={tools}
@@ -482,6 +501,8 @@ export function App() {
       {activeTab === "upstreams" && <UpstreamsView onAfterChange={refreshAll} />}
 
       {activeTab === "clients" && <ClientsView profileCounts={profileCounts} />}
+
+      {activeTab === "skills" && <SkillsView />}
 
       <CommandPalette
         open={paletteOpen}

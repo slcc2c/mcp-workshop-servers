@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import os
 import sys
@@ -25,7 +24,11 @@ from pydantic import SecretStr
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mcp_stack import __version__
-from mcp_stack.client_configs import generate_client_configs, verify_client_connection
+from mcp_stack.client_configs import (
+    audit_client_configs,
+    generate_client_configs,
+    verify_client_connection,
+)
 from mcp_stack.core.auth import (
     UI_SESSION_COOKIE,
     GatewayAuthMiddleware,
@@ -35,6 +38,8 @@ from mcp_stack.core.auth import (
     caller_client_policy_var,
     find_client_by_id,
     is_server_allowed,
+    resolve_owner_ui_client,
+    resolve_trusted_ui_method,
     sign_ui_session,
     verify_ui_session,
 )
@@ -79,6 +84,7 @@ from mcp_stack.servers.mlflow_server import (
 )
 from mcp_stack.servers.mongodb import create_mongodb_server
 from mcp_stack.servers.neo4j_server import create_neo4j_server
+from mcp_stack.servers.omnigent import create_omnigent_server
 from mcp_stack.servers.photos import create_photos_server
 from mcp_stack.servers.postgresql import create_postgresql_server
 from mcp_stack.servers.redis_server import create_redis_server
@@ -88,6 +94,12 @@ from mcp_stack.servers.unity_catalog import (
     sync_uc_function_tools,
 )
 from mcp_stack.servers.xcodebuild import create_xcodebuild_server
+from mcp_stack.skills import (
+    audit_skills,
+    load_skills_manifest,
+    resolve_manifest_path,
+    sync_skills,
+)
 from mcp_stack.watchdog import (
     _EVAL_SCORE_KEYS,
     DEFAULT_LOG_PATH,
@@ -163,6 +175,8 @@ def build_server_instance(
         return create_jupyter_server(settings), None
     if normalized == "xcodebuild":
         return create_xcodebuild_server(settings), None
+    if normalized == "omnigent":
+        return create_omnigent_server(settings), None
     raise ValueError(f"Unknown MCP server '{server_key}'")
 
 
@@ -421,7 +435,7 @@ def build_gateway_app(
             max_age=settings.gateway.ui_session_ttl_s,
             path="/",
             httponly=True,
-            samesite="strict",
+            samesite="lax",
             secure=is_https,
         )
 
@@ -437,6 +451,23 @@ def build_gateway_app(
         if cid:
             return find_client_by_id(settings, cid), "cookie"
         return None, "anonymous"
+
+    def _maybe_mint_trusted_ui_session(
+        request: Request, response: Response
+    ) -> tuple[ClientPolicy | None, str | None]:
+        if not settings.gateway.effective_auth_enabled:
+            return None, None
+        client_host = request.client.host if request.client else ""
+        headers_lower = {k.lower(): v for k, v in request.headers.items()}
+        trusted_method = resolve_trusted_ui_method(client_host, headers_lower, settings)
+        if trusted_method is None:
+            return None, None
+        owner_cid, owner_policy = resolve_owner_ui_client(settings)
+        existing_cid = verify_ui_session(request.cookies.get(UI_SESSION_COOKIE), settings)
+        if not existing_cid:
+            session_val = sign_ui_session(owner_cid, settings)
+            _set_session_cookie(response, session_val, request)
+        return owner_policy, trusted_method
 
     server_inventory.extend(
         {
@@ -560,53 +591,13 @@ def build_gateway_app(
             "clientSnippets": generate_client_configs(settings, repo_root=Path.cwd()),
         }
 
-    _tailnet_v4 = ipaddress.ip_network("100.64.0.0/10")
-    _tailnet_v6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
-
-    def _is_tailnet_or_loopback(raw_ip: str) -> bool:
-        try:
-            ip_obj = ipaddress.ip_address(raw_ip.strip())
-        except ValueError:
-            return False
-        if ip_obj.is_loopback:
-            return True
-        if ip_obj.version == 4:
-            return ip_obj in _tailnet_v4
-        return ip_obj in _tailnet_v6
-
-    def _is_trusted_tailnet_ui_request(request: Request) -> bool:
-        client_host = request.client.host if request.client else ""
-        if not _is_tailnet_or_loopback(client_host):
-            return False
-        xff = request.headers.get("x-forwarded-for", "").strip()
-        if not xff:
-            return True
-        hops = [h.strip() for h in xff.split(",") if h.strip()]
-        return bool(hops) and all(_is_tailnet_or_loopback(h) for h in hops)
-
     @app.get("/ui", response_class=HTMLResponse)
     async def dashboard_ui(request: Request) -> HTMLResponse:
         resp = HTMLResponse(
             content=render_dashboard_html(__version__),
             headers={"Cache-Control": "no-store"},
         )
-        if (
-            settings.gateway.ui_trust_tailnet
-            and settings.gateway.effective_auth_enabled
-            and _is_trusted_tailnet_ui_request(request)
-        ):
-            existing_cid = verify_ui_session(request.cookies.get(UI_SESSION_COOKIE), settings)
-            if not existing_cid:
-                owner_cid = None
-                for pol in settings.gateway.clients.values():
-                    if pol.client_id == "codex":
-                        owner_cid = pol.client_id
-                        break
-                if owner_cid is None:
-                    first = next(iter(settings.gateway.clients.values()), None)
-                    owner_cid = first.client_id if first is not None else "local"
-                session_val = sign_ui_session(owner_cid, settings)
-                _set_session_cookie(resp, session_val, request)
+        _maybe_mint_trusted_ui_session(request, resp)
         return resp
 
     @app.post("/api/v1/auth/login-link", response_model=None)
@@ -691,8 +682,8 @@ def build_gateway_app(
         _set_session_cookie(resp, session_val, request)
         return resp
 
-    @app.get("/api/v1/auth/me")
-    async def ui_session_me(request: Request) -> dict[str, Any]:
+    @app.get("/api/v1/auth/me", response_model=None)
+    async def ui_session_me(request: Request) -> Response | dict[str, Any]:
         policy, method = _resolve_auth_identity(request)
         if not settings.gateway.effective_auth_enabled:
             return {
@@ -706,6 +697,26 @@ def build_gateway_app(
                 "adminToolsEnabled": settings.gateway.admin_tools_enabled,
             }
         if policy is None:
+            client_host = request.client.host if request.client else ""
+            headers_lower = {k.lower(): v for k, v in request.headers.items()}
+            trusted_method = resolve_trusted_ui_method(client_host, headers_lower, settings)
+            if trusted_method is not None:
+                owner_cid, owner_policy = resolve_owner_ui_client(settings)
+                if owner_policy is not None:
+                    resp = JSONResponse(
+                        {
+                            "authenticated": True,
+                            "authEnabled": True,
+                            "clientId": owner_policy.client_id,
+                            "clientName": owner_policy.client_name,
+                            "allowedServers": list(owner_policy.allowed_servers),
+                            "authMethod": trusted_method,
+                            "mlflowMutationsEnabled": settings.mlflow.allow_mutations,
+                            "adminToolsEnabled": settings.gateway.admin_tools_enabled,
+                        }
+                    )
+                    _maybe_mint_trusted_ui_session(request, resp)
+                    return resp
             return {
                 "authenticated": False,
                 "authEnabled": True,
@@ -1972,13 +1983,53 @@ def build_gateway_app(
             if isinstance(profile, str) and profile.strip()
             else settings.gateway.default_client_profile
         )
-        configs = generate_client_configs(settings, repo_root=Path.cwd(), profile=selected)
+        target_slugs: dict[str, FastMCP] = {
+            _slug_for(k): srv for k, srv in servers.items()
+        }
+        if upstream_proxy is not None:
+            target_slugs["mlflow-upstream"] = upstream_proxy
+        for fed_slug, fed_proxy in federated_proxies.items():
+            target_slugs[fed_slug] = fed_proxy
+
+        async def _gather_names(slug: str, srv: FastMCP) -> tuple[str, list[str]]:
+            t_out = federated_cfg_map[slug].timeout_s if slug in federated_cfg_map else 2.0
+            items = await _collect_tools_for_server(slug, srv, timeout_s=t_out)
+            return slug, sorted({str(t["name"]) for t in items if t.get("name")})
+
+        gathered = await asyncio.gather(
+            *(_gather_names(slug, srv) for slug, srv in target_slugs.items())
+        )
+        tool_catalog: dict[str, list[str]] = {
+            slug: names for slug, names in gathered if names
+        }
+        for prof in profile_inventory:
+            pname = str(prof.get("name") or "").strip()
+            if not pname:
+                continue
+            combined: set[str] = set()
+            for srv in prof.get("servers", []):
+                combined.update(tool_catalog.get(str(srv), ()))
+            if prof.get("includesUpstreamMcp"):
+                combined.update(tool_catalog.get("mlflow-upstream", ()))
+            if combined:
+                tool_catalog[f"profile:{pname}"] = sorted(combined)
+
+        configs = generate_client_configs(
+            settings,
+            repo_root=Path.cwd(),
+            profile=selected,
+            tool_catalog=tool_catalog,
+        )
         return {
             "defaultProfile": settings.gateway.default_client_profile,
             "selectedProfile": selected,
             "profiles": profile_inventory,
             "configs": configs,
         }
+
+    @app.get("/api/v1/clients/audit")
+    async def client_audit_api() -> dict[str, Any]:
+        return await asyncio.to_thread(audit_client_configs, settings)
 
     @app.post("/api/v1/clients/verify", response_model=None)
     async def client_verify_api(
@@ -1989,6 +2040,60 @@ def build_gateway_app(
         raw_profile = body.get("profile")
         prof = str(raw_profile).strip() if isinstance(raw_profile, str) and raw_profile else None
         return await verify_client_connection(settings, client=client_name, profile=prof)
+
+    @app.get("/api/v1/skills")
+    async def skills_audit_api() -> dict[str, Any]:
+        def _run() -> dict[str, Any]:
+            mpath = resolve_manifest_path(configured=settings.skills.manifest_path)
+            if not mpath.exists():
+                return {
+                    "available": False,
+                    "manifestPath": str(mpath),
+                    "error": f"Skills manifest not found: {mpath}",
+                }
+            manifest = load_skills_manifest(mpath)
+            report = audit_skills(manifest, repos_root=settings.skills.repos_root)
+            report["manifestPath"] = str(mpath)
+            return report
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception as exc:
+            return {"available": False, "error": str(exc)}
+
+    @app.post("/api/v1/actions/skills-sync", response_model=None)
+    async def skills_sync_api(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        body = payload if isinstance(payload, dict) else {}
+        dry_run = bool(body.get("dry_run", True))
+        quarantine_legacy = bool(body.get("quarantine_legacy", False))
+        raw_targets = body.get("targets")
+        targets = (
+            [str(t).strip() for t in raw_targets if str(t).strip()]
+            if isinstance(raw_targets, list)
+            else None
+        )
+
+        def _run() -> dict[str, Any]:
+            mpath = resolve_manifest_path(configured=settings.skills.manifest_path)
+            manifest = load_skills_manifest(mpath)
+            res = sync_skills(
+                manifest,
+                dry_run=dry_run,
+                quarantine_legacy=quarantine_legacy,
+                targets=targets,
+            )
+            res["manifestPath"] = str(mpath)
+            return res
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "SKILLS_SYNC_FAILED", "message": str(exc)}},
+            )
 
     @app.get("/api/v1/presets")
     async def presets_list_api() -> dict[str, Any]:
@@ -2353,16 +2458,18 @@ def build_gateway_app(
             app.mount("/ui/assets", StaticFiles(directory=str(assets_dir)), name="ui-assets")
 
     @app.get("/ui/{subpath:path}", response_model=None)
-    async def dashboard_ui_subpath(subpath: str) -> Response:
+    async def dashboard_ui_subpath(subpath: str, request: Request) -> Response:
         static_root = get_static_dir().resolve()
         if subpath and has_built_dashboard(static_root):
             candidate = (static_root / subpath).resolve()
             if candidate.is_relative_to(static_root) and candidate.is_file():
                 return FileResponse(candidate)
-        return HTMLResponse(
+        resp = HTMLResponse(
             content=render_dashboard_html(__version__, static_dir=static_root),
             headers={"Cache-Control": "no-store"},
         )
+        _maybe_mint_trusted_ui_session(request, resp)
+        return resp
 
     app.mount("/mcp", composed_http)
     for slug, sub_http in per_server_http.items():

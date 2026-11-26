@@ -2,15 +2,18 @@ import type { NavTab } from "../types";
 
 export const VALID_TABS = new Set<NavTab>([
   "overview",
+  "chat",
   "playground",
   "traces",
   "registry",
   "upstreams",
   "clients",
+  "skills",
 ]);
 
 export interface UrlWorkbenchState {
   tab: NavTab;
+  session?: string | null;
   tool?: string | null;
   server?: string | null;
   profile?: string | null;
@@ -32,8 +35,10 @@ export function parseWorkbenchUrl(loc: Pick<Location, "pathname" | "search" | "h
         : "overview";
 
   const params = new URLSearchParams(loc.search || "");
+  const session = params.get("session");
   return {
     tab,
+    ...(session !== null ? { session } : {}),
     tool: params.get("tool"),
     server: params.get("server"),
     profile: params.get("profile"),
@@ -48,7 +53,9 @@ export function buildWorkbenchUrl(state: UrlWorkbenchState): string {
   const basePath = state.tab === "overview" ? "/ui" : `/ui/${state.tab}`;
   const params = new URLSearchParams();
 
-  if (state.tab === "playground") {
+  if (state.tab === "chat") {
+    if (state.session) params.set("session", state.session);
+  } else if (state.tab === "playground") {
     if (state.profile) params.set("profile", state.profile);
     if (state.server) params.set("server", state.server);
     if (state.tool) params.set("tool", state.tool);

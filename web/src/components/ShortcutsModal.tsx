@@ -17,11 +17,13 @@ const SHORTCUT_GROUPS: Array<{
     title: "Navigation (press g then key)",
     items: [
       { keys: ["g", "o"], desc: "Overview" },
+      { keys: ["g", "a"], desc: "Omnigent Chat" },
       { keys: ["g", "p"], desc: "Tool Playground" },
       { keys: ["g", "t"], desc: "Traces & Evals" },
       { keys: ["g", "r"], desc: "MLflow Registry" },
       { keys: ["g", "u"], desc: "Upstreams" },
       { keys: ["g", "c"], desc: "Agents & Clients" },
+      { keys: ["g", "s"], desc: "Skills & Sync" },
     ],
   },
   {

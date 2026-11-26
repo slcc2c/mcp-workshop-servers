@@ -9,6 +9,7 @@ from mcp_stack.servers.mlflow_server import (
     create_mlflow_upstream_proxy,
     probe_mcp_http_endpoint,
 )
+from mcp_stack.servers.omnigent import create_omnigent_server
 from mcp_stack.servers.photos import create_photos_server
 from mcp_stack.servers.unity_catalog import create_unity_catalog_server, sync_uc_function_tools
 
@@ -19,6 +20,7 @@ __all__ = [
     "create_memory_server",
     "create_mlflow_server",
     "create_mlflow_upstream_proxy",
+    "create_omnigent_server",
     "create_photos_server",
     "create_unity_catalog_server",
     "probe_mcp_http_endpoint",

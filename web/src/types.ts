@@ -1,10 +1,12 @@
 export type NavTab =
   | "overview"
+  | "chat"
   | "playground"
   | "traces"
   | "registry"
   | "upstreams"
-  | "clients";
+  | "clients"
+  | "skills";
 
 export type ThemeMode = "dark" | "light";
 
@@ -329,4 +331,232 @@ export interface WatchdogResponse {
     failing_metrics?: Record<string, number>;
   };
   lastRun?: string;
+}
+
+export interface ClientAuditDuplicate {
+  client: string;
+  path: string;
+  server: string;
+  target: string;
+  reason: string;
+}
+
+export interface ClientAuditRepoShadow {
+  repo: string;
+  path: string;
+  server: string;
+  target: string;
+  reason: string;
+}
+
+export interface ClientAuditResponse {
+  clients: Array<{
+    client: string;
+    path: string;
+    exists: boolean;
+    error?: string | null;
+    servers: Array<{
+      name: string;
+      target: string;
+      shadowed: boolean;
+      reason: string;
+    }>;
+  }>;
+  duplicates: ClientAuditDuplicate[];
+  repoShadows: ClientAuditRepoShadow[];
+  summary: {
+    totalClients: number;
+    shadowedClientEntries: number;
+    repoShadows: number;
+  };
+}
+
+export interface SkillMatrixEntry {
+  name: string;
+  frontmatterName: string;
+  description: string;
+  sourceId: string;
+  sourceKind: string;
+  owner: string;
+  canonicalPath: string;
+  hash: string;
+  atelierManaged: boolean;
+  targets: Record<string, string>;
+}
+
+export interface SkillCollisionItem {
+  group: string;
+  kind: string;
+  names?: string[];
+  canonicalOwner?: string;
+  occurrences: Array<{
+    layer: string;
+    path: string;
+    origin?: string;
+  }>;
+  recommendation: string;
+}
+
+export interface SkillAuditResponse {
+  available: boolean;
+  manifestPath?: string;
+  error?: string;
+  summary?: {
+    canonicalSkills: number;
+    targets: number;
+    syncedLinks: number;
+    driftIssues: number;
+    collisions: number;
+    legacyItems: number;
+    repoDualCopies: number;
+    pluginSkills: number;
+  };
+  sourceWarnings?: string[];
+  skills?: SkillMatrixEntry[];
+  targets?: Record<
+    string,
+    {
+      dir: string;
+      exists: boolean;
+      expectedCount: number;
+      counts: Record<string, number>;
+      extraUnmanaged: string[];
+    }
+  >;
+  targetIssues?: Array<{
+    target: string;
+    skill: string;
+    status: string;
+    path: string;
+    detail: string;
+  }>;
+  collisions?: SkillCollisionItem[];
+  legacyItems?: Array<{
+    root: string;
+    skill: string;
+    path: string;
+    reason: string;
+  }>;
+  repoDualCopies?: Array<{
+    repo: string;
+    skill: string;
+    paths: string[];
+    allSymlinks: boolean;
+  }>;
+}
+
+export interface SkillSyncResponse {
+  dryRun: boolean;
+  quarantineLegacy: boolean;
+  quarantineBatch: string | null;
+  manifestFile: string | null;
+  manifestPath?: string;
+  sourceWarnings: string[];
+  actionCount: number;
+  quarantinedCount: number;
+  symlinkedCount: number;
+  actions: Array<Record<string, unknown>>;
+}
+
+export interface OmnigentHostSummary {
+  id: string;
+  name?: string | null;
+  status?: string | null;
+}
+
+export interface OmnigentStatus {
+  ok: boolean;
+  serverVersion?: string | null;
+  singleUser?: boolean;
+  onlineHosts: OmnigentHostSummary[];
+  unreadInboxCount: number;
+  automationsTotal: number;
+  automationsActive: number;
+  automationsPaused: number;
+  baseUrl?: string;
+  publicUrl?: string;
+  mutationsEnabled: boolean;
+}
+
+export interface OmnigentProject {
+  id: string;
+  name: string;
+  workspace?: string | null;
+  agentId?: string | null;
+  hostId?: string | null;
+  useWorktree?: boolean | null;
+  baseBranch?: string | null;
+  icon?: string | null;
+}
+
+export interface OmnigentSessionRow {
+  id: string;
+  title?: string | null;
+  status?: string | null;
+  agentName?: string | null;
+  projectId?: string | null;
+  workspace?: string | null;
+  pendingApprovals?: number;
+  archived?: boolean;
+  updatedAt?: number | null;
+  sessionUrl?: string | null;
+}
+
+export interface OmnigentMessage {
+  id?: string | null;
+  role?: string | null;
+  text: string;
+  createdAt?: number | null;
+}
+
+export interface OmnigentPendingElicitation {
+  id?: string;
+  elicitation_id?: string;
+  title?: string;
+  message?: string;
+  data?: {
+    elicitation_id?: string;
+    message?: string;
+    tool_name?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface OmnigentSessionDetail {
+  id: string;
+  title?: string | null;
+  status?: string | null;
+  agentName?: string | null;
+  llmModel?: string | null;
+  projectId?: string | null;
+  workspace?: string | null;
+  gitBranch?: string | null;
+  archived?: boolean;
+  pendingElicitations: OmnigentPendingElicitation[];
+  sessionUrl?: string | null;
+  recentMessages: OmnigentMessage[];
+}
+
+export interface OmnigentWorkflow {
+  id: string;
+  name: string;
+  description?: string | null;
+}
+
+export interface OmnigentInboxItem {
+  id: string;
+  status?: string | null;
+  kind?: string | null;
+  title?: string | null;
+  topic?: string | null;
+  bodyMd?: string | null;
+  sourceSessionId?: string | null;
+  createdAt?: number | null;
+}
+
+export interface OmnigentInboxResponse {
+  unreadCount: number;
+  items: OmnigentInboxItem[];
+  pendingApprovalSessions: OmnigentSessionRow[];
 }

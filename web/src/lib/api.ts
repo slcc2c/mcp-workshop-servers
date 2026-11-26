@@ -1,11 +1,14 @@
 import type {
   AuthState,
   CallToolResponse,
+  ClientAuditResponse,
   HealthResponse,
   PlaygroundPresetItem,
   PromptDetailResponse,
   ReadyResponse,
   RegistryResponse,
+  SkillAuditResponse,
+  SkillSyncResponse,
   ToolsResponse,
   TraceDetailResponse,
   TracesResponse,
@@ -231,5 +234,16 @@ export const api = {
     }>("/api/v1/clients/verify", {
       method: "POST",
       body: JSON.stringify({ client, ...(profile ? { profile } : {}) }),
+    }),
+  clientAudit: () => apiFetch<ClientAuditResponse>("/api/v1/clients/audit"),
+  skills: () => apiFetch<SkillAuditResponse>("/api/v1/skills"),
+  syncSkills: (opts?: { dry_run?: boolean; quarantine_legacy?: boolean; targets?: string[] }) =>
+    apiFetch<SkillSyncResponse>("/api/v1/actions/skills-sync", {
+      method: "POST",
+      body: JSON.stringify({
+        dry_run: opts?.dry_run ?? true,
+        quarantine_legacy: opts?.quarantine_legacy ?? false,
+        ...(opts?.targets ? { targets: opts.targets } : {}),
+      }),
     }),
 };
