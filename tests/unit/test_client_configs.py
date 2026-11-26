@@ -106,3 +106,18 @@ def test_build_omnigent_registry_payload_hybrid_and_cel_safe(make_settings) -> N
     assert by_id["mcp-core"]["url"] == "http://127.0.0.1:8090/profiles/core/mcp"
     assert validate_omnigent_registry_services(services) == []
     assert check_omnigent_cel_compatibility(services) == []
+
+
+def test_generate_client_configs_omits_direct_mlflow_when_in_profile(
+    make_settings, tmp_path: Path
+) -> None:
+    settings = make_settings()
+    core_rendered = generate_client_configs(settings, tmp_path, profile="core")
+    cc_core = json.loads(core_rendered["claude-code"])
+    assert "mlflow" not in cc_core["mcpServers"]
+    assert "[mcp_servers.mlflow]" not in core_rendered["codex"]
+
+    ops_rendered = generate_client_configs(settings, tmp_path, profile="ops")
+    cc_ops = json.loads(ops_rendered["claude-code"])
+    assert "mlflow" in cc_ops["mcpServers"]
+    assert "[mcp_servers.mlflow]" in ops_rendered["codex"]

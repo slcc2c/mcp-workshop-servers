@@ -158,3 +158,23 @@ def test_audit_and_prune_duplicates_plus_omnigent_install(
     omni_ids = [s["id"] for s in omni_loaded["services"]]
     assert "printer" in omni_ids
     assert "custom-external" in omni_ids
+
+    # Project-scoped JSONL memory override in repo is NOT flagged as shadowed
+    repo_mcp = tmp_path / "repos/Music-brain/.mcp.json"
+    repo_mcp.parent.mkdir(parents=True, exist_ok=True)
+    repo_mcp.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "memory": {
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-memory"],
+                        "env": {"MEMORY_FILE_PATH": "/tmp/music-brain.jsonl"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    audit_post = audit_client_configs(settings, home_dir=home, repos_root=tmp_path / "repos")
+    assert audit_post["summary"]["repoShadows"] == 0

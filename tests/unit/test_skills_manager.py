@@ -165,3 +165,60 @@ def test_promote_skill_copies_into_canonical_and_updates_manifest(tmp_path: Path
     assert (home / ".codex/skills/tdd").is_symlink()
     updated = load_skills_manifest(mpath)
     assert "tdd" in updated.sources["atelier-personal"].skills
+
+
+def test_disabled_plugins_filtered_and_repo_dual_skills_deduped(tmp_path: Path) -> None:
+    from mcp_stack.skills import dedupe_repo_dual_skills
+
+    home, mpath = _setup_fixture_home(tmp_path)
+
+    # Disabled Claude & Codex plugins must NOT generate collisions
+    claude_plug_dir = home / ".claude/plugins/cache/mattpocock/1.0/skills/grill-me"
+    _write_skill(claude_plug_dir.parent, "grill-me", "disabled plugin grill-me")
+    (home / ".claude/plugins/installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "mattpocock-skills@claude-plugins-official": [
+                        {"installPath": str(claude_plug_dir.parents[1])}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (home / ".claude/settings.json").write_text(
+        json.dumps({"enabledPlugins": {"mattpocock-skills@claude-plugins-official": False}}),
+        encoding="utf-8",
+    )
+
+    codex_plug_dir = home / ".codex/plugins/cache/claude-cowork/mlflow/skills/mlflow-agent"
+    _write_skill(codex_plug_dir.parent, "mlflow-agent", "disabled codex mlflow")
+    (home / ".codex/config.toml").write_text(
+        '[plugins."mlflow@claude-cowork"]\nenabled = false\n',
+        encoding="utf-8",
+    )
+
+    manifest = load_skills_manifest(mpath)
+    report = audit_skills(manifest, home_dir=home, repos_root=home / "repos")
+    plugin_origins = {p["origin"] for p in report["pluginSkills"]}
+    assert "mattpocock-skills@claude-plugins-official" not in plugin_origins
+    assert "claude-cowork/mlflow" not in plugin_origins
+
+    # Diverged repo dual copy is skipped; identical repo dual copy becomes relative symlink
+    _write_skill(home / "repos/sample_repo/.agents/skills", "diverged-skill", "one")
+    _write_skill(home / "repos/sample_repo/.claude/skills", "diverged-skill", "two")
+
+    dedupe = dedupe_repo_dual_skills(
+        home / "repos",
+        repo_names=["sample_repo"],
+        quarantine_root=home / ".local/share/mcp-stack/skill-quarantine",
+        dry_run=False,
+        home_dir=home,
+    )
+    assert dedupe["dedupedCount"] == 1
+    assert dedupe["skippedDivergedCount"] == 1
+    link = home / "repos/sample_repo/.claude/skills/grill-me"
+    assert link.is_symlink()
+    assert str(link.readlink()) == "../../.agents/skills/grill-me"
+    assert Path(dedupe["manifestFile"]).exists()
