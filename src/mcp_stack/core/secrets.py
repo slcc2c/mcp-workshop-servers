@@ -36,15 +36,25 @@ CommandRunner = Callable[[list[str]], CommandResult]
 
 
 def _default_runner(args: list[str]) -> CommandResult:
-    proc = subprocess.run(
-        args,
-        shell=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+    try:
+        proc = subprocess.run(
+            args,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return CommandResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+    except subprocess.TimeoutExpired:
+        return CommandResult(
+            returncode=124,
+            stdout="",
+            stderr="1Password CLI timed out (unlock 1Password or set OP_SERVICE_ACCOUNT_TOKEN)",
+        )
+    except OSError as exc:
+        return CommandResult(returncode=127, stdout="", stderr=str(exc))
 
 
 class SecretResolver:
@@ -111,7 +121,10 @@ class SecretResolver:
             if now < expires_at:
                 return cached_val
 
-        result = self._runner([self._settings.onepassword_cli, "read", ref])
+        try:
+            result = self._runner([self._settings.onepassword_cli, "read", ref])
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise SecretResolutionError(f"1Password CLI failed for {ref}: {exc}") from exc
         if result.returncode != 0:
             stderr = result.stderr.strip() or "unknown error"
             lowered = stderr.lower()

@@ -1,22 +1,77 @@
-import { useCallback, useEffect, useState } from "react";
-import { ExternalLink, Filter, RotateCcw, ThumbsDown, ThumbsUp, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  Filter,
+  Maximize2,
+  Minimize2,
+  Play,
+  RotateCcw,
+  ThumbsDown,
+  ThumbsUp,
+  X,
+} from "lucide-react";
 import { api } from "../lib/api";
-import { formatDuration, normalizeMultilineText } from "../lib/format";
-import type { TracesResponse, TraceDetailResponse } from "../types";
+import { formatDuration } from "../lib/format";
+import type {
+  PlaygroundReplayRequest,
+  TraceDetailResponse,
+  TracesResponse,
+} from "../types";
 import { CopyButton } from "../components/CopyButton";
+import { SmartValueView } from "../components/SmartOutput";
+import { SpanWaterfall } from "../components/SpanWaterfall";
 import { StatusBadge } from "../components/StatusDot";
 
-function formatPayloadPreview(val: unknown): string {
-  if (val === null || val === undefined) return "—";
-  if (typeof val === "string") return normalizeMultilineText(val);
-  try {
-    return JSON.stringify(val, null, 2);
-  } catch {
-    return String(val);
+function extractReplayPayload(
+  detail: TraceDetailResponse | null,
+): Omit<PlaygroundReplayRequest, "nonce"> | null {
+  if (!detail) return null;
+  const spans = detail.spans || [];
+  const rootSpan = spans.find((s) => !s.parentId) || spans[0];
+  let server = detail.server || "";
+  let tool = detail.tool || "";
+
+  if ((!server || !tool) && rootSpan?.attributes) {
+    server = server || String(rootSpan.attributes["mcp.server"] || "");
+    tool = tool || String(rootSpan.attributes["mcp.tool"] || "");
   }
+  if ((!server || !tool) && rootSpan?.name && rootSpan.name.includes(".")) {
+    const [candS, candT] = rootSpan.name.split(".", 2);
+    server = server || candS;
+    tool = tool || candT;
+  }
+  if (!server || !tool) return null;
+
+  let args: Record<string, unknown> = {};
+  const rawInputs = rootSpan?.inputs;
+  if (rawInputs && typeof rawInputs === "object" && !Array.isArray(rawInputs)) {
+    args = rawInputs as Record<string, unknown>;
+  } else if (typeof rawInputs === "string") {
+    try {
+      const parsed = JSON.parse(rawInputs);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        args = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // ignore non-JSON input strings
+    }
+  }
+  return { server, tool, arguments: args };
 }
 
-export function TracesView() {
+export function TracesView({
+  initialTraceId = null,
+  mlflowUiBase = "http://localhost:5002",
+  onSelectTraceId,
+  onReplayInPlayground,
+}: {
+  initialTraceId?: string | null;
+  mlflowUiBase?: string;
+  onSelectTraceId?: (traceId: string | null) => void;
+  onReplayInPlayground?: (req: Omit<PlaygroundReplayRequest, "nonce">) => void;
+}) {
   const [experiment, setExperiment] = useState("");
   const [server, setServer] = useState("");
   const [user, setUser] = useState("");
@@ -30,8 +85,11 @@ export function TracesView() {
   const [err, setErr] = useState<string | null>(null);
 
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const lastOpenedRef = useRef<string | null>(null);
   const [detail, setDetail] = useState<TraceDetailResponse | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [drawerWide, setDrawerWide] = useState(false);
+  const [focusedSpanId, setFocusedSpanId] = useState<string | null>(null);
   const [curationMsg, setCurationMsg] = useState<string | null>(null);
   const [expectVal, setExpectVal] = useState("");
   const [tagKey, setTagKey] = useState("triage");
@@ -63,20 +121,85 @@ export function TracesView() {
     fetchTraces();
   }, [fetchTraces]);
 
-  async function openTrace(traceId: string) {
-    setSelectedTraceId(traceId);
-    setDetail(null);
-    setDetailLoading(true);
-    setCurationMsg(null);
-    try {
-      const d = await api.traceDetail(traceId, data?.experimentId);
-      setDetail(d);
-    } catch (e) {
-      setCurationMsg(e instanceof Error ? e.message : String(e));
-    } finally {
-      setDetailLoading(false);
+  const openTrace = useCallback(
+    async (traceId: string) => {
+      lastOpenedRef.current = traceId;
+      setSelectedTraceId(traceId);
+      onSelectTraceId?.(traceId);
+      setDetail(null);
+      setFocusedSpanId(null);
+      setDetailLoading(true);
+      setCurationMsg(null);
+      try {
+        const d = await api.traceDetail(traceId, data?.experimentId);
+        setDetail(d);
+      } catch (e) {
+        setCurationMsg(e instanceof Error ? e.message : String(e));
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [data?.experimentId, onSelectTraceId],
+  );
+
+  const closeTrace = useCallback(() => {
+    lastOpenedRef.current = null;
+    setSelectedTraceId(null);
+    onSelectTraceId?.(null);
+  }, [onSelectTraceId]);
+
+  useEffect(() => {
+    if (initialTraceId && initialTraceId !== lastOpenedRef.current) {
+      openTrace(initialTraceId);
+    } else if (!initialTraceId && lastOpenedRef.current) {
+      lastOpenedRef.current = null;
+      setSelectedTraceId(null);
     }
-  }
+  }, [initialTraceId, openTrace]);
+
+  const tracesList = useMemo(() => data?.traces || [], [data]);
+  const currentTraceIndex = useMemo(() => {
+    if (!selectedTraceId) return -1;
+    return tracesList.findIndex((t) => t.traceId === selectedTraceId);
+  }, [tracesList, selectedTraceId]);
+
+  const stepTrace = useCallback(
+    (delta: number) => {
+      if (currentTraceIndex < 0 || tracesList.length === 0) return;
+      const nextIdx = currentTraceIndex + delta;
+      if (nextIdx >= 0 && nextIdx < tracesList.length) {
+        openTrace(tracesList[nextIdx].traceId);
+      }
+    },
+    [currentTraceIndex, tracesList, openTrace],
+  );
+
+  // Keyboard stepping inside drawer: j / k / Esc
+  useEffect(() => {
+    if (!selectedTraceId) return;
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase() || "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
+        if (e.key === "Escape") {
+          target?.blur();
+        }
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeTrace();
+      } else if (e.key === "j") {
+        e.preventDefault();
+        stepTrace(1);
+      } else if (e.key === "k") {
+        e.preventDefault();
+        stepTrace(-1);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedTraceId, closeTrace, stepTrace]);
 
   async function runCuration(fn: () => Promise<Record<string, unknown>>, label: string) {
     setCurationMsg(`Saving ${label}...`);
@@ -94,6 +217,7 @@ export function TracesView() {
 
   const evalRuns = data?.evalRuns || data?.evalHistory || [];
   const expId = data?.experimentId || "";
+  const replayCandidate = useMemo(() => extractReplayPayload(detail), [detail]);
 
   return (
     <div className="space-y-4">
@@ -102,12 +226,12 @@ export function TracesView() {
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h2 className="text-[13.5px] font-semibold m-0">Eval Run History & Regression Guard</h2>
           <a
-            href="http://localhost:5002"
+            href={mlflowUiBase}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-[12px] text-[var(--accent)] hover:underline"
           >
-            Open MLflow UI (:5002) <ExternalLink className="w-3.5 h-3.5" />
+            Open MLflow UI <ExternalLink className="w-3.5 h-3.5" />
           </a>
         </div>
 
@@ -126,13 +250,14 @@ export function TracesView() {
               <tbody className="divide-y divide-[var(--border-hairline)]">
                 {evalRuns.slice(0, 6).map((run, idx) => {
                   const runId = run.run_id ?? run.runId ?? "";
-                  const runName = run.run_name ?? run.runName ?? (runId ? runId.slice(0, 12) : `run-${idx + 1}`);
+                  const runName =
+                    run.run_name ?? run.runName ?? (runId ? runId.slice(0, 12) : `run-${idx + 1}`);
                   const rawMin = run.min_score ?? run.minScore;
                   const minScore = typeof rawMin === "number" ? rawMin : null;
                   const runHref =
                     expId && runId
-                      ? `http://localhost:5002/#/experiments/${encodeURIComponent(expId)}/runs/${encodeURIComponent(runId)}`
-                      : "http://localhost:5002";
+                      ? `${mlflowUiBase}/#/experiments/${encodeURIComponent(expId)}/runs/${encodeURIComponent(runId)}`
+                      : mlflowUiBase;
                   return (
                     <tr key={runId || idx}>
                       <td className="py-2.5 pr-3 whitespace-nowrap">
@@ -177,7 +302,7 @@ export function TracesView() {
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h2 className="text-[13.5px] font-semibold m-0">MLflow Traces & Span Drilldown</h2>
           <span className="text-[12px] text-[var(--text-muted)] tabular-nums">
-            {(data?.traces || []).length} traces shown
+            {tracesList.length} traces shown
           </span>
         </div>
 
@@ -262,10 +387,11 @@ export function TracesView() {
           </select>
 
           <input
+            data-shortcut-search="true"
             type="search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search trace, span, tool..."
+            placeholder="Search trace, span, tool... (/)"
             className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[12px] min-w-[200px]"
           />
 
@@ -315,31 +441,34 @@ export function TracesView() {
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-hairline)]">
-              {loading && (data?.traces || []).length === 0 ? (
+              {loading && tracesList.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-6 text-center text-[var(--text-muted)]">
                     Loading traces...
                   </td>
                 </tr>
-              ) : (data?.traces || []).length === 0 ? (
+              ) : tracesList.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="py-6 text-center text-[var(--text-muted)]">
                     No matching traces found.
                   </td>
                 </tr>
               ) : (
-                (data?.traces || []).map((tr) => {
+                tracesList.map((tr) => {
                   const outcome = tr.policyRefusal ? "policy_refusal" : tr.state || "OK";
                   const tone = tr.policyRefusal ? "warn" : tr.state === "OK" ? "ok" : "err";
                   const label =
                     tr.server && tr.tool
                       ? `${tr.server}.${tr.tool}`
                       : tr.name || tr.spanName || tr.tool || "—";
+                  const isActive = tr.traceId === selectedTraceId;
                   return (
                     <tr
                       key={tr.traceId}
                       onClick={() => openTrace(tr.traceId)}
-                      className="cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
+                      className={`cursor-pointer transition-colors ${
+                        isActive ? "bg-[var(--accent-soft)]" : "hover:bg-[var(--bg-hover)]"
+                      }`}
                     >
                       <td className="py-2.5 pr-3 font-mono text-[11.5px] text-[var(--accent)] whitespace-nowrap">
                         {tr.traceId}
@@ -368,26 +497,90 @@ export function TracesView() {
         </div>
       </section>
 
-      {/* Slide-Over Span Inspector Drawer */}
+      {/* Upgraded Slide-Over Span Inspector Drawer */}
       {selectedTraceId && (
         <div
           className="fixed inset-0 z-50 flex justify-end bg-black/55 backdrop-blur-xs"
-          onClick={() => setSelectedTraceId(null)}
+          onClick={closeTrace}
         >
           <div
-            className="w-full max-w-2xl h-full bg-[var(--bg-surface)] border-l border-[var(--border-strong)] shadow-2xl flex flex-col"
+            role="dialog"
+            aria-label="Trace Inspector Drawer"
+            className={`w-full h-full bg-[var(--bg-surface)] border-l border-[var(--border-strong)] shadow-2xl flex flex-col transition-all ${
+              drawerWide ? "max-w-5xl" : "max-w-2xl"
+            }`}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="px-5 py-4 border-b border-[var(--border-hairline)] flex items-center justify-between gap-3">
+            <div className="px-5 py-3.5 border-b border-[var(--border-hairline)] flex items-center justify-between gap-3 flex-wrap">
               <div className="min-w-0">
-                <div className="text-[11.5px] text-[var(--text-muted)]">Trace Inspector</div>
+                <div className="text-[11px] text-[var(--text-muted)] flex items-center gap-2">
+                  <span>Trace Inspector</span>
+                  {detail && (
+                    <StatusBadge
+                      label={`${detail.policyRefusal ? "policy_refusal" : detail.state} · ${formatDuration(detail.durationMs)}`}
+                      tone={detail.policyRefusal ? "warn" : detail.state === "OK" ? "ok" : "err"}
+                    />
+                  )}
+                </div>
                 <div className="font-mono text-[13px] font-semibold truncate">{selectedTraceId}</div>
               </div>
-              <div className="flex items-center gap-2">
-                <CopyButton text={selectedTraceId} label="Copy ID" compact />
+
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {replayCandidate && onReplayInPlayground && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      closeTrace();
+                      onReplayInPlayground(replayCandidate);
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[var(--accent)] text-white text-[12px] font-medium cursor-pointer"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                    Replay in Playground
+                  </button>
+                )}
+
                 <button
                   type="button"
-                  onClick={() => setSelectedTraceId(null)}
+                  disabled={currentTraceIndex <= 0}
+                  onClick={() => stepTrace(-1)}
+                  title="Previous trace (k)"
+                  aria-label="Previous trace"
+                  className="p-1.5 rounded-md border border-[var(--border-hairline)] hover:bg-[var(--bg-hover)] disabled:opacity-40 cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  disabled={currentTraceIndex < 0 || currentTraceIndex >= tracesList.length - 1}
+                  onClick={() => stepTrace(1)}
+                  title="Next trace (j)"
+                  aria-label="Next trace"
+                  className="p-1.5 rounded-md border border-[var(--border-hairline)] hover:bg-[var(--bg-hover)] disabled:opacity-40 cursor-pointer"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setDrawerWide((w) => !w)}
+                  title={drawerWide ? "Compact width" : "Expand drawer"}
+                  aria-label="Toggle drawer width"
+                  className="p-1.5 rounded-md border border-[var(--border-hairline)] hover:bg-[var(--bg-hover)] cursor-pointer"
+                >
+                  {drawerWide ? (
+                    <Minimize2 className="w-3.5 h-3.5" />
+                  ) : (
+                    <Maximize2 className="w-3.5 h-3.5" />
+                  )}
+                </button>
+
+                <CopyButton text={selectedTraceId} label="Copy ID" compact />
+
+                <button
+                  type="button"
+                  onClick={closeTrace}
+                  aria-label="Close trace drawer"
                   className="p-1.5 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] cursor-pointer"
                 >
                   <X className="w-4 h-4" />
@@ -400,6 +593,68 @@ export function TracesView() {
                 <div className="text-[13px] text-[var(--text-muted)]">Loading spans...</div>
               ) : (
                 <>
+                  {/* Existing Tags & Assessments */}
+                  {detail &&
+                    ((detail.tags && Object.keys(detail.tags).length > 0) ||
+                      (detail.assessments && detail.assessments.length > 0)) && (
+                      <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-3.5 space-y-3">
+                        {detail.assessments && detail.assessments.length > 0 && (
+                          <div className="space-y-1.5" data-testid="trace-assessments">
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                              Assessments & Reviews
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {detail.assessments.map((a, idx) => {
+                                const valStr =
+                                  typeof a.value === "string"
+                                    ? a.value
+                                    : JSON.stringify(a.value);
+                                return (
+                                  <div
+                                    key={idx}
+                                    className="px-2.5 py-1 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] text-[11.5px] space-y-0.5"
+                                  >
+                                    <div className="font-mono">
+                                      <span className="text-[var(--text-muted)]">
+                                        {String(a.kind || "assessment")} ·{" "}
+                                      </span>
+                                      <span className="font-semibold">
+                                        {String(a.name || "review")}
+                                      </span>
+                                      : <span className="text-[var(--accent)]">{valStr}</span>
+                                    </div>
+                                    {Boolean(a.rationale) && (
+                                      <div className="text-[11px] text-[var(--text-secondary)]">
+                                        {String(a.rationale)}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {detail.tags && Object.keys(detail.tags).length > 0 && (
+                          <div className="space-y-1.5" data-testid="trace-tags">
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                              Tags
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {Object.entries(detail.tags).map(([k, v]) => (
+                                <span
+                                  key={k}
+                                  className="px-2 py-0.5 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] font-mono text-[11px]"
+                                >
+                                  {k}={v}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                   {/* Curation Bar */}
                   <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-subtle)] p-3.5 space-y-3">
                     <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -408,7 +663,11 @@ export function TracesView() {
                           type="button"
                           onClick={() =>
                             runCuration(
-                              () => api.logFeedback(selectedTraceId, { name: "human_review", value: true }),
+                              () =>
+                                api.logFeedback(selectedTraceId, {
+                                  name: "human_review",
+                                  value: true,
+                                }),
                               "thumbs up",
                             )
                           }
@@ -421,7 +680,11 @@ export function TracesView() {
                           type="button"
                           onClick={() =>
                             runCuration(
-                              () => api.logFeedback(selectedTraceId, { name: "human_review", value: false }),
+                              () =>
+                                api.logFeedback(selectedTraceId, {
+                                  name: "human_review",
+                                  value: false,
+                                }),
                               "thumbs down",
                             )
                           }
@@ -434,7 +697,10 @@ export function TracesView() {
                       <button
                         type="button"
                         onClick={() =>
-                          runCuration(() => api.promoteTraceDataset(selectedTraceId), "dataset promotion")
+                          runCuration(
+                            () => api.promoteTraceDataset(selectedTraceId),
+                            "dataset promotion",
+                          )
                         }
                         className="px-2.5 py-1 rounded-md bg-[var(--accent)] text-white text-[12px] font-medium cursor-pointer"
                       >
@@ -490,7 +756,11 @@ export function TracesView() {
                           disabled={!tagKey.trim() || !tagVal.trim()}
                           onClick={() =>
                             runCuration(
-                              () => api.setTraceTag(selectedTraceId, { key: tagKey.trim(), value: tagVal.trim() }),
+                              () =>
+                                api.setTraceTag(selectedTraceId, {
+                                  key: tagKey.trim(),
+                                  value: tagVal.trim(),
+                                }),
                               "tag",
                             )
                           }
@@ -501,51 +771,96 @@ export function TracesView() {
                       </div>
                     </div>
 
-                    {curationMsg && <div className="text-[12px] text-[var(--accent)]">{curationMsg}</div>}
+                    {curationMsg && (
+                      <div className="text-[12px] text-[var(--accent)]">{curationMsg}</div>
+                    )}
                   </div>
 
-                  {/* Spans */}
-                  <div className="space-y-3">
-                    {(detail?.spans || []).map((sp) => (
-                      <div
-                        key={sp.spanId}
-                        className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-4 space-y-3"
-                      >
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <div className="font-mono font-semibold text-[13px]">{sp.name}</div>
-                          <div className="flex items-center gap-2">
-                            {sp.spanType && (
-                              <span className="font-mono text-[11px] text-[var(--text-muted)]">
-                                {sp.spanType}
-                              </span>
-                            )}
-                            <StatusBadge
-                              label={`${sp.status || "OK"} · ${formatDuration(sp.durationMs)}`}
-                              tone={sp.status === "ERROR" ? "err" : "ok"}
-                            />
-                          </div>
-                        </div>
+                  {/* Interactive Span Waterfall */}
+                  <SpanWaterfall
+                    spans={detail?.spans || []}
+                    traceDurationMs={detail?.durationMs}
+                    selectedSpanId={focusedSpanId}
+                    onSelectSpan={(id) =>
+                      setFocusedSpanId((cur) => (cur === id ? null : id))
+                    }
+                  />
 
-                        <div className="space-y-2">
-                          <div>
-                            <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)] mb-1">
-                              Inputs
+                  {/* Spans Detail */}
+                  <div className="space-y-3">
+                    {(detail?.spans || [])
+                      .filter((sp) => !focusedSpanId || sp.spanId === focusedSpanId)
+                      .map((sp) => (
+                        <div
+                          key={sp.spanId}
+                          className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-canvas)] p-4 space-y-3"
+                        >
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="font-mono font-semibold text-[13px] truncate">
+                                {sp.name}
+                              </span>
+                              {focusedSpanId === sp.spanId && (
+                                <button
+                                  type="button"
+                                  onClick={() => setFocusedSpanId(null)}
+                                  className="text-[11px] text-[var(--accent)] hover:underline cursor-pointer"
+                                >
+                                  Show all spans
+                                </button>
+                              )}
                             </div>
-                            <pre className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words max-h-56 overflow-auto m-0">
-                              {formatPayloadPreview(sp.inputs)}
-                            </pre>
+                            <div className="flex items-center gap-2">
+                              {sp.spanType && (
+                                <span className="font-mono text-[11px] text-[var(--text-muted)]">
+                                  {sp.spanType}
+                                </span>
+                              )}
+                              <StatusBadge
+                                label={`${sp.status || "OK"} · ${formatDuration(sp.durationMs)}`}
+                                tone={sp.status === "ERROR" ? "err" : "ok"}
+                              />
+                            </div>
                           </div>
-                          <div>
-                            <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)] mb-1">
-                              Outputs
+
+                          <div className="space-y-3">
+                            <div>
+                              <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)] mb-1">
+                                Inputs
+                              </div>
+                              <SmartValueView value={sp.inputs} maxHeightClass="max-h-56" />
                             </div>
-                            <pre className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words max-h-64 overflow-auto m-0">
-                              {formatPayloadPreview(sp.outputs)}
-                            </pre>
+                            <div>
+                              <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)] mb-1">
+                                Outputs
+                              </div>
+                              <SmartValueView value={sp.outputs} maxHeightClass="max-h-72" />
+                            </div>
+
+                            {sp.attributes && Object.keys(sp.attributes).length > 0 && (
+                              <details className="rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-3 py-2">
+                                <summary className="text-[11.5px] font-mono text-[var(--text-secondary)] cursor-pointer">
+                                  Attributes ({Object.keys(sp.attributes).length})
+                                </summary>
+                                <div className="mt-2">
+                                  <SmartValueView value={sp.attributes} maxHeightClass="max-h-48" />
+                                </div>
+                              </details>
+                            )}
+
+                            {sp.events && sp.events.length > 0 && (
+                              <details className="rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] px-3 py-2">
+                                <summary className="text-[11.5px] font-mono text-[var(--text-secondary)] cursor-pointer">
+                                  Events ({sp.events.length})
+                                </summary>
+                                <div className="mt-2">
+                                  <SmartValueView value={sp.events} maxHeightClass="max-h-48" />
+                                </div>
+                              </details>
+                            )}
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
                   </div>
                 </>
               )}

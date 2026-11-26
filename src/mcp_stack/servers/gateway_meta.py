@@ -29,6 +29,7 @@ from mcp_stack.core.config import (
     validate_upstream_secret_refs,
 )
 from mcp_stack.evals import run_golden_benchmark
+from mcp_stack.gateway.presets import PresetStore
 from mcp_stack.gateway.upstreams import build_upstream_proxy, probe_upstream_proxy
 from mcp_stack.servers.mlflow_server import probe_mcp_http_endpoint
 from mcp_stack.watchdog import (
@@ -689,6 +690,22 @@ def create_gateway_meta_server(
     def gateway_profiles_resource() -> str:
         gw_state = state_provider()
         return json.dumps({"profiles": gw_state.get("profiles", [])}, indent=2)
+
+    @mcp.resource(
+        "gateway://presets",
+        name="gateway_presets",
+        description="Saved Playground tool invocation presets persisted by the gateway.",
+        mime_type="application/json",
+    )
+    def gateway_presets_resource() -> str:
+        store = PresetStore(settings.gateway.presets_path)
+        return json.dumps(
+            {
+                "path": str(store.path),
+                "presets": [p.model_dump(mode="json") for p in store.list_presets()],
+            },
+            indent=2,
+        )
 
     @mcp.resource(
         "gateway://client-configs/{client}",

@@ -51,6 +51,7 @@ export interface HealthResponse {
   timestamp: string;
   composedRoute: string;
   defaultProfile: string;
+  mlflowUiUrl?: string | null;
   servers: ServerInventoryItem[];
   profiles: ProfileInventoryItem[];
 }
@@ -114,6 +115,7 @@ export interface CallToolResponse {
   server: string;
   tool: string;
   durationMs: number;
+  traceId?: string | null;
   truncated?: boolean;
   result?: unknown;
   structuredContent?: unknown;
@@ -128,7 +130,31 @@ export interface PlaygroundHistoryEntry {
   tool: string;
   arguments: Record<string, unknown>;
   ok: boolean;
+  policyRefusal?: boolean;
   durationMs: number;
+  responsePreview?: string;
+  traceId?: string | null;
+}
+
+export interface PlaygroundPresetItem {
+  id: string;
+  name: string;
+  server: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  description: string;
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlaygroundReplayRequest {
+  server: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  presetName?: string;
+  autoRun?: boolean;
+  nonce: number;
 }
 
 export interface TraceSummary {
@@ -188,6 +214,8 @@ export interface TraceSpanItem {
   spanType?: string;
   status?: string;
   durationMs?: number | null;
+  startTimeMs?: number | null;
+  endTimeMs?: number | null;
   attributes?: Record<string, unknown>;
   inputs?: unknown;
   outputs?: unknown;
@@ -197,7 +225,14 @@ export interface TraceSpanItem {
 export interface TraceDetailResponse {
   traceId: string;
   state: string;
+  policyRefusal?: boolean;
   durationMs: number | null;
+  timestampMs?: number | null;
+  server?: string | null;
+  tool?: string | null;
+  user?: string | null;
+  sessionId?: string | null;
+  modelId?: string | null;
   tags?: Record<string, string>;
   assessments?: Array<Record<string, unknown>>;
   spans: TraceSpanItem[];
@@ -211,9 +246,18 @@ export interface MCPRegistryServer {
   tags?: Record<string, string>;
 }
 
+export interface PromptVersionSummary {
+  version: number | string;
+  aliases?: string[];
+  commitMessage?: string | null;
+  creationTimestamp?: number | null;
+}
+
 export interface RegistryPromptItem {
   name: string;
-  versions?: Array<{ version: number | string; aliases?: string[] }>;
+  description?: string | null;
+  tags?: Record<string, string>;
+  versions?: PromptVersionSummary[];
 }
 
 export interface RegistryResponse {

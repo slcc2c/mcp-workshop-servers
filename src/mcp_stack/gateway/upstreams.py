@@ -15,7 +15,7 @@ from fastmcp.server import create_proxy
 from pydantic import SecretStr
 
 from mcp_stack.core.config import MCPStackSettings, UpstreamServerConfig
-from mcp_stack.core.secrets import SecretResolver
+from mcp_stack.core.secrets import SecretResolutionError, SecretResolver
 from mcp_stack.core.tracing import MLflowTracingMiddleware
 
 _PREFIXED_ENV_RE = re.compile(r"^(.*?)\benv:([A-Za-z_][A-Za-z0-9_]*)(.*)$")
@@ -29,20 +29,39 @@ def resolve_secret_mapping(
     mapping: dict[str, SecretStr],
     resolver: SecretResolver,
 ) -> tuple[dict[str, str], list[str]]:
-    """Resolve SecretStr mapping values including `Bearer env:VAR`; return missing env names."""
+    """Resolve SecretStr mapping values including `Bearer env:VAR` & `Bearer op://...`."""
     resolved: dict[str, str] = {}
     missing_env: list[str] = []
     for key, secret in mapping.items():
         raw = secret.get_secret_value().strip()
         if raw.startswith(("env:", "op://")):
-            val = resolver.resolve(secret)
+            try:
+                val = resolver.resolve(secret)
+            except SecretResolutionError as exc:
+                missing_env.append(f"{raw} ({exc})")
+                continue
             if not val:
                 if raw.startswith("env:"):
                     missing_env.append(raw.removeprefix("env:").strip())
                 else:
-                    missing_env.append(key)
+                    missing_env.append(raw)
                 continue
             resolved[key] = val
+            continue
+
+        if "op://" in raw:
+            op_idx = raw.index("op://")
+            prefix = raw[:op_idx]
+            op_ref = raw[op_idx:].strip()
+            try:
+                val = resolver.resolve(op_ref)
+            except SecretResolutionError as exc:
+                missing_env.append(f"{op_ref} ({exc})")
+                continue
+            if not val:
+                missing_env.append(op_ref)
+                continue
+            resolved[key] = f"{prefix}{val}"
             continue
 
         match = _PREFIXED_ENV_RE.match(raw)
@@ -157,11 +176,13 @@ async def probe_upstream_proxy(
     """List tools through an instantiated upstream proxy to check live reachability."""
     try:
         tools = await asyncio.wait_for(proxy.list_tools(), timeout=timeout_s)
+        tool_names = [getattr(t, "name", "") for t in tools]
         return {
             "reachable": True,
             "connectionStatus": "connected",
             "toolCount": len(tools),
-            "tools": [getattr(t, "name", "") for t in tools],
+            "tools": tool_names,
+            "sampleTools": tool_names[:5],
         }
     except Exception as exc:
         return {

@@ -9,6 +9,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { resolveGatewayBaseUrl, resolveMlflowUiUrl } from "../lib/urls";
 import type {
   AuthState,
   EvalRunItem,
@@ -84,9 +85,18 @@ export function OverviewView({
   const [judgeModel, setJudgeModel] = useState("ollama:/qwen3.8:27b");
   const [probingSlug, setProbingSlug] = useState<string | null>(null);
 
+  const mlflowUiUrl = resolveMlflowUiUrl(health?.mlflowUiUrl);
+  const gatewayBaseUrl = resolveGatewayBaseUrl();
+
   const servers: ServerInventoryItem[] = health?.servers || [];
   const connectedCount = servers.filter((s) =>
     ["connected", "configured", "enabled"].includes((s.connectionStatus || s.status || "").toLowerCase()),
+  ).length;
+  const authReqCount = servers.filter(
+    (s) => (s.connectionStatus || "").toLowerCase() === "auth_required",
+  ).length;
+  const downCount = servers.filter(
+    (s) => (s.connectionStatus || "").toLowerCase() === "unreachable",
   ).length;
   const reg = watchdog?.evalRegression ?? watchdog?.eval_regression;
   const isRegression = reg?.status === "regression";
@@ -175,7 +185,14 @@ export function OverviewView({
             </span>
           </div>
           <div className="text-[11.5px] text-[var(--text-muted)]">
-            {servers.filter((s) => s.external).length} external proxies · /mcp active
+            {servers.filter((s) => s.external).length} external ·{" "}
+            {authReqCount > 0 ? (
+              <span className="text-[var(--warn)]">{authReqCount} auth needed</span>
+            ) : downCount > 0 ? (
+              <span className="text-[var(--err)]">{downCount} unreachable</span>
+            ) : (
+              <span>/mcp active</span>
+            )}
           </div>
         </div>
 
@@ -193,7 +210,7 @@ export function OverviewView({
           <div className="flex items-center justify-between">
             <span className="text-[12px] text-[var(--text-secondary)]">Golden Benchmark</span>
             <a
-              href="http://localhost:5002"
+              href={mlflowUiUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline"
@@ -243,7 +260,7 @@ export function OverviewView({
         <div className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-[13.5px] font-semibold m-0">Curated Profiles</h2>
-            <CopyButton text="http://127.0.0.1:8090/mcp" label="Copy /mcp" compact />
+            <CopyButton text={`${gatewayBaseUrl}/mcp`} label="Copy /mcp" compact />
           </div>
           <div className="divide-y divide-[var(--border-hairline)]">
             {(health?.profiles || []).map((prof) => {
@@ -263,7 +280,7 @@ export function OverviewView({
                       {prof.servers.join(", ")}
                     </div>
                   </div>
-                  <CopyButton text={prof.route} label={prof.route} compact />
+                  <CopyButton text={`${gatewayBaseUrl}${prof.route}`} label={prof.route} compact />
                 </div>
               );
             })}

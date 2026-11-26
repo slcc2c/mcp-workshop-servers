@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import sys
 import time
 from collections.abc import AsyncIterator, Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ from mcp_stack.core.config import (
 from mcp_stack.core.logging import get_logger
 from mcp_stack.core.metrics import render_metrics
 from mcp_stack.core.secrets import SecretResolver
+from mcp_stack.core.tracing import last_trace_id_var, redact_payload
 from mcp_stack.evals import (
     _POLICY_REFUSAL_MARKERS,
     GOLDEN_DATASET_NAME,
@@ -58,6 +60,7 @@ from mcp_stack.evals import (
     sync_golden_dataset,
 )
 from mcp_stack.gateway.dashboard import get_static_dir, has_built_dashboard, render_dashboard_html
+from mcp_stack.gateway.presets import PresetStore
 from mcp_stack.gateway.upstreams import build_upstream_proxy, probe_upstream_proxy
 from mcp_stack.servers.docker_server import create_docker_server
 from mcp_stack.servers.filesystem import create_filesystem_server
@@ -201,6 +204,7 @@ def build_gateway_app(
             uc_adapter = adapter
 
     meta_prompt_provider = MLflowPromptRegistryProvider(settings)
+    preset_store = PresetStore(settings.gateway.presets_path)
     upstream_proxy: FastMCP | None = None
     federated_proxies: dict[str, FastMCP] = {}
     federated_meta: dict[str, dict[str, Any]] = {}
@@ -370,6 +374,9 @@ def build_gateway_app(
                     meta_ref = federated_meta[f_slug]
                     meta_ref["connectionStatus"] = f_res["connectionStatus"]
                     meta_ref["toolCount"] = f_res.get("toolCount", 0)
+                    meta_ref["sampleTools"] = list(
+                        f_res.get("sampleTools") or f_res.get("tools", [])[:5]
+                    )
                     if f_res.get("error"):
                         meta_ref["error"] = f_res["error"]
                     if f_res.get("reachable"):
@@ -457,6 +464,20 @@ def build_gateway_app(
     for _fed_slug, meta in federated_meta.items():
         server_inventory.append(meta)
 
+    @app.get("/favicon.ico")
+    async def favicon() -> Response:
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+            '<rect width="32" height="32" rx="7" fill="#0f172a"/>'
+            '<path d="M8 10h6v6H8zm10 0h6v6h-6zM8 20h6v6H8zm10 0h6v6h-6z" fill="#38bdf8"/>'
+            "</svg>"
+        )
+        return Response(
+            content=svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {
@@ -465,6 +486,7 @@ def build_gateway_app(
             "timestamp": datetime.now(UTC).isoformat(),
             "composedRoute": "/mcp",
             "defaultProfile": settings.gateway.default_client_profile,
+            "mlflowUiUrl": settings.gateway.mlflow_ui_url or settings.mlflow.tracking_uri,
             "servers": server_inventory,
             "profiles": profile_inventory,
         }
@@ -538,12 +560,54 @@ def build_gateway_app(
             "clientSnippets": generate_client_configs(settings, repo_root=Path.cwd()),
         }
 
+    _tailnet_v4 = ipaddress.ip_network("100.64.0.0/10")
+    _tailnet_v6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+
+    def _is_tailnet_or_loopback(raw_ip: str) -> bool:
+        try:
+            ip_obj = ipaddress.ip_address(raw_ip.strip())
+        except ValueError:
+            return False
+        if ip_obj.is_loopback:
+            return True
+        if ip_obj.version == 4:
+            return ip_obj in _tailnet_v4
+        return ip_obj in _tailnet_v6
+
+    def _is_trusted_tailnet_ui_request(request: Request) -> bool:
+        client_host = request.client.host if request.client else ""
+        if not _is_tailnet_or_loopback(client_host):
+            return False
+        xff = request.headers.get("x-forwarded-for", "").strip()
+        if not xff:
+            return True
+        hops = [h.strip() for h in xff.split(",") if h.strip()]
+        return bool(hops) and all(_is_tailnet_or_loopback(h) for h in hops)
+
     @app.get("/ui", response_class=HTMLResponse)
-    async def dashboard_ui() -> HTMLResponse:
-        return HTMLResponse(
+    async def dashboard_ui(request: Request) -> HTMLResponse:
+        resp = HTMLResponse(
             content=render_dashboard_html(__version__),
             headers={"Cache-Control": "no-store"},
         )
+        if (
+            settings.gateway.ui_trust_tailnet
+            and settings.gateway.effective_auth_enabled
+            and _is_trusted_tailnet_ui_request(request)
+        ):
+            existing_cid = verify_ui_session(request.cookies.get(UI_SESSION_COOKIE), settings)
+            if not existing_cid:
+                owner_cid = None
+                for pol in settings.gateway.clients.values():
+                    if pol.client_id == "codex":
+                        owner_cid = pol.client_id
+                        break
+                if owner_cid is None:
+                    first = next(iter(settings.gateway.clients.values()), None)
+                    owner_cid = first.client_id if first is not None else "local"
+                session_val = sign_ui_session(owner_cid, settings)
+                _set_session_cookie(resp, session_val, request)
+        return resp
 
     @app.post("/api/v1/auth/login-link", response_model=None)
     async def ui_login_link_api(request: Request) -> dict[str, Any] | JSONResponse:
@@ -562,7 +626,10 @@ def build_gateway_app(
             first = next(iter(settings.gateway.clients.values()), None)
             client_id = first.client_id if first is not None else "local"
         nonce = login_nonces.issue(client_id)
-        origin = str(request.base_url).rstrip("/")
+        origin = (
+            (settings.gateway.public_url or "").rstrip("/")
+            or str(request.base_url).rstrip("/")
+        )
         return {
             "url": f"{origin}/ui/login?nonce={nonce}",
             "expiresInSeconds": 60,
@@ -1010,8 +1077,30 @@ def build_gateway_app(
         def _fetch_one() -> dict[str, Any]:
             import mlflow
 
+            flush_fn = getattr(mlflow, "flush_trace_async_logging", None)
+            if callable(flush_fn):
+                with suppress(Exception):
+                    flush_fn(terminate=False)
             client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
-            trace = client.get_trace(trace_id)
+            trace = None
+            last_exc: Exception | None = None
+            for attempt in range(4):
+                try:
+                    trace = client.get_trace(trace_id)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    msg_l = str(exc).lower()
+                    is_transient = (
+                        "not found" in msg_l
+                        or "does not exist" in msg_l
+                        or "corrupted" in msg_l
+                    )
+                    if not is_transient or attempt == 3:
+                        raise
+                    time.sleep(0.35)
+            if trace is None and last_exc is not None:
+                raise last_exc
             info = getattr(trace, "info", trace)
             raw_spans = getattr(getattr(trace, "data", None), "spans", None) or []
             spans_out: list[dict[str, Any]] = []
@@ -1043,6 +1132,12 @@ def build_gateway_app(
                             "attributes": _safe_json(clean_attrs),
                         }
                     )
+                raw_attrs = getattr(sp, "attributes", None)
+                clean_span_attrs = (
+                    redact_payload(dict(raw_attrs))
+                    if isinstance(raw_attrs, dict)
+                    else {}
+                )
                 spans_out.append(
                     {
                         "spanId": getattr(sp, "span_id", None),
@@ -1051,6 +1146,17 @@ def build_gateway_app(
                         "spanType": str(getattr(sp, "span_type", "")),
                         "status": str(getattr(sp, "status", "")),
                         "durationMs": dur_ms,
+                        "startTimeMs": (
+                            round(start_ns / 1_000_000.0, 2)
+                            if isinstance(start_ns, int)
+                            else None
+                        ),
+                        "endTimeMs": (
+                            round(end_ns / 1_000_000.0, 2)
+                            if isinstance(end_ns, int)
+                            else None
+                        ),
+                        "attributes": _safe_json(clean_span_attrs),
                         "inputs": _safe_json(getattr(sp, "inputs", None)),
                         "outputs": _safe_json(getattr(sp, "outputs", None)),
                         "events": events_out,
@@ -1081,12 +1187,30 @@ def build_gateway_app(
 
             tags = dict(getattr(info, "tags", None) or {})
             meta = dict(getattr(info, "trace_metadata", None) or {})
+            root_span = next((s for s in spans_out if not s.get("parentId")), None) or (
+                spans_out[0] if spans_out else {}
+            )
+            root_attrs = root_span.get("attributes") if isinstance(root_span, dict) else {}
+            srv_name = tags.get("mcp.server") or (
+                root_attrs.get("mcp.server") if isinstance(root_attrs, dict) else None
+            )
+            tl_name = tags.get("mcp.tool") or (
+                root_attrs.get("mcp.tool") if isinstance(root_attrs, dict) else None
+            )
+            if (not srv_name or not tl_name) and isinstance(root_span, dict):
+                rname = str(root_span.get("name") or "")
+                if "." in rname:
+                    cand_s, cand_t = rname.split(".", 1)
+                    srv_name = srv_name or cand_s
+                    tl_name = tl_name or cand_t
             return {
                 "traceId": getattr(info, "trace_id", None) or trace_id,
                 "state": str(getattr(info, "state", "")),
                 "policyRefusal": is_expected_policy_refusal(trace),
                 "durationMs": round(_trace_duration_ms(trace), 2),
                 "timestampMs": getattr(info, "timestamp_ms", None),
+                "server": srv_name,
+                "tool": tl_name,
                 "user": meta.get("mlflow.trace.user"),
                 "sessionId": meta.get("mlflow.trace.session"),
                 "modelId": meta.get("mlflow.modelId") or getattr(info, "model_id", None),
@@ -1357,20 +1481,29 @@ def build_gateway_app(
 
             prompts_out: list[dict[str, Any]] = []
             try:
-                prompts = mlflow.genai.search_prompts(max_results=30)
-                for p in prompts[:20]:
+                prompts = mlflow.genai.search_prompts(max_results=50)
+                for p in prompts[:50]:
                     p_name = str(getattr(p, "name", ""))
                     versions_out: list[dict[str, Any]] = []
                     try:
-                        vers = client.search_prompt_versions(name=p_name, max_results=10)
+                        vers = client.search_prompt_versions(name=p_name, max_results=25)
                         for v in vers:
                             versions_out.append(
                                 {
                                     "version": getattr(v, "version", None),
                                     "aliases": list(getattr(v, "aliases", None) or []),
                                     "commitMessage": getattr(v, "commit_message", None),
+                                    "creationTimestamp": getattr(v, "creation_timestamp", None),
                                 }
                             )
+                        versions_out.sort(
+                            key=lambda item: (
+                                int(item["version"])
+                                if str(item.get("version") or "").isdigit()
+                                else -1
+                            ),
+                            reverse=True,
+                        )
                     except Exception:
                         pass
                     prompts_out.append(
@@ -1523,10 +1656,54 @@ def build_gateway_app(
 
             mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
             mlflow.genai.set_prompt_alias(name=name, alias=alias, version=version_int)
+            meta_prompt_provider.invalidate_cache()
             return {"updated": True, "name": name, "alias": alias, "version": version_int}
 
         try:
             return await asyncio.to_thread(_set)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
+            )
+
+    @app.delete("/api/v1/mlflow/prompts/{name}/alias/{alias}", response_model=None)
+    async def mlflow_prompt_alias_delete_api(
+        name: str, alias: str
+    ) -> dict[str, Any] | JSONResponse:
+        if not settings.mlflow.allow_mutations:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "MLFLOW_MUTATIONS_DISABLED",
+                        "message": "Set MLFLOW_ALLOW_MUTATIONS=true to delete prompt aliases",
+                    }
+                },
+            )
+        clean_alias = alias.strip().lstrip("@")
+        if not clean_alias:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_REQUEST", "message": "Provide valid 'alias'"}},
+            )
+
+        def _delete() -> dict[str, Any]:
+            import mlflow
+            import mlflow.genai
+
+            mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            delete_fn = getattr(mlflow.genai, "delete_prompt_alias", None)
+            if callable(delete_fn):
+                delete_fn(name=name, alias=clean_alias)
+            else:
+                client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
+                client.delete_prompt_alias(name=name, alias=clean_alias)
+            meta_prompt_provider.invalidate_cache()
+            return {"deleted": True, "name": name, "alias": clean_alias}
+
+        try:
+            return await asyncio.to_thread(_delete)
         except Exception as exc:
             return JSONResponse(
                 status_code=503,
@@ -1813,6 +1990,83 @@ def build_gateway_app(
         prof = str(raw_profile).strip() if isinstance(raw_profile, str) and raw_profile else None
         return await verify_client_connection(settings, client=client_name, profile=prof)
 
+    @app.get("/api/v1/presets")
+    async def presets_list_api() -> dict[str, Any]:
+        return {
+            "path": str(preset_store.path),
+            "presets": [p.model_dump(mode="json") for p in preset_store.list_presets()],
+        }
+
+    @app.post("/api/v1/presets", response_model=None)
+    async def presets_create_api(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_REQUEST", "message": "JSON body required"}},
+            )
+        try:
+            preset = preset_store.create_preset(
+                name=str(payload.get("name") or ""),
+                server=str(payload.get("server") or ""),
+                tool=str(payload.get("tool") or ""),
+                arguments=payload.get("arguments"),
+                description=str(payload.get("description") or ""),
+                pinned=bool(payload.get("pinned", False)),
+                preset_id=payload.get("id"),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_PRESET", "message": str(exc)}},
+            )
+        return {"preset": preset.model_dump(mode="json")}
+
+    @app.put("/api/v1/presets/{preset_id}", response_model=None)
+    async def presets_update_api(
+        preset_id: str,
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        if not isinstance(payload, dict):
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_REQUEST", "message": "JSON body required"}},
+            )
+        try:
+            updated = preset_store.update_preset(preset_id, payload)
+        except Exception as exc:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "INVALID_PRESET", "message": str(exc)}},
+            )
+        if updated is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "PRESET_NOT_FOUND",
+                        "message": f"Unknown preset '{preset_id}'",
+                    }
+                },
+            )
+        return {"preset": updated.model_dump(mode="json")}
+
+    @app.delete("/api/v1/presets/{preset_id}", response_model=None)
+    async def presets_delete_api(preset_id: str) -> dict[str, Any] | JSONResponse:
+        deleted = preset_store.delete_preset(preset_id)
+        if not deleted:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "code": "PRESET_NOT_FOUND",
+                        "message": f"Unknown preset '{preset_id}'",
+                    }
+                },
+            )
+        return {"deleted": preset_id}
+
     @app.post("/api/v1/mlflow/models/{name}/alias", response_model=None)
     async def mlflow_model_alias_api(
         name: str,
@@ -1985,11 +2239,13 @@ def build_gateway_app(
             )
 
         t0 = time.monotonic()
+        trace_token = last_trace_id_var.set(None)
         try:
             tool_res = await asyncio.wait_for(
                 target_srv.call_tool(tool_name, arguments=arguments, run_middleware=True),
                 timeout=30.0,
             )
+            captured_trace_id = last_trace_id_var.get()
             elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
             blocks = getattr(tool_res, "content", None) or []
             content_blocks: list[dict[str, Any]] = []
@@ -2050,12 +2306,14 @@ def build_gateway_app(
                 "server": slug,
                 "tool": tool_name,
                 "durationMs": elapsed_ms,
+                "traceId": captured_trace_id,
                 "truncated": truncated,
                 "result": parsed_out,
                 "structuredContent": structured,
                 "contentBlocks": content_blocks,
             }
         except ToolError as exc:
+            captured_trace_id = last_trace_id_var.get()
             elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
             msg = str(exc)
             is_refusal = any(m in msg.lower() for m in _POLICY_REFUSAL_MARKERS)
@@ -2065,6 +2323,7 @@ def build_gateway_app(
                 "server": slug,
                 "tool": tool_name,
                 "durationMs": elapsed_ms,
+                "traceId": captured_trace_id,
                 "error": msg,
             }
         except TimeoutError:
@@ -2079,6 +2338,8 @@ def build_gateway_app(
                     "error": "Tool execution timed out after 30s",
                 },
             )
+        finally:
+            last_trace_id_var.reset(trace_token)
 
     @app.get("/metrics")
     async def metrics() -> Response:

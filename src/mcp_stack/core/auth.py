@@ -35,6 +35,7 @@ _CSRF_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _EXEMPT_PATHS = frozenset(
     {
         "/",
+        "/favicon.ico",
         "/health",
         "/ready",
         "/metrics",

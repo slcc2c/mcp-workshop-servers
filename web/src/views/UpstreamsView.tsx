@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { api } from "../lib/api";
+import { resolveGatewayBaseUrl } from "../lib/urls";
 import type { UpstreamConfigItem } from "../types";
 import { CopyButton } from "../components/CopyButton";
 import { StatusBadge, connectionTone } from "../components/StatusDot";
@@ -215,7 +216,27 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
                 )}
 
                 {item.detail && (
-                  <div className="text-[12px] text-[var(--warn)] break-words">{item.detail}</div>
+                  <div className="rounded-lg border border-[color-mix(in_srgb,var(--warn)_35%,transparent)] bg-[var(--warn-soft)] px-2.5 py-2 text-[12px] text-[var(--warn)] space-y-1 break-words">
+                    <div>{item.detail}</div>
+                    {item.connectionStatus === "auth_required" && (
+                      <div className="text-[11px] text-[var(--text-secondary)]">
+                        Provide in <code className="font-mono">.env</code> or via 1Password (<code className="font-mono">op://Server-Configurations/...</code>), then click Probe.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {item.sampleTools && item.sampleTools.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {item.sampleTools.slice(0, 5).map((toolName) => (
+                      <span
+                        key={toolName}
+                        className="px-1.5 py-0.5 rounded bg-[var(--bg-subtle)] border border-[var(--border-hairline)] font-mono text-[10.5px] text-[var(--text-secondary)]"
+                      >
+                        {toolName}
+                      </span>
+                    ))}
+                  </div>
                 )}
 
                 <div className="flex items-center gap-3 text-[11.5px] font-mono text-[var(--text-muted)] flex-wrap">
@@ -226,7 +247,7 @@ export function UpstreamsView({ onAfterChange }: { onAfterChange: () => Promise<
               </div>
 
               <div className="flex items-center justify-between gap-2 pt-2.5 border-t border-[var(--border-hairline)] flex-wrap">
-                <CopyButton text={item.route} label={item.route} compact />
+                <CopyButton text={`${resolveGatewayBaseUrl()}${item.route}`} label={item.route} compact />
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"

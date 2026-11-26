@@ -5,6 +5,7 @@ import {
   Boxes,
   Compass,
   Database,
+  HelpCircle,
   LogOut,
   Menu,
   Moon,
@@ -40,6 +41,7 @@ export function Layout({
   onChangeAutoRefresh,
   onRefreshAll,
   onOpenPalette,
+  onOpenShortcuts,
   onOpenAuthModal,
   onLogout,
   children,
@@ -55,6 +57,7 @@ export function Layout({
   onChangeAutoRefresh: (ms: number) => void;
   onRefreshAll: () => void;
   onOpenPalette: () => void;
+  onOpenShortcuts: () => void;
   onOpenAuthModal: () => void;
   onLogout: () => void;
   children: ReactNode;
@@ -166,6 +169,16 @@ export function Layout({
               <kbd className="px-1.5 py-0.2 rounded bg-[var(--bg-subtle)] font-mono text-[10.5px]">
                 ⌘K
               </kbd>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenShortcuts}
+              title="Keyboard shortcuts (?)"
+              aria-label="Keyboard shortcuts"
+              className="p-1.5 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:border-[var(--border-strong)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+            >
+              <HelpCircle className="w-3.5 h-3.5" />
             </button>
 
             <select

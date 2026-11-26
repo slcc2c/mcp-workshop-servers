@@ -1,7 +1,7 @@
 import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Download, FileText, Code2, Layers, WrapText } from "lucide-react";
+import { Activity, Download, FileText, Code2, Layers, WrapText } from "lucide-react";
 import type { CallToolResponse, MCPContentBlock } from "../types";
 import { classifyTextPayload, normalizeMultilineText } from "../lib/format";
 import { CopyButton } from "./CopyButton";
@@ -172,7 +172,79 @@ function ContentBlockView({ block }: { block: MCPContentBlock }) {
   );
 }
 
-export function SmartOutput({ response }: { response: CallToolResponse }) {
+export function SmartValueView({
+  value,
+  maxHeightClass = "max-h-64",
+}: {
+  value: unknown;
+  maxHeightClass?: string;
+}) {
+  const [rawMode, setRawMode] = useState(false);
+
+  if (value === null || value === undefined) {
+    return <div className="font-mono text-[12px] text-[var(--text-muted)]">—</div>;
+  }
+
+  let parsed: unknown = value;
+  if (typeof value === "string") {
+    const seg = classifyTextPayload(value);
+    if (seg.kind === "json" && seg.parsedJson !== undefined) {
+      parsed = seg.parsedJson;
+    } else if (seg.kind === "markdown") {
+      return (
+        <div className="space-y-1.5">
+          <div className="wb-prose rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-3">
+            <Markdown remarkPlugins={[remarkGfm]}>{seg.text}</Markdown>
+          </div>
+        </div>
+      );
+    } else {
+      return (
+        <pre
+          className={`rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words ${maxHeightClass} overflow-auto m-0`}
+        >
+          {seg.text}
+        </pre>
+      );
+    }
+  }
+
+  const rawJson = typeof parsed === "string" ? parsed : JSON.stringify(parsed, null, 2);
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => setRawMode((v) => !v)}
+          className="px-2 py-0.5 rounded border border-[var(--border-hairline)] text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+        >
+          {rawMode ? "Formatted" : "Raw JSON"}
+        </button>
+        <CopyButton text={rawJson} label="Copy" compact />
+      </div>
+      {rawMode ? (
+        <pre
+          className={`rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-words ${maxHeightClass} overflow-auto m-0`}
+        >
+          {rawJson}
+        </pre>
+      ) : (
+        <div className={`${maxHeightClass} overflow-auto`}>
+          <JsonValueRenderer data={parsed} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function SmartOutput({
+  response,
+  onInspectTrace,
+}: {
+  response: CallToolResponse;
+  onInspectTrace?: (traceId: string) => void;
+}) {
   const [view, setView] = useState<"formatted" | "raw" | "meta">("formatted");
   const [wrapRaw, setWrapRaw] = useState(true);
 
@@ -252,6 +324,16 @@ export function SmartOutput({ response }: { response: CallToolResponse }) {
             >
               <WrapText className="w-3.5 h-3.5" />
               Wrap
+            </button>
+          )}
+          {response.traceId && onInspectTrace && (
+            <button
+              type="button"
+              onClick={() => onInspectTrace(response.traceId!)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[color-mix(in_srgb,var(--accent)_40%,transparent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[11.5px] font-medium hover:brightness-110 cursor-pointer"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              Inspect Trace
             </button>
           )}
           <CopyButton text={rawJson} label="Copy JSON" compact />
