@@ -30,3 +30,34 @@ export function resolveMlflowUiUrl(
 
   return cleanConfigured || "http://localhost:5002";
 }
+
+/**
+ * Build a deep-link URL inside the MLflow UI for a specific experiment, runs/traces tab,
+ * or individual run/trace rather than landing on the generic MLflow home view.
+ */
+export function buildMlflowExperimentUrl(
+  mlflowUiBase: string,
+  experimentId?: string | null,
+  opts?: {
+    section?: "traces" | "runs" | "evaluation-runs";
+    runId?: string | null;
+    traceId?: string | null;
+  },
+): string {
+  const cleanBase = mlflowUiBase.trim().replace(/\/+$/, "") || "http://localhost:5002";
+  const exp = (experimentId || "").trim();
+  if (!exp) {
+    return cleanBase;
+  }
+  const encExp = encodeURIComponent(exp);
+  if (opts?.runId && opts.runId.trim()) {
+    return `${cleanBase}/#/experiments/${encExp}/runs/${encodeURIComponent(opts.runId.trim())}`;
+  }
+  if (opts?.section === "traces" && opts?.traceId && opts.traceId.trim()) {
+    return `${cleanBase}/#/experiments/${encExp}/traces?selectedTraceId=${encodeURIComponent(opts.traceId.trim())}`;
+  }
+  if (opts?.section) {
+    return `${cleanBase}/#/experiments/${encExp}/${opts.section}`;
+  }
+  return `${cleanBase}/#/experiments/${encExp}`;
+}

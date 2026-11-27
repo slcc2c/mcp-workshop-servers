@@ -475,11 +475,16 @@ def test_secret_resolver_dual_mode_diagnostics_and_activity_bus(
 
 
 def test_default_cross_family_judge_and_agent_grounding_scorer(monkeypatch) -> None:
+    monkeypatch.delenv("MCP_EVAL_JUDGE_MODEL", raising=False)
     monkeypatch.delenv("MCP_EVAL_OLLAMA_MODEL", raising=False)
-    assert DEFAULT_JUDGE_MODEL == "ollama:/gemma4:31b"
-    assert normalize_judge_model_uri(None) == "ollama_chat:/gemma4:31b"
+    assert DEFAULT_JUDGE_MODEL == "gateway:/mcp-workshop-judge-v1"
+    assert normalize_judge_model_uri(None) == "gateway:/mcp-workshop-judge-v1"
+    assert (
+        normalize_judge_model_uri("ollama:/gemma4-64k:latest")
+        == "ollama_chat:/gemma4-64k:latest"
+    )
 
     grounding_judge = build_agent_tool_use_grounding_judge()
     assert grounding_judge.name == "agent_tool_use_grounding_judge"
     assert "{{ trace }}" in grounding_judge.instructions
-    assert grounding_judge.model == "ollama_chat:/gemma4:31b"
+    assert grounding_judge.model == "gateway:/mcp-workshop-judge-v1"

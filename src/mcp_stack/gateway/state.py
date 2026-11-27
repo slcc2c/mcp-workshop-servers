@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +17,7 @@ from fastmcp import FastMCP
 from mcp_stack.core.auth import LoginNonceStore
 from mcp_stack.core.config import (
     MCPStackSettings,
+    ProfileToolFilter,
     UpstreamServerConfig,
     save_local_profiles,
     save_local_upstreams,
@@ -23,7 +26,12 @@ from mcp_stack.core.config import (
 from mcp_stack.core.secrets import SecretResolver
 from mcp_stack.gateway.activity import ActivityBus
 from mcp_stack.gateway.presets import PresetStore
-from mcp_stack.gateway.upstreams import build_upstream_proxy, probe_upstream_proxy
+from mcp_stack.gateway.upstreams import (
+    ToolCurationMiddleware,
+    build_upstream_proxy,
+    is_tool_allowed,
+    probe_upstream_proxy,
+)
 from mcp_stack.servers.gateway_meta import MLflowPromptRegistryProvider
 from mcp_stack.servers.unity_catalog import UCClientAdapter
 
@@ -32,6 +40,13 @@ if TYPE_CHECKING:
 
 BUILTIN_PROFILES = frozenset({"discover", "core", "data", "ops", "macos"})
 PROFILE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+
+
+def estimate_tool_schema_tokens(tools: Sequence[dict[str, Any]]) -> int:
+    """Estimate approximate LLM prompt token footprint (~4 chars/token) for serialized tools."""
+    if not tools:
+        return 0
+    return sum(max(1, len(json.dumps(tool, default=str)) // 4) for tool in tools)
 
 
 def slug_for(server_key: str) -> str:
@@ -89,6 +104,7 @@ class GatewayRuntimeState:
     secret_resolver: SecretResolver = field(init=False)
     profile_runners: dict[str, ProfileLifespanRunner] = field(default_factory=dict)
     app_ref: FastAPI | None = None
+    mlflow_experiment_id: str | None = None
 
     def __post_init__(self) -> None:
         self.secret_resolver = SecretResolver(self.settings.secrets)
@@ -252,10 +268,19 @@ class GatewayRuntimeState:
             self.server_inventory.append(up_info)
         return self.serialize_upstream_item(slug, cfg)
 
+    def get_profile_tool_filter(self, clean_profile: str) -> tuple[list[str], list[str]]:
+        filt = self.settings.gateway.profile_tool_filters.get(clean_profile)
+        if filt is None:
+            return [], []
+        return list(filt.allow_tools), list(filt.deny_tools)
+
     def _build_profile_bundle(
         self, clean_profile: str, raw_members: list[str]
     ) -> tuple[FastMCP, Any, dict[str, Any]]:
         p_mcp = FastMCP(f"mcp-profile-{clean_profile}")
+        allow_tools, deny_tools = self.get_profile_tool_filter(clean_profile)
+        if allow_tools or deny_tools:
+            p_mcp.add_middleware(ToolCurationMiddleware(clean_profile, allow_tools, deny_tools))
         resolved_slugs: list[str] = []
         wants_upstream = False
         for member in raw_members:
@@ -282,10 +307,19 @@ class GatewayRuntimeState:
             "servers": resolved_slugs,
             "includesUpstreamMcp": wants_upstream,
             "builtin": clean_profile in BUILTIN_PROFILES,
+            "allowTools": allow_tools,
+            "denyTools": deny_tools,
         }
         return p_mcp, p_http, inv_entry
 
-    async def upsert_profile(self, name: str, members: list[str]) -> dict[str, Any]:
+    async def upsert_profile(
+        self,
+        name: str,
+        members: list[str],
+        *,
+        allow_tools: Sequence[str] | None = None,
+        deny_tools: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
         """Create or update a gateway profile live and persist to gateway.local.yaml."""
         clean = name.strip().lower()
         if not PROFILE_SLUG_RE.match(clean):
@@ -299,7 +333,22 @@ class GatewayRuntimeState:
             raise ValueError("Profile must include at least one server")
 
         self.settings.gateway.profiles[clean] = normalized_members
-        save_local_profiles(self.local_upstreams_path(), self.settings.gateway.profiles)
+        if allow_tools is not None or deny_tools is not None:
+            clean_allow = [str(p).strip() for p in (allow_tools or []) if str(p).strip()]
+            clean_deny = [str(p).strip() for p in (deny_tools or []) if str(p).strip()]
+            if clean_allow or clean_deny:
+                self.settings.gateway.profile_tool_filters[clean] = ProfileToolFilter(
+                    allow_tools=clean_allow,
+                    deny_tools=clean_deny,
+                )
+            else:
+                self.settings.gateway.profile_tool_filters.pop(clean, None)
+
+        save_local_profiles(
+            self.local_upstreams_path(),
+            self.settings.gateway.profiles,
+            self.settings.gateway.profile_tool_filters,
+        )
 
         old_runner = self.profile_runners.pop(clean, None)
         if old_runner is not None:
@@ -338,7 +387,12 @@ class GatewayRuntimeState:
             raise KeyError(f"Unknown profile '{clean}'")
 
         self.settings.gateway.profiles.pop(clean, None)
-        save_local_profiles(self.local_upstreams_path(), self.settings.gateway.profiles)
+        self.settings.gateway.profile_tool_filters.pop(clean, None)
+        save_local_profiles(
+            self.local_upstreams_path(),
+            self.settings.gateway.profiles,
+            self.settings.gateway.profile_tool_filters,
+        )
 
         old_runner = self.profile_runners.pop(clean, None)
         if old_runner is not None:
@@ -350,3 +404,36 @@ class GatewayRuntimeState:
             "profile_update", status="ok", summary=f"Deleted profile '{clean}'"
         )
         return {"deleted": clean}
+
+    async def gather_tools_by_server(self) -> dict[str, list[dict[str, Any]]]:
+        target_slugs = self.target_server_instances()
+
+        async def _gather_one(slug: str, srv: FastMCP) -> tuple[str, list[dict[str, Any]]]:
+            t_out = (
+                self.federated_cfg_map[slug].timeout_s
+                if slug in self.federated_cfg_map
+                else 2.0
+            )
+            return slug, await self.collect_tools_for_server(slug, srv, timeout_s=t_out)
+
+        gathered = await asyncio.gather(
+            *(_gather_one(slug, srv) for slug, srv in target_slugs.items())
+        )
+        return dict(gathered)
+
+    def tools_for_profile(
+        self,
+        profile_entry: dict[str, Any],
+        per_server_tools: dict[str, list[dict[str, Any]]],
+    ) -> list[dict[str, Any]]:
+        profile_name = str(profile_entry.get("name") or "")
+        allow_tools, deny_tools = self.get_profile_tool_filter(profile_name)
+        allowed_servers = list(profile_entry.get("servers") or [])
+        if profile_entry.get("includesUpstreamMcp") and "mlflow-upstream" not in allowed_servers:
+            allowed_servers.append("mlflow-upstream")
+        out: list[dict[str, Any]] = []
+        for srv_slug in allowed_servers:
+            for item in per_server_tools.get(srv_slug, []):
+                if is_tool_allowed(str(item.get("name") or ""), allow_tools, deny_tools):
+                    out.append(item)
+        return out

@@ -258,16 +258,32 @@ export const api = {
         ...(opts?.targets ? { targets: opts.targets } : {}),
       }),
     }),
-  createProfile: (name: string, servers: string[]) =>
-    apiFetch<{ profile: ProfileInventoryItem }>("/api/v1/profiles", {
+  createProfile: (
+    name: string,
+    servers: string[],
+    filters?: { allow_tools?: string[]; deny_tools?: string[] },
+  ) => {
+    const body: Record<string, unknown> = { name, servers };
+    if (filters?.allow_tools !== undefined) body.allow_tools = filters.allow_tools;
+    if (filters?.deny_tools !== undefined) body.deny_tools = filters.deny_tools;
+    return apiFetch<{ profile: ProfileInventoryItem }>("/api/v1/profiles", {
       method: "POST",
-      body: JSON.stringify({ name, servers }),
-    }),
-  updateProfile: (name: string, servers: string[]) =>
-    apiFetch<{ profile: ProfileInventoryItem }>(`/api/v1/profiles/${encodeURIComponent(name)}`, {
+      body: JSON.stringify(body),
+    });
+  },
+  updateProfile: (
+    name: string,
+    servers: string[],
+    filters?: { allow_tools?: string[]; deny_tools?: string[] },
+  ) => {
+    const body: Record<string, unknown> = { servers };
+    if (filters?.allow_tools !== undefined) body.allow_tools = filters.allow_tools;
+    if (filters?.deny_tools !== undefined) body.deny_tools = filters.deny_tools;
+    return apiFetch<{ profile: ProfileInventoryItem }>(`/api/v1/profiles/${encodeURIComponent(name)}`, {
       method: "PUT",
-      body: JSON.stringify({ servers }),
-    }),
+      body: JSON.stringify(body),
+    });
+  },
   deleteProfile: (name: string) =>
     apiFetch<{ deleted: string }>(`/api/v1/profiles/${encodeURIComponent(name)}`, {
       method: "DELETE",
@@ -300,6 +316,32 @@ export const api = {
     apiFetch<{ published: boolean; skill?: unknown }>("/api/v1/mlflow/skills", {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  importWebSkill: (payload: {
+    source: string;
+    organization?: string;
+    name?: string;
+    skillNames?: string[];
+    allowShadow?: boolean;
+    syncHarnesses?: boolean;
+  }) =>
+    apiFetch<{ importedCount: number; imported: unknown[] }>("/api/v1/mlflow/skills/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  publishAllMlflowSkills: (payload?: {
+    includeRepos?: boolean;
+    forceProd?: boolean;
+    dryRun?: boolean;
+  }) =>
+    apiFetch<{
+      dryRun: boolean;
+      publishedCount: number;
+      unchangedCount: number;
+      errorCount: number;
+    }>("/api/v1/mlflow/skills/publish-all", {
+      method: "POST",
+      body: JSON.stringify(payload || { includeRepos: true, dryRun: false }),
     }),
   updateMlflowSkillVersion: (
     name: string,

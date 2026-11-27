@@ -10,7 +10,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { api } from "../lib/api";
-import { resolveGatewayBaseUrl, resolveMlflowUiUrl } from "../lib/urls";
+import { buildMlflowExperimentUrl, resolveGatewayBaseUrl, resolveMlflowUiUrl } from "../lib/urls";
 import type {
   AuthState,
   EvalRunItem,
@@ -107,7 +107,7 @@ export function OverviewView({
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionOut, setActionOut] = useState<string | null>(null);
   const [withJudge, setWithJudge] = useState(false);
-  const [judgeModel, setJudgeModel] = useState("ollama:/gemma4:31b");
+  const [judgeModel, setJudgeModel] = useState("gateway:/mcp-workshop-judge-v1");
   const [probingSlug, setProbingSlug] = useState<string | null>(null);
   const [metricsSeries, setMetricsSeries] = useState<OpsMetricsSeriesResponse | null>(null);
   const [secretsHealth, setSecretsHealth] = useState<SecretsHealthResponse | null>(null);
@@ -149,6 +149,12 @@ export function OverviewView({
   const reg = watchdog?.evalRegression ?? watchdog?.eval_regression;
   const isRegression = reg?.status === "regression";
   const latestScore = reg?.min_score ?? evalHistory[0]?.min_score ?? evalHistory[0]?.minScore ?? null;
+  const latestRunId = reg?.run_id ?? evalHistory[0]?.run_id ?? evalHistory[0]?.runId ?? null;
+  const mlflowBenchmarkUrl = buildMlflowExperimentUrl(
+    mlflowUiUrl,
+    health?.mlflowExperimentId ?? null,
+    { section: "runs", runId: latestRunId },
+  );
   const wdOverall =
     watchdog?.overall ||
     (watchdog?.components && Object.keys(watchdog.components).length > 0
@@ -258,7 +264,7 @@ export function OverviewView({
           <div className="flex items-center justify-between">
             <span className="text-[12px] text-[var(--text-secondary)]">Golden Benchmark</span>
             <a
-              href={mlflowUiUrl}
+              href={mlflowBenchmarkUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline"

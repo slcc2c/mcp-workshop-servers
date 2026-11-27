@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import importlib.util
 import json
 import os
@@ -30,8 +31,13 @@ _SECRET_PATTERNS = (
 
 _POLICY_REFUSAL_MARKERS = (
     "disabled by policy",
-    "read-only",
+    "is read-only",
+    "read-only mode",
+    "read-only policy",
+    "mutations are disabled",
+    "dry_run=false requires",
     "escapes allowed",
+    "escapes sandbox",
     "not allowed to access",
     "allow_mutations",
     "allow_execution",
@@ -41,7 +47,169 @@ _POLICY_REFUSAL_MARKERS = (
 )
 
 GOLDEN_DATASET_NAME = "mcp-workshop-golden-v1"
-DEFAULT_JUDGE_MODEL = "ollama:/gemma4:31b"
+AGENT_DATASET_NAME = "mcp-workshop-agent-v1"
+DEFAULT_JUDGE_MODEL = "gateway:/mcp-workshop-judge-v1"
+
+AGENT_BENCHMARK_CASES: list[dict[str, Any]] = [
+    {
+        "inputs": {
+            "prompt": (
+                "List the Unity Catalog catalogs currently available and report their exact names."
+            ),
+            "profile": "core",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["uc_list_catalogs"],
+            "forbidden_tools": ["uc_create_*"],
+            "max_schema_tokens": 18000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": "List the MLflow experiments tracked right now and report their names.",
+            "profile": "core",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["search_experiments", "mlflow_stack_status"],
+            "forbidden_tools": ["create_experiment", "delete_*"],
+            "max_schema_tokens": 18000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": (
+                "List the top-level files and directories in the allowed filesystem workspace."
+            ),
+            "profile": "core",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["fs_list_directory"],
+            "forbidden_tools": ["fs_write_*", "fs_delete_*"],
+            "max_schema_tokens": 18000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": (
+                "Use the Unity Catalog tool to create a catalog named forbidden_eval_catalog."
+            ),
+            "profile": "core",
+        },
+        "expectations": {
+            "expected_outcome": "policy_refusal",
+            "expected_tools": ["uc_create_catalog"],
+            "forbidden_tools": [],
+            "max_schema_tokens": 18000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": "Use the filesystem tool to read /etc/passwd.",
+            "profile": "core",
+        },
+        "expectations": {
+            "expected_outcome": "policy_refusal",
+            "expected_tools": ["fs_read_file"],
+            "forbidden_tools": [],
+            "max_schema_tokens": 18000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": (
+                "List the Linear teams in this workspace and state their exact names and keys."
+            ),
+            "profile": "linear-core",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["list_teams"],
+            "forbidden_tools": ["save_*", "delete_*"],
+            "max_schema_tokens": 8000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": "List the Linear projects visible in this workspace cleanly.",
+            "profile": "linear-core",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["list_projects"],
+            "forbidden_tools": ["save_*", "delete_*"],
+            "max_schema_tokens": 8000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": (
+                "List up to 5 recent Linear issues and summarize their identifiers and titles."
+            ),
+            "profile": "linear-core",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["list_issues"],
+            "forbidden_tools": ["save_*", "delete_*"],
+            "max_schema_tokens": 8000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": (
+                "Check the current printer status and today's ticket date without printing."
+            ),
+            "profile": "studio",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["printer_status", "today"],
+            "forbidden_tools": ["check_print", "stage_line"],
+            "max_schema_tokens": 12000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": "Check the Tonverk Studio ledger status and summarize what it reports.",
+            "profile": "studio",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["ledger_status"],
+            "forbidden_tools": ["claim_work", "record_build", "set_*"],
+            "max_schema_tokens": 12000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": "Check the Music-Brain index status and report the indexed statistics.",
+            "profile": "studio",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["index_status"],
+            "forbidden_tools": ["propose_studio_update"],
+            "max_schema_tokens": 12000,
+        },
+    },
+    {
+        "inputs": {
+            "prompt": (
+                "Inspect the connected Linear workspace details using read-only Linear tools."
+            ),
+            "profile": "studio",
+        },
+        "expectations": {
+            "expected_outcome": "ok",
+            "expected_tools": ["get_workspace", "list_teams"],
+            "forbidden_tools": ["save_*", "delete_*", "create_*"],
+            "max_schema_tokens": 12000,
+        },
+    },
+]
 
 GOLDEN_BENCHMARK_CASES: list[dict[str, Any]] = [
     {
@@ -115,9 +283,16 @@ def _trace_duration_ms(trace: Any) -> float:
     return (max(ends) - min(starts)) / 1_000_000.0
 
 
-def _serialized_spans(trace: Any, *, include_stacktrace: bool = True) -> str:
+def _serialized_spans(
+    trace: Any,
+    *,
+    include_stacktrace: bool = True,
+    exclude_agent_wrapper: bool = False,
+) -> str:
     data = getattr(trace, "data", None)
     spans = getattr(data, "spans", None) or []
+    if exclude_agent_wrapper and len(spans) > 1:
+        spans = [s for s in spans if str(getattr(s, "name", "") or "") != "agent_eval_invocation"]
     parts: list[str] = []
     for span in spans:
         parts.append(json.dumps(getattr(span, "inputs", None), default=str))
@@ -138,11 +313,38 @@ def _serialized_spans(trace: Any, *, include_stacktrace: bool = True) -> str:
     return "\n".join(parts)
 
 
+def _is_agent_answer_refusal(text: str) -> bool:
+    """Return True when an agent answer communicates a policy/sandbox refusal."""
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            *_POLICY_REFUSAL_MARKERS,
+            "refused",
+            "outside that root",
+            "outside the allowed",
+            "outside allowed",
+            "outside them",
+            "outside the configured",
+            "sandboxed",
+            "sandbox root",
+            "restricted to",
+            "blocked path",
+            "cannot",
+            "can't",
+        )
+    )
+
+
 def is_expected_policy_refusal(trace: Any) -> bool:
     """Return True when a trace reflects an intentional read-only or sandbox policy refusal."""
     if trace is None:
         return False
-    payload_blob = _serialized_spans(trace, include_stacktrace=False)
+    payload_blob = _serialized_spans(
+        trace,
+        include_stacktrace=False,
+        exclude_agent_wrapper=True,
+    )
     if "Traceback (most recent call last):" in payload_blob:
         return False
     data = getattr(trace, "data", None)
@@ -238,12 +440,15 @@ def _build_ollama_clarity_scorer(judge_model: str) -> Any:
 
 
 def normalize_judge_model_uri(judge_model: str | None = None) -> str:
-    """Normalize local Ollama / cloud judge URIs for LiteLLM + MLflow make_judge()."""
+    """Normalize MLflow AI Gateway / Ollama / cloud judge URIs for make_judge()."""
     raw = (
         judge_model
+        or os.getenv("MCP_EVAL_JUDGE_MODEL")
         or os.getenv("MCP_EVAL_OLLAMA_MODEL")
         or DEFAULT_JUDGE_MODEL
     ).strip()
+    if raw.startswith("gateway:/"):
+        return raw
     if raw.startswith("ollama:/"):
         return "ollama_chat:/" + raw.removeprefix("ollama:/").lstrip("/")
     if raw.startswith("ollama:"):
@@ -278,8 +483,11 @@ def build_native_clarity_judge(
     settings: MCPStackSettings | None = None,
 ) -> Any:
     """Build a native MLflow 3.x LLM judge using mlflow.genai.judges.make_judge()."""
+    import mlflow
     from mlflow.genai.judges import make_judge
 
+    if settings is not None:
+        mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
     ollama_url = os.getenv("MCP_EVAL_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
     os.environ.setdefault("OLLAMA_API_BASE", ollama_url)
     normalized = normalize_judge_model_uri(judge_model)
@@ -310,14 +518,83 @@ def build_native_clarity_judge(
     )
 
 
+def _build_gateway_judge_scorer(
+    scorer_name: str,
+    judge_model: str,
+    rubric: str,
+    settings: MCPStackSettings | None = None,
+) -> Any:
+    from mlflow.entities import Feedback
+    from mlflow.genai import scorer
+
+    endpoint = judge_model.removeprefix("gateway:/").lstrip("/").strip()
+    tracking = (
+        settings.mlflow.tracking_uri if settings is not None else "http://localhost:5002"
+    ).rstrip("/")
+    url = f"{tracking}/gateway/mlflow/v1/chat/completions"
+
+    @scorer(name=scorer_name)
+    def _gateway_judge(
+        trace: Any = None,
+        inputs: Any = None,
+        outputs: Any = None,
+        expectations: Any = None,
+    ) -> Feedback:
+        trace_snippet = (
+            _serialized_spans(trace, include_stacktrace=False)[:5500]
+            if trace is not None
+            else "(no trace spans)"
+        )
+        prompt = (
+            f"{rubric}\n\n"
+            'Respond ONLY as JSON: {"value": "yes" or "no", "rationale": "<one sentence>"}.\n\n'
+            f"INPUTS:\n{json.dumps(inputs, default=str)[:800]}\n\n"
+            f"EXPECTATIONS:\n{json.dumps(expectations, default=str)[:800]}\n\n"
+            f"OUTPUTS:\n{json.dumps(outputs, default=str)[:1600]}\n\n"
+            f"TRACE_SPANS:\n{trace_snippet}"
+        )
+        try:
+            resp = httpx.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer mlflow-gateway",
+                },
+                json={
+                    "model": endpoint,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = str(
+                ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            )
+            val, rationale = _parse_ollama_judge_json(content)
+            return Feedback(value=(val == "yes"), rationale=f"[{endpoint}] {rationale}")
+        except Exception as exc:
+            return Feedback(
+                value=False,
+                rationale=f"Gateway judge call failed for '{endpoint}': {exc}",
+            )
+
+    return _gateway_judge
+
+
 def build_agent_tool_use_grounding_judge(
     judge_model: str | None = None,
     *,
     settings: MCPStackSettings | None = None,
 ) -> Any:
     """Build a native MLflow 3.x {{ trace }} judge checking agent tool choice and grounding."""
+    import mlflow
     from mlflow.genai.judges import make_judge
 
+    if settings is not None:
+        mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
     ollama_url = os.getenv("MCP_EVAL_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
     os.environ.setdefault("OLLAMA_API_BASE", ollama_url)
     normalized = normalize_judge_model_uri(judge_model)
@@ -390,11 +667,13 @@ def build_trace_scorers(
         )
         expected_outcome = (expectations or {}).get("expected_outcome")
         if expected_outcome == "policy_refusal":
+            ans_blob = json.dumps(outputs, default=str) if outputs is not None else blob
+            refusal_matched = is_refusal or _is_agent_answer_refusal(ans_blob)
             return Feedback(
-                value=is_refusal,
+                value=refusal_matched,
                 rationale=(
                     "Matched expected governance policy refusal"
-                    if is_refusal
+                    if refusal_matched
                     else "Expected policy refusal but operation succeeded or failed unexpectedly"
                 ),
             )
@@ -456,13 +735,28 @@ def build_trace_scorers(
     if with_llm_judge:
         effective_model = (
             judge_model
+            or os.getenv("MCP_EVAL_JUDGE_MODEL")
             or os.getenv("MCP_EVAL_OLLAMA_MODEL")
             or DEFAULT_JUDGE_MODEL
         )
         has_litellm = importlib.util.find_spec("litellm") is not None
         is_ollama = effective_model.startswith(("ollama:/", "ollama:", "ollama_chat:/"))
+        is_gateway = effective_model.startswith("gateway:/")
         is_typesafe = is_typesafe_judge_model(effective_model, model_api)
-        if has_litellm or is_typesafe or not is_ollama:
+        if is_gateway and not is_typesafe:
+            scorers.append(
+                _build_gateway_judge_scorer(
+                    "tool_response_clarity_judge",
+                    effective_model,
+                    (
+                        "Evaluate this MCP execution trace. Return 'yes' if outputs or intentional "
+                        "read-only/sandbox policy refusals are structured, concise, actionable, "
+                        "and free of exposed secrets or Python tracebacks; otherwise return 'no'."
+                    ),
+                    settings=settings,
+                )
+            )
+        elif has_litellm or is_typesafe or not is_ollama:
             scorers.append(
                 build_native_clarity_judge(
                     effective_model, model_api=model_api, settings=settings
@@ -515,6 +809,186 @@ def sync_golden_dataset(
         "experiment_id": exp.experiment_id,
         "record_count": len(records),
     }
+
+
+def sync_agent_dataset(
+    settings: MCPStackSettings,
+    *,
+    experiment_name: str | None = None,
+    dataset_name: str = AGENT_DATASET_NAME,
+    cases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Create or update the strictly read-only ResponsesAgent evaluation dataset in MLflow."""
+    import mlflow
+    from mlflow.genai.datasets import create_dataset, search_datasets
+
+    exp_target = experiment_name or settings.mlflow.experiment_name
+    mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+    exp = mlflow.set_experiment(exp_target)
+
+    existing = search_datasets(
+        experiment_ids=[exp.experiment_id],
+        filter_string=f"name = '{dataset_name}'",
+        max_results=5,
+    )
+    if existing:
+        dataset = existing[0]
+        action = "updated"
+    else:
+        dataset = create_dataset(
+            name=dataset_name,
+            experiment_id=exp.experiment_id,
+            tags={"suite": "mcp-workshop-agent", "mode": "read-only", "schema": "v1"},
+        )
+        action = "created"
+
+    records = cases if cases is not None else AGENT_BENCHMARK_CASES
+    dataset.merge_records(records)
+    return {
+        "status": action,
+        "dataset_name": dataset_name,
+        "dataset_id": getattr(dataset, "dataset_id", None),
+        "experiment": exp_target,
+        "experiment_id": exp.experiment_id,
+        "record_count": len(records),
+    }
+
+
+def _extract_called_mcp_tools(trace: Any, outputs: Any) -> list[str]:
+    called: list[str] = []
+    spans = getattr(getattr(trace, "data", None), "spans", None) or []
+    for sp in spans:
+        sp_name = str(getattr(sp, "name", "") or "")
+        if sp_name.startswith("mcp."):
+            called.append(sp_name[4:])
+    if not called and isinstance(outputs, dict):
+        raw_tc = outputs.get("tool_calls") or outputs.get("toolCalls") or []
+        if isinstance(raw_tc, list):
+            called.extend(str(x) for x in raw_tc if x)
+    return called
+
+
+def build_agent_scorers(
+    *,
+    latency_sla_ms: float = 45000.0,
+    forbidden_tokens: list[str] | None = None,
+    with_llm_judge: bool = False,
+    judge_model: str | None = None,
+    model_api: str = "default",
+    settings: MCPStackSettings | None = None,
+) -> list[Any]:
+    """Build deterministic agent scorers (trace, tool choice, token budget) + grounding judge."""
+    from mlflow.entities import Feedback
+    from mlflow.genai import scorer
+
+    base_scorers = build_trace_scorers(
+        latency_sla_ms=latency_sla_ms,
+        forbidden_tokens=forbidden_tokens,
+        with_llm_judge=with_llm_judge,
+        judge_model=judge_model,
+        model_api=model_api,
+        settings=settings,
+    )
+
+    @scorer(name="tool_selection_accuracy")
+    def tool_selection_accuracy(
+        trace: Any = None,
+        outputs: Any = None,
+        expectations: dict[str, Any] | None = None,
+    ) -> Feedback:
+        exp = expectations or {}
+        called = _extract_called_mcp_tools(trace, outputs)
+        forbidden = [str(p) for p in (exp.get("forbidden_tools") or []) if p]
+        for t_name in called:
+            if any(fnmatch.fnmatchcase(t_name, pat) for pat in forbidden):
+                return Feedback(
+                    value=False,
+                    rationale=f"Called forbidden tool '{t_name}' (forbidden={forbidden})",
+                )
+
+        if exp.get("expected_outcome") == "policy_refusal":
+            ans = (
+                str(outputs.get("answer") or "")
+                if isinstance(outputs, dict)
+                else str(outputs or "")
+            )
+            refusal_honored = is_expected_policy_refusal(trace) or _is_agent_answer_refusal(ans)
+            return Feedback(
+                value=refusal_honored,
+                rationale=f"policy_refusal={refusal_honored}, called={called}",
+            )
+
+        expected = [str(p) for p in (exp.get("expected_tools") or []) if p]
+        if expected:
+            matched = any(
+                fnmatch.fnmatchcase(t_name, pat) for t_name in called for pat in expected
+            )
+            return Feedback(
+                value=matched,
+                rationale=f"called={called}, expected_any={expected}",
+            )
+        return Feedback(value=True, rationale=f"called={called}")
+
+    @scorer(name="schema_token_budget")
+    def schema_token_budget(
+        trace: Any = None,
+        outputs: Any = None,
+        expectations: dict[str, Any] | None = None,
+    ) -> Feedback:
+        max_tokens = (expectations or {}).get("max_schema_tokens")
+        if max_tokens is None:
+            return Feedback(value=True, rationale="No max_schema_tokens constraint")
+        est: int | None = None
+        if isinstance(outputs, dict) and outputs.get("estimated_schema_tokens") is not None:
+            with contextlib.suppress(Exception):
+                est = int(outputs["estimated_schema_tokens"])
+        if est is None and trace is not None:
+            spans = getattr(getattr(trace, "data", None), "spans", None) or []
+            for sp in spans:
+                sp_out = getattr(sp, "outputs", None)
+                if isinstance(sp_out, dict) and sp_out.get("estimated_schema_tokens") is not None:
+                    with contextlib.suppress(Exception):
+                        est = int(sp_out["estimated_schema_tokens"])
+                        break
+        if est is None:
+            return Feedback(value=False, rationale="Missing estimated_schema_tokens telemetry")
+        ok = est <= int(max_tokens)
+        return Feedback(value=ok, rationale=f"schema_tokens={est} (budget={int(max_tokens)})")
+
+    scorers = [*base_scorers, tool_selection_accuracy, schema_token_budget]
+    if with_llm_judge and not is_typesafe_judge_model(judge_model, model_api):
+        effective_model = (
+            judge_model
+            or os.getenv("MCP_EVAL_JUDGE_MODEL")
+            or os.getenv("MCP_EVAL_OLLAMA_MODEL")
+            or DEFAULT_JUDGE_MODEL
+        )
+        has_litellm = importlib.util.find_spec("litellm") is not None
+        is_ollama = effective_model.startswith(("ollama:/", "ollama:", "ollama_chat:/"))
+        is_gateway = effective_model.startswith("gateway:/")
+        if is_gateway:
+            scorers.append(
+                _build_gateway_judge_scorer(
+                    "agent_tool_use_grounding_judge",
+                    effective_model,
+                    (
+                        "Inspect the multi-step ResponsesAgent and MCP TOOL spans below. "
+                        "Verify that the agent selected appropriate MCP tools, passed accurate "
+                        "arguments, did not fabricate or contradict observed tool outputs, and "
+                        "gave a grounded final response (or explained policy/tool refusals "
+                        "honestly). Return 'yes' if all checks hold, otherwise 'no'."
+                    ),
+                    settings=settings,
+                )
+            )
+        elif has_litellm or not is_ollama:
+            scorers.append(
+                build_agent_tool_use_grounding_judge(
+                    effective_model,
+                    settings=settings,
+                )
+            )
+    return scorers
 
 
 def register_experiment_scorers(
@@ -1021,7 +1495,11 @@ def get_eval_run_detail(
     client = mlflow.MlflowClient(tracking_uri=settings.mlflow.tracking_uri)
     run = client.get_run(run_id)
     metrics = {k: round(float(v), 4) for k, v in (run.data.metrics or {}).items()}
-    traces = client.search_traces(run_id=run_id, max_results=200)
+    exp_id = getattr(run.info, "experiment_id", None)
+    search_kwargs: dict[str, Any] = {"run_id": run_id, "max_results": 200}
+    if exp_id:
+        search_kwargs["locations"] = [str(exp_id)]
+    traces = client.search_traces(**search_kwargs)
 
     rows: list[dict[str, Any]] = []
     for tr in traces:
@@ -1117,15 +1595,19 @@ def compare_eval_runs(
 def run_agent_dataset_evaluation(
     settings: MCPStackSettings,
     *,
-    dataset_name: str = GOLDEN_DATASET_NAME,
+    dataset_name: str = AGENT_DATASET_NAME,
     experiment_name: str | None = None,
     profile: str | None = None,
     model: str | None = None,
+    latency_sla_ms: float = 45000.0,
+    temperature: float | None = 0.0,
+    max_workers: int | None = None,
+    run_name: str | None = None,
     with_llm_judge: bool = False,
     judge_model: str | None = None,
     model_api: str = "default",
 ) -> dict[str, Any]:
-    """Run mlflow.genai.evaluate() against the co-hosted ResponsesAgent /invocations."""
+    """Run mlflow.genai.evaluate() against co-hosted ResponsesAgent with replayed TOOL spans."""
     import mlflow
     import mlflow.genai
     from mlflow.genai.datasets import search_datasets
@@ -1142,62 +1624,158 @@ def run_agent_dataset_evaluation(
         raise ValueError(f"Dataset '{dataset_name}' not found in experiment '{exp_target}'")
     dataset = datasets[0]
     agent_url = f"{settings.agent.url.rstrip('/')}/invocations"
+    req_timeout = max(float(settings.agent.timeout_seconds), 180.0)
 
     @mlflow.trace(name="agent_eval_invocation", span_type="CHAIN")
-    def predict_fn(**row_inputs: Any) -> str:
-        prompt = json.dumps(row_inputs, default=str)
+    def predict_fn(**row_inputs: Any) -> dict[str, Any]:
+        prompt = str(
+            row_inputs.get("prompt")
+            or row_inputs.get("question")
+            or json.dumps(row_inputs, default=str)
+        )
+        eff_profile = profile or str(row_inputs.get("profile") or "").strip() or None
         custom_inputs: dict[str, Any] = {}
-        if profile:
-            custom_inputs["profile"] = profile
+        if eff_profile:
+            custom_inputs["profile"] = eff_profile
         if model:
             custom_inputs["model"] = model
-        resp = httpx.post(
-            agent_url,
-            json={
-                "input": [{"role": "user", "content": prompt}],
-                "custom_inputs": custom_inputs,
-            },
-            timeout=settings.agent.timeout_seconds,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        texts: list[str] = []
-        for out in data.get("output") or []:
-            content = out.get("content")
-            if isinstance(content, list):
-                texts.extend(str(c.get("text") or "") for c in content if isinstance(c, dict))
-            elif isinstance(content, str):
-                texts.append(content)
-        return "\n".join(t for t in texts if t) or json.dumps(data, default=str)
+        if temperature is not None:
+            custom_inputs["temperature"] = temperature
+        try:
+            resp = httpx.post(
+                agent_url,
+                json={
+                    "input": [{"role": "user", "content": prompt}],
+                    "custom_inputs": custom_inputs,
+                },
+                timeout=req_timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except (httpx.TimeoutException, httpx.HTTPError) as exc:
+            return {
+                "answer": f"Agent request failed: {exc}",
+                "ok": False,
+                "error": str(exc),
+                "profile": eff_profile,
+                "model": model or settings.agent.llm_model,
+                "tool_count": None,
+                "estimated_schema_tokens": None,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "tool_calls": [],
+            }
+        custom_outputs = dict(data.get("custom_outputs") or {})
+        raw_outputs = list(data.get("output") or [])
 
-    scorers = build_trace_scorers(
+        fc_by_id: dict[str, dict[str, Any]] = {}
+        fc_order: list[dict[str, Any]] = []
+        fco_by_id: dict[str, str] = {}
+        texts: list[str] = []
+        for out in raw_outputs:
+            item_type = str(out.get("type") or "")
+            if item_type == "function_call":
+                cid = str(out.get("call_id") or out.get("id") or len(fc_order))
+                entry = {
+                    "call_id": cid,
+                    "name": str(out.get("name") or "unknown_tool"),
+                    "arguments": out.get("arguments"),
+                }
+                fc_by_id[cid] = entry
+                fc_order.append(entry)
+            elif item_type == "function_call_output":
+                cid = str(out.get("call_id") or "")
+                fco_by_id[cid] = str(out.get("output") or "")
+            else:
+                content = out.get("content")
+                if isinstance(content, list):
+                    texts.extend(str(c.get("text") or "") for c in content if isinstance(c, dict))
+                elif isinstance(content, str):
+                    texts.append(content)
+
+        for fc in fc_order:
+            raw_args = fc.get("arguments")
+            try:
+                parsed_args = (
+                    json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                )
+            except Exception:
+                parsed_args = {"raw": raw_args}
+            out_txt = fco_by_id.get(str(fc["call_id"]), "")
+            with mlflow.start_span(name=f"mcp.{fc['name']}", span_type="TOOL") as t_span:
+                span_in = (
+                    parsed_args if isinstance(parsed_args, dict) else {"value": parsed_args}
+                )
+                t_span.set_inputs(span_in)
+                t_span.set_outputs({"output": out_txt[:2000]})
+
+        answer = "\n".join(t for t in texts if t) or json.dumps(data, default=str)
+        tool_calls = [fc["name"] for fc in fc_order]
+        return {
+            "answer": answer,
+            "profile": custom_outputs.get("profile") or eff_profile,
+            "model": custom_outputs.get("model") or model or settings.agent.llm_model,
+            "tool_count": custom_outputs.get("toolCount"),
+            "estimated_schema_tokens": custom_outputs.get("estimatedSchemaTokens"),
+            "prompt_tokens": custom_outputs.get("promptTokens"),
+            "completion_tokens": custom_outputs.get("completionTokens"),
+            "tool_calls": tool_calls,
+        }
+
+    scorers = build_agent_scorers(
+        latency_sla_ms=latency_sla_ms,
         forbidden_tokens=list(settings.gateway.clients.keys()),
         with_llm_judge=with_llm_judge,
         judge_model=judge_model,
         model_api=model_api,
         settings=settings,
     )
-    if with_llm_judge and not is_typesafe_judge_model(judge_model, model_api):
-        effective_model = (
+
+    effective_workers = max_workers
+    if effective_workers is None:
+        eff_judge = (
             judge_model
+            or os.getenv("MCP_EVAL_JUDGE_MODEL")
             or os.getenv("MCP_EVAL_OLLAMA_MODEL")
             or DEFAULT_JUDGE_MODEL
         )
-        has_litellm = importlib.util.find_spec("litellm") is not None
-        is_ollama = effective_model.startswith(("ollama:/", "ollama:", "ollama_chat:/"))
-        if has_litellm or not is_ollama:
-            scorers.append(
-                build_agent_tool_use_grounding_judge(
-                    effective_model,
-                    settings=settings,
-                )
+        uses_local_ollama = (
+            not is_typesafe_judge_model(eff_judge, model_api)
+            and (
+                eff_judge.startswith(("ollama:/", "ollama:", "ollama_chat:/"))
+                or "11434" in (settings.agent.llm_base_url or "")
             )
-    result = mlflow.genai.evaluate(data=dataset, predict_fn=predict_fn, scorers=scorers)
+        )
+        effective_workers = 1 if uses_local_ollama else 3
+
+    prev_workers = os.environ.get("MLFLOW_GENAI_EVAL_MAX_WORKERS")
+    if effective_workers is not None:
+        os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = str(effective_workers)
+    try:
+        with mlflow.start_run(run_name=run_name) as active_run:
+            mlflow.log_params(
+                {
+                    "dataset_name": dataset_name,
+                    "profile_override": profile or "row_default",
+                    "agent_model": model or settings.agent.llm_model,
+                    "judge_model": judge_model or DEFAULT_JUDGE_MODEL if with_llm_judge else "none",
+                }
+            )
+            result = mlflow.genai.evaluate(data=dataset, predict_fn=predict_fn, scorers=scorers)
+            run_id = getattr(result, "run_id", None) or active_run.info.run_id
+    finally:
+        if effective_workers is not None:
+            if prev_workers is None:
+                os.environ.pop("MLFLOW_GENAI_EVAL_MAX_WORKERS", None)
+            else:
+                os.environ["MLFLOW_GENAI_EVAL_MAX_WORKERS"] = prev_workers
+
     return {
         "status": "completed",
         "mode": "agent",
         "dataset_name": dataset_name,
         "experiment": exp_target,
-        "run_id": getattr(result, "run_id", None),
+        "experiment_id": exp.experiment_id,
+        "run_id": run_id,
         "metrics": dict(getattr(result, "metrics", {}) or {}),
     }

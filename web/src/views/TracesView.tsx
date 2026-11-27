@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { buildMlflowExperimentUrl } from "../lib/urls";
 import { formatDuration } from "../lib/format";
 import type {
   PlaygroundReplayRequest,
@@ -64,11 +65,13 @@ function extractReplayPayload(
 export function TracesView({
   initialTraceId = null,
   mlflowUiBase = "http://localhost:5002",
+  mlflowExperimentId = null,
   onSelectTraceId,
   onReplayInPlayground,
 }: {
   initialTraceId?: string | null;
   mlflowUiBase?: string;
+  mlflowExperimentId?: string | null;
   onSelectTraceId?: (traceId: string | null) => void;
   onReplayInPlayground?: (req: Omit<PlaygroundReplayRequest, "nonce">) => void;
 }) {
@@ -216,7 +219,7 @@ export function TracesView({
   }
 
   const evalRuns = data?.evalRuns || data?.evalHistory || [];
-  const expId = data?.experimentId || "";
+  const expId = data?.experimentId || mlflowExperimentId || "";
   const replayCandidate = useMemo(() => extractReplayPayload(detail), [detail]);
 
   return (
@@ -226,7 +229,7 @@ export function TracesView({
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h2 className="text-[13.5px] font-semibold m-0">Eval Run History & Regression Guard</h2>
           <a
-            href={mlflowUiBase}
+            href={buildMlflowExperimentUrl(mlflowUiBase, expId, { section: "traces" })}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1 text-[12px] text-[var(--accent)] hover:underline"

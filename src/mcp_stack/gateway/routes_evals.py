@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 
 from mcp_stack.evals import (
+    AGENT_DATASET_NAME,
     GOLDEN_DATASET_NAME,
     compare_eval_runs,
     get_eval_dataset,
@@ -19,6 +20,7 @@ from mcp_stack.evals import (
     run_agent_dataset_evaluation,
     run_golden_benchmark,
     run_trace_evaluation,
+    sync_agent_dataset,
 )
 from mcp_stack.gateway.state import GatewayRuntimeState
 
@@ -81,6 +83,26 @@ def build_evals_router(state: GatewayRuntimeState) -> APIRouter:
                 content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
             )
 
+    @router.post("/api/v1/evals/sync-agent-dataset", response_model=None)
+    async def eval_sync_agent_dataset_api(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any] | JSONResponse:
+        body = payload if isinstance(payload, dict) else {}
+        dataset_name = str(body.get("dataset_name") or AGENT_DATASET_NAME).strip()
+        experiment_name = str(body.get("experiment") or "").strip() or None
+        try:
+            return await asyncio.to_thread(
+                sync_agent_dataset,
+                settings,
+                experiment_name=experiment_name,
+                dataset_name=dataset_name,
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"error": {"code": "MLFLOW_UNAVAILABLE", "message": str(exc)}},
+            )
+
     @router.get("/api/v1/evals/runs")
     async def eval_runs_list_api(experiment: str = "", limit: int = 25) -> dict[str, Any]:
         try:
@@ -127,8 +149,10 @@ def build_evals_router(state: GatewayRuntimeState) -> APIRouter:
         with_judge = bool(body.get("with_llm_judge", False))
         judge_model = str(body.get("judge_model") or "").strip() or None
         model_api = str(body.get("model_api") or "default").strip().lower() or "default"
-        dataset_name = str(body.get("dataset_name") or GOLDEN_DATASET_NAME).strip()
+        default_ds = AGENT_DATASET_NAME if mode == "agent" else GOLDEN_DATASET_NAME
+        dataset_name = str(body.get("dataset_name") or default_ds).strip()
         experiment_name = str(body.get("experiment") or "").strip() or None
+        run_name = str(body.get("run_name") or "").strip() or None
 
         try:
             if mode == "traces":
@@ -150,6 +174,7 @@ def build_evals_router(state: GatewayRuntimeState) -> APIRouter:
                     experiment_name=experiment_name,
                     profile=str(body.get("profile") or "").strip() or None,
                     model=str(body.get("model") or "").strip() or None,
+                    run_name=run_name,
                     with_llm_judge=with_judge,
                     judge_model=judge_model,
                     model_api=model_api,

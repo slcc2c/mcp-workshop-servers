@@ -49,6 +49,10 @@ export interface ProfileInventoryItem {
   servers: string[];
   includesUpstreamMcp?: boolean;
   builtin?: boolean;
+  allowTools?: string[];
+  denyTools?: string[];
+  toolCount?: number;
+  estimatedSchemaTokens?: number;
 }
 
 export interface HealthResponse {
@@ -58,6 +62,8 @@ export interface HealthResponse {
   composedRoute: string;
   defaultProfile: string;
   mlflowUiUrl?: string | null;
+  mlflowExperimentName?: string | null;
+  mlflowExperimentId?: string | null;
   servers: ServerInventoryItem[];
   profiles: ProfileInventoryItem[];
 }
@@ -104,6 +110,7 @@ export interface SchemaProperty {
 export interface ToolsResponse {
   totalTools: number;
   profileCounts: Record<string, number>;
+  profileTokenBudgets?: Record<string, number>;
   tools: ToolItem[];
 }
 

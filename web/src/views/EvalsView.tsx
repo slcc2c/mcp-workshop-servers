@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { Database, FlaskConical, GitCompare, Play, Plus, RefreshCw } from "lucide-react";
+import { Database, ExternalLink, FlaskConical, GitCompare, Play, Plus, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
+import { buildMlflowExperimentUrl } from "../lib/urls";
 import type {
   EvalDatasetDetailResponse,
   EvalDatasetSummary,
@@ -17,10 +18,14 @@ function formatScore(val: unknown): string {
 
 export function EvalsView({
   profiles,
+  mlflowUiBase = "http://localhost:5002",
+  mlflowExperimentId = null,
   onInspectTrace,
   onAfterRun,
 }: {
   profiles: ProfileInventoryItem[];
+  mlflowUiBase?: string;
+  mlflowExperimentId?: string | null;
   onInspectTrace: (traceId: string) => void;
   onAfterRun: () => Promise<void>;
 }) {
@@ -42,7 +47,7 @@ export function EvalsView({
   const [showLauncher, setShowLauncher] = useState(false);
   const [evalMode, setEvalMode] = useState<"golden" | "traces" | "agent">("golden");
   const [withJudge, setWithJudge] = useState(false);
-  const [judgeModel, setJudgeModel] = useState("ollama:/gemma4:31b");
+  const [judgeModel, setJudgeModel] = useState("gateway:/mcp-workshop-judge-v1");
   const [evalProfile, setEvalProfile] = useState("core");
   const [evalDatasetName, setEvalDatasetName] = useState("");
   const [running, setRunning] = useState(false);
@@ -153,6 +158,17 @@ export function EvalsView({
           <h2 className="text-[15px] font-semibold m-0">Evaluations & Datasets Workbench</h2>
         </div>
         <div className="flex items-center gap-2">
+          <a
+            href={buildMlflowExperimentUrl(mlflowUiBase, mlflowExperimentId, {
+              section: "runs",
+              runId: selectedRunId || null,
+            })}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] text-[12px] text-[var(--accent)]"
+          >
+            Open in MLflow <ExternalLink className="w-3.5 h-3.5" />
+          </a>
           <button
             type="button"
             onClick={() => loadAll()}
@@ -239,22 +255,22 @@ export function EvalsView({
                 aria-label="Judge model URI"
                 value={judgeModel}
                 onChange={(e) => setJudgeModel(e.target.value)}
-                placeholder="ollama:/gemma4:31b, openai:/gpt-4o-mini, or typesafe:/jev-latest"
+                placeholder="gateway:/mcp-workshop-judge-v1, ollama:/gemma4-64k:latest, or typesafe:/jev-latest"
                 className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[12px] font-mono min-w-[260px]"
               />
               <button
                 type="button"
-                onClick={() => setJudgeModel("ollama:/gemma4:31b")}
+                onClick={() => setJudgeModel("gateway:/mcp-workshop-judge-v1")}
                 className="px-2 py-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[11px] font-mono cursor-pointer"
               >
-                ollama:/gemma4:31b
+                gateway:/mcp-workshop-judge-v1
               </button>
               <button
                 type="button"
-                onClick={() => setJudgeModel("ollama:/gpt-oss:120b")}
+                onClick={() => setJudgeModel("ollama:/gemma4-64k:latest")}
                 className="px-2 py-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[11px] font-mono cursor-pointer"
               >
-                ollama:/gpt-oss:120b
+                ollama:/gemma4-64k:latest
               </button>
               <button
                 type="button"
@@ -272,6 +288,9 @@ export function EvalsView({
               </button>
               {judgeModel.startsWith("typesafe:/") && (
                 <StatusBadge label="model_api=decisions" tone="accent" />
+              )}
+              {judgeModel.startsWith("gateway:/") && (
+                <StatusBadge label="gateway {{ trace }}" tone="ok" />
               )}
               {judgeModel.startsWith("ollama:/") && (
                 <StatusBadge label="local {{ trace }}" tone="ok" />

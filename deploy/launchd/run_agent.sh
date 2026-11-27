@@ -10,8 +10,8 @@ export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://localhost:5002}"
 export MLFLOW_TRACING_ENABLED="${MLFLOW_TRACING_ENABLED:-true}"
 export MLFLOW_DISABLE_AGENT_HINT=1
 export MCP_AGENT_URL="${MCP_AGENT_URL:-http://127.0.0.1:8092}"
-export MCP_AGENT_LLM_BASE_URL="${MCP_AGENT_LLM_BASE_URL:-http://127.0.0.1:11434/v1}"
-export MCP_AGENT_LLM_MODEL="${MCP_AGENT_LLM_MODEL:-qwen3.8:27b}"
+export MCP_AGENT_LLM_BASE_URL="${MCP_AGENT_LLM_BASE_URL:-http://localhost:5002/gateway/mlflow/v1}"
+export MCP_AGENT_LLM_MODEL="${MCP_AGENT_LLM_MODEL:-mcp-workshop-agent-v1}"
 export MCP_AGENT_DEFAULT_PROFILE="${MCP_AGENT_DEFAULT_PROFILE:-core}"
 
 # Wait briefly for the gateway /ready endpoint so MCP tool calls resolve on boot.

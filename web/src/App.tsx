@@ -628,6 +628,7 @@ export function App() {
         <TracesView
           initialTraceId={selectedTraceId}
           mlflowUiBase={mlflowUiBase}
+          mlflowExperimentId={health?.mlflowExperimentId}
           onSelectTraceId={setSelectedTraceId}
           onReplayInPlayground={handleReplayInPlayground}
         />
@@ -636,6 +637,8 @@ export function App() {
       {activeTab === "evals" && (
         <EvalsView
           profiles={health?.profiles || []}
+          mlflowUiBase={mlflowUiBase}
+          mlflowExperimentId={health?.mlflowExperimentId}
           onInspectTrace={handleInspectTrace}
           onAfterRun={refreshAll}
         />

@@ -56,6 +56,8 @@ def _load_prompt_instruction(settings: MCPStackSettings, prompt_uri: str) -> str
         import mlflow.genai
 
         mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+        if settings.mlflow.experiment_name:
+            mlflow.set_experiment(settings.mlflow.experiment_name)
         pv = mlflow.genai.load_prompt(prompt_uri)
         tmpl = getattr(pv, "template", None)
         return str(tmpl) if tmpl else None
@@ -124,7 +126,7 @@ async def _chat_completion(
     if temperature is not None:
         payload["temperature"] = temperature
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
-    resp = await http_client.post(endpoint, headers=headers, json=payload, timeout=90.0)
+    resp = await http_client.post(endpoint, headers=headers, json=payload, timeout=180.0)
     resp.raise_for_status()
     return dict(resp.json())
 
@@ -156,6 +158,7 @@ async def stream_workshop_agent(
     settings: MCPStackSettings,
     http_client_factory: Callable[[], httpx.AsyncClient] | None = None,
     mcp_client_factory: Callable[[str], Client] | None = None,
+    telemetry: dict[str, Any] | None = None,
 ) -> AsyncIterator[ResponsesAgentStreamEvent]:
     """Run one streaming multi-turn ResponsesAgent execution wired to curated MCP tools."""
     mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
@@ -171,7 +174,13 @@ async def stream_workshop_agent(
     base_url, model, api_key = _resolve_llm_config(settings, custom)
 
     system_parts = [
-        "You are the MCP Workshop Agent. Use only verified outputs from connected MCP tools.",
+        (
+            "You are the MCP Workshop Agent. Use connected MCP tools directly to verify facts; "
+            "call only the tool(s) needed for the user request, cite exact observed identifiers, "
+            "names, statuses, and counts, and never invent or extrapolate unobserved values. "
+            "If a tool returns a read-only or sandbox policy refusal, state that clearly "
+            "without retrying or fabricating outputs."
+        ),
         f"Active gateway MCP profile: {profile}.",
     ]
     prompt_uri = str(custom.get("prompt_uri") or "").strip()
@@ -216,11 +225,37 @@ async def stream_workshop_agent(
         async with mcp_cli:
             raw_tools = await mcp_cli.list_tools()
             openai_tools = _mcp_tools_to_openai(list(raw_tools))
+            estimated_schema_tokens = sum(
+                max(1, len(json.dumps(t, default=str)) // 4) for t in openai_tools
+            )
+            prompt_tokens = 0
+            completion_tokens = 0
+            tool_call_names: list[str] = []
+            if telemetry is not None:
+                telemetry.update(
+                    {
+                        "profile": profile,
+                        "model": model,
+                        "toolCount": len(openai_tools),
+                        "estimatedSchemaTokens": estimated_schema_tokens,
+                        "promptTokens": 0,
+                        "completionTokens": 0,
+                        "toolCalls": tool_call_names,
+                    }
+                )
 
             final_text = ""
             for _round in range(max_rounds):
                 with mlflow.start_span(name="agent_llm_turn", span_type="LLM") as llm_span:
-                    llm_span.set_inputs({"model": model, "message_count": len(messages)})
+                    llm_span.set_inputs(
+                        {
+                            "model": model,
+                            "profile": profile,
+                            "message_count": len(messages),
+                            "tool_count": len(openai_tools),
+                            "estimated_schema_tokens": estimated_schema_tokens,
+                        }
+                    )
                     completion = await _chat_completion(
                         http_client,
                         base_url=base_url,
@@ -230,11 +265,27 @@ async def stream_workshop_agent(
                         tools=openai_tools,
                         temperature=temperature,
                     )
-                    llm_span.set_outputs({"choices": len(completion.get("choices") or [])})
+                    usage = dict(completion.get("usage") or {})
+                    prompt_tokens += int(usage.get("prompt_tokens") or 0)
+                    completion_tokens += int(usage.get("completion_tokens") or 0)
+                    choice = (completion.get("choices") or [{}])[0]
+                    msg = dict(choice.get("message") or {})
+                    tool_calls = list(msg.get("tool_calls") or [])
+                    round_calls = [
+                        str((tc.get("function") or {}).get("name") or "") for tc in tool_calls
+                    ]
+                    tool_call_names.extend([c for c in round_calls if c])
+                    if telemetry is not None:
+                        telemetry["promptTokens"] = prompt_tokens
+                        telemetry["completionTokens"] = completion_tokens
+                    llm_span.set_outputs(
+                        {
+                            "choices": len(completion.get("choices") or []),
+                            "tool_calls": round_calls,
+                            "usage": usage,
+                        }
+                    )
 
-                choice = (completion.get("choices") or [{}])[0]
-                msg = dict(choice.get("message") or {})
-                tool_calls = list(msg.get("tool_calls") or [])
                 if not tool_calls:
                     final_text = str(msg.get("content") or "")
                     break
@@ -320,20 +371,25 @@ def create_agent_server_app(
     @invoke()
     async def handle_invoke(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         outputs: list[Any] = []
+        telemetry: dict[str, Any] = {}
         async for ev in stream_workshop_agent(
             request,
             settings=settings,
             http_client_factory=http_client_factory,
             mcp_client_factory=mcp_client_factory,
+            telemetry=telemetry,
         ):
             if ev.type == "response.output_item.done":
                 item = ev.model_dump().get("item")
                 if item is not None:
                     outputs.append(item)
         trace_id = mlflow.get_last_active_trace_id()
+        custom_out = {k: v for k, v in telemetry.items() if v is not None}
+        if trace_id:
+            custom_out["traceId"] = trace_id
         return ResponsesAgentResponse(
             output=outputs,
-            custom_outputs={"traceId": trace_id} if trace_id else None,
+            custom_outputs=custom_out or None,
         )
 
     server = AgentServer("ResponsesAgent")

@@ -4,6 +4,24 @@ import { api } from "../lib/api";
 import type { ProfileInventoryItem, ServerInventoryItem } from "../types";
 import { StatusBadge } from "./StatusDot";
 
+function parseGlobInput(raw: string): string[] {
+  return raw
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000) return `~${(tokens / 1000).toFixed(1)}k tok`;
+  return `~${tokens} tok`;
+}
+
+function tokenBudgetTone(tokens: number): "ok" | "warn" | "err" {
+  if (tokens > 16000) return "err";
+  if (tokens > 8000) return "warn";
+  return "ok";
+}
+
 export function ProfilesEditor({
   profiles,
   servers,
@@ -18,6 +36,8 @@ export function ProfilesEditor({
   const [editingName, setEditingName] = useState<string>("");
   const [isNew, setIsNew] = useState<boolean>(true);
   const [selectedServers, setSelectedServers] = useState<string[]>(["gateway"]);
+  const [allowGlobsText, setAllowGlobsText] = useState<string>("");
+  const [denyGlobsText, setDenyGlobsText] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,6 +58,8 @@ export function ProfilesEditor({
     setIsNew(true);
     setEditingName("");
     setSelectedServers(["gateway"]);
+    setAllowGlobsText("");
+    setDenyGlobsText("");
     setError(null);
   };
 
@@ -45,6 +67,8 @@ export function ProfilesEditor({
     setIsNew(false);
     setEditingName(p.name);
     setSelectedServers([...(p.servers || [])]);
+    setAllowGlobsText((p.allowTools || []).join(", "));
+    setDenyGlobsText((p.denyTools || []).join(", "));
     setError(null);
   };
 
@@ -60,13 +84,17 @@ export function ProfilesEditor({
       setError("Profile name is required.");
       return;
     }
+    const allowList = parseGlobInput(allowGlobsText);
+    const denyList = parseGlobInput(denyGlobsText);
+    const hasFilterPayload = !isNew || allowList.length > 0 || denyList.length > 0;
+    const filters = hasFilterPayload ? { allow_tools: allowList, deny_tools: denyList } : undefined;
     setSaving(true);
     setError(null);
     try {
       if (isNew) {
-        await api.createProfile(clean, selectedServers);
+        await api.createProfile(clean, selectedServers, filters);
       } else {
-        await api.updateProfile(clean, selectedServers);
+        await api.updateProfile(clean, selectedServers, filters);
       }
       await onChanged();
       if (isNew) startCreate();
@@ -111,7 +139,9 @@ export function ProfilesEditor({
 
         <div className="space-y-2">
           {profiles.map((p) => {
-            const count = profileCounts[p.name];
+            const count = typeof p.toolCount === "number" ? p.toolCount : profileCounts[p.name];
+            const estTokens = p.estimatedSchemaTokens;
+            const filterCount = (p.allowTools?.length || 0) + (p.denyTools?.length || 0);
             return (
               <div
                 key={p.name}
@@ -119,14 +149,21 @@ export function ProfilesEditor({
                 className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-surface)] p-3.5 space-y-2"
               >
                 <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-mono font-semibold text-[13px]">{p.name}</span>
                     {p.builtin && <StatusBadge label="built-in" tone="neutral" />}
                     {p.name === "discover" && <StatusBadge label="progressive-disclosure" tone="accent" />}
+                    {filterCount > 0 && <StatusBadge label={`${filterCount} globs`} tone="accent" />}
                     {typeof count === "number" && (
                       <span className="font-mono text-[11px] text-[var(--text-muted)]">
                         {count} tools
                       </span>
+                    )}
+                    {typeof estTokens === "number" && estTokens > 0 && (
+                      <StatusBadge
+                        label={formatTokenCount(estTokens)}
+                        tone={tokenBudgetTone(estTokens)}
+                      />
                     )}
                   </div>
                   <div className="flex items-center gap-1.5">
@@ -219,6 +256,31 @@ export function ProfilesEditor({
                 );
               })}
             </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label className="block text-[11.5px] text-[var(--text-secondary)] space-y-1">
+              <span>Allow tool globs (optional)</span>
+              <input
+                type="text"
+                aria-label="Allow tool globs"
+                value={allowGlobsText}
+                onChange={(e) => setAllowGlobsText(e.target.value)}
+                placeholder="list_*, get_*"
+                className="w-full rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[11.5px] font-mono"
+              />
+            </label>
+            <label className="block text-[11.5px] text-[var(--text-secondary)] space-y-1">
+              <span>Deny tool globs (optional)</span>
+              <input
+                type="text"
+                aria-label="Deny tool globs"
+                value={denyGlobsText}
+                onChange={(e) => setDenyGlobsText(e.target.value)}
+                placeholder="delete_*, print_*"
+                className="w-full rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[11.5px] font-mono"
+              />
+            </label>
           </div>
 
           {error && (
