@@ -16,6 +16,7 @@ from mcp_stack.core.config import MCPStackSettings
 
 MLFLOW_MCP_LABEL = "com.spencer.mcp-mlflow-mcp"
 GATEWAY_LABEL = "com.spencer.mcp-workshop-gateway"
+AGENT_LABEL = "com.spencer.mcp-workshop-agent"
 WATCHDOG_LABEL = "com.spencer.mcp-workshop-watchdog"
 LOG_DIR = Path.home() / "Library/Logs/mcp-workshop-stack"
 LAUNCH_AGENTS_DIR = Path.home() / "Library/LaunchAgents"
@@ -83,6 +84,7 @@ def get_service_status(settings: MCPStackSettings) -> dict[str, Any]:
     services = {
         MLFLOW_MCP_LABEL: _launchctl_info(uid, MLFLOW_MCP_LABEL),
         GATEWAY_LABEL: _launchctl_info(uid, GATEWAY_LABEL),
+        AGENT_LABEL: _launchctl_info(uid, AGENT_LABEL),
         WATCHDOG_LABEL: _launchctl_info(uid, WATCHDOG_LABEL),
     }
     ready: dict[str, Any] = {}
@@ -137,14 +139,14 @@ def install_launchagents(
     agents_dir.mkdir(parents=True, exist_ok=True)
 
     installed: list[str] = []
-    for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL, WATCHDOG_LABEL):
+    for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL, AGENT_LABEL, WATCHDOG_LABEL):
         src = src_dir / f"{label}.plist"
         dst = agents_dir / f"{label}.plist"
         shutil.copy2(src, dst)
         subprocess.run(["plutil", "-lint", str(dst)], check=True, capture_output=True, text=True)
         installed.append(str(dst))
 
-    for label in (WATCHDOG_LABEL, GATEWAY_LABEL, MLFLOW_MCP_LABEL):
+    for label in (WATCHDOG_LABEL, AGENT_LABEL, GATEWAY_LABEL, MLFLOW_MCP_LABEL):
         bootout = subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}/{label}"],
             check=False,
@@ -164,10 +166,10 @@ def install_launchagents(
                     break
                 time.sleep(0.2)
 
-    for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL, WATCHDOG_LABEL):
+    for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL, AGENT_LABEL, WATCHDOG_LABEL):
         plist_path = str(agents_dir / f"{label}.plist")
         last_err = ""
-        for attempt in range(3):
+        for attempt in range(10):
             res = subprocess.run(
                 ["launchctl", "bootstrap", f"gui/{uid}", plist_path],
                 check=False,
@@ -177,7 +179,7 @@ def install_launchagents(
             if res.returncode == 0:
                 break
             last_err = (res.stderr or res.stdout or f"exit {res.returncode}").strip()
-            if res.returncode == 5 and attempt < 2:
+            if res.returncode == 5 and attempt < 9:
                 time.sleep(0.5)
                 continue
             raise RuntimeError(
@@ -192,6 +194,7 @@ def restart_launchagents(settings: MCPStackSettings) -> dict[str, Any]:
     """Kickstart LaunchAgents in dependency order and verify /ready."""
     uid = os.getuid()
     rotate_service_logs()
+    restarted: list[str] = []
     for label in (MLFLOW_MCP_LABEL, GATEWAY_LABEL):
         subprocess.run(
             ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
@@ -199,8 +202,17 @@ def restart_launchagents(settings: MCPStackSettings) -> dict[str, Any]:
             capture_output=True,
             text=True,
         )
+        restarted.append(label)
+    if _launchctl_info(uid, AGENT_LABEL).get("loaded"):
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/{AGENT_LABEL}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        restarted.append(AGENT_LABEL)
     ready = _wait_ready(settings)
-    return {"restarted": [MLFLOW_MCP_LABEL, GATEWAY_LABEL], "ready": ready}
+    return {"restarted": restarted, "ready": ready}
 
 
 def tail_service_logs(
@@ -213,10 +225,16 @@ def tail_service_logs(
     targets = {
         "gateway": ["gateway.log", "gateway.err.log"],
         "mlflow-mcp": ["mlflow-mcp.log", "mlflow-mcp.err.log"],
+        "agent": ["agent.log", "agent.err.log"],
         "watchdog": ["watchdog.log"],
     }
     names = (
-        [*targets["gateway"], *targets["mlflow-mcp"], *targets["watchdog"]]
+        [
+            *targets["gateway"],
+            *targets["mlflow-mcp"],
+            *targets["agent"],
+            *targets["watchdog"],
+        ]
         if service == "all"
         else targets.get(service, [])
     )
