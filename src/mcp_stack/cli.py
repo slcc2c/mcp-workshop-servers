@@ -602,7 +602,7 @@ def eval_run(
     judge_model: str | None = typer.Option(
         None,
         "--judge-model",
-        help="Optional judge model URI (default: ollama:/qwen3.8:27b)",
+        help="Optional judge model URI (default: ollama:/gemma4:31b)",
     ),
 ) -> None:
     """Evaluate recent gateway traces with mlflow.genai.evaluate() and @scorers."""
@@ -657,7 +657,7 @@ def eval_benchmark(
     judge_model: str | None = typer.Option(
         None,
         "--judge-model",
-        help="Optional judge model URI (default: ollama:/qwen3.8:27b)",
+        help="Optional judge model URI (default: ollama:/gemma4:31b)",
     ),
 ) -> None:
     """Run the executable golden dataset benchmark via mlflow.genai.evaluate()."""

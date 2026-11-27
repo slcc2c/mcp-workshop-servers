@@ -107,7 +107,7 @@ export function OverviewView({
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionOut, setActionOut] = useState<string | null>(null);
   const [withJudge, setWithJudge] = useState(false);
-  const [judgeModel, setJudgeModel] = useState("ollama:/qwen3.8:27b");
+  const [judgeModel, setJudgeModel] = useState("ollama:/gemma4:31b");
   const [probingSlug, setProbingSlug] = useState<string | null>(null);
   const [metricsSeries, setMetricsSeries] = useState<OpsMetricsSeriesResponse | null>(null);
   const [secretsHealth, setSecretsHealth] = useState<SecretsHealthResponse | null>(null);

@@ -2,12 +2,9 @@
 set -euo pipefail
 cd /Users/spencer/repos/mcp-server
 
-if [ -f "$HOME/.config/mcp-stack/gateway.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$HOME/.config/mcp-stack/gateway.env"
-  set +a
-fi
+# shellcheck source=/Users/spencer/repos/mcp-server/deploy/launchd/load_env_safe.sh
+source /Users/spencer/repos/mcp-server/deploy/launchd/load_env_safe.sh
+load_env_safe "$HOME/.config/mcp-stack/gateway.env"
 
 export MCP_AUTH_ENABLED=true
 export MCP_GATEWAY_PUBLIC_URL="https://mcp.slcc2c.com"

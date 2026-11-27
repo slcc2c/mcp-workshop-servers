@@ -41,6 +41,7 @@ _POLICY_REFUSAL_MARKERS = (
 )
 
 GOLDEN_DATASET_NAME = "mcp-workshop-golden-v1"
+DEFAULT_JUDGE_MODEL = "ollama:/gemma4:31b"
 
 GOLDEN_BENCHMARK_CASES: list[dict[str, Any]] = [
     {
@@ -241,7 +242,7 @@ def normalize_judge_model_uri(judge_model: str | None = None) -> str:
     raw = (
         judge_model
         or os.getenv("MCP_EVAL_OLLAMA_MODEL")
-        or "ollama:/qwen3.8:27b"
+        or DEFAULT_JUDGE_MODEL
     ).strip()
     if raw.startswith("ollama:/"):
         return "ollama_chat:/" + raw.removeprefix("ollama:/").lstrip("/")
@@ -303,6 +304,31 @@ def build_native_clarity_judge(
             "Return 'yes' if outputs or intentional read-only/sandbox policy refusals are "
             "structured, concise, actionable, and free of exposed secrets or Python tracebacks; "
             "otherwise return 'no'."
+        ),
+        model=normalized,
+        feedback_value_type=Literal["yes", "no"],
+    )
+
+
+def build_agent_tool_use_grounding_judge(
+    judge_model: str | None = None,
+    *,
+    settings: MCPStackSettings | None = None,
+) -> Any:
+    """Build a native MLflow 3.x {{ trace }} judge checking agent tool choice and grounding."""
+    from mlflow.genai.judges import make_judge
+
+    ollama_url = os.getenv("MCP_EVAL_OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    os.environ.setdefault("OLLAMA_API_BASE", ollama_url)
+    normalized = normalize_judge_model_uri(judge_model)
+    return make_judge(
+        name="agent_tool_use_grounding_judge",
+        instructions=(
+            "Inspect the multi-step ResponsesAgent and MCP tool spans in {{ trace }}. "
+            "Verify that the agent selected appropriate MCP tools, passed accurate arguments, "
+            "did not fabricate or contradict observed tool outputs, and gave a grounded final "
+            "response (or explained tool errors honestly). Return 'yes' if all checks hold, "
+            "otherwise 'no'."
         ),
         model=normalized,
         feedback_value_type=Literal["yes", "no"],
@@ -431,7 +457,7 @@ def build_trace_scorers(
         effective_model = (
             judge_model
             or os.getenv("MCP_EVAL_OLLAMA_MODEL")
-            or "ollama:/qwen3.8:27b"
+            or DEFAULT_JUDGE_MODEL
         )
         has_litellm = importlib.util.find_spec("litellm") is not None
         is_ollama = effective_model.startswith(("ollama:/", "ollama:", "ollama_chat:/"))
@@ -1151,6 +1177,21 @@ def run_agent_dataset_evaluation(
         model_api=model_api,
         settings=settings,
     )
+    if with_llm_judge and not is_typesafe_judge_model(judge_model, model_api):
+        effective_model = (
+            judge_model
+            or os.getenv("MCP_EVAL_OLLAMA_MODEL")
+            or DEFAULT_JUDGE_MODEL
+        )
+        has_litellm = importlib.util.find_spec("litellm") is not None
+        is_ollama = effective_model.startswith(("ollama:/", "ollama:", "ollama_chat:/"))
+        if has_litellm or not is_ollama:
+            scorers.append(
+                build_agent_tool_use_grounding_judge(
+                    effective_model,
+                    settings=settings,
+                )
+            )
     result = mlflow.genai.evaluate(data=dataset, predict_fn=predict_fn, scorers=scorers)
     return {
         "status": "completed",
