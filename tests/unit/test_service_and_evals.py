@@ -232,3 +232,41 @@ def test_agent_launchagent_plist_and_log_tailing(tmp_path: Path) -> None:
     (tmp_path / "agent.log").write_text("agent ready\n", encoding="utf-8")
     tailed = tail_service_logs(service="agent", log_dir=tmp_path)
     assert "agent ready" in tailed["agent.log"]
+
+
+def test_load_env_safe_handles_quotes_and_malformed_lines(tmp_path: Path) -> None:
+    import subprocess
+
+    env_file = tmp_path / "gateway.env"
+    env_file.write_text(
+        "# comment line\n"
+        "\n"
+        "PLAIN_VAR=hello\n"
+        "SINGLE_QUOTED='ops_dummy_value'\n"
+        'DOUBLE_QUOTED="with spaces"\n'
+        "export EXPORTED_KEY=42\n"
+        "UNQUOTED_SPACE=A3-FAKE not_a_command_xyz\n"
+        "A3-BARE-MALFORMED-SECRET-TOKEN\n",
+        encoding="utf-8",
+    )
+
+    script = (
+        "set -euo pipefail; "
+        "source deploy/launchd/load_env_safe.sh; "
+        'load_env_safe "$1"; '
+        'printf "%s|%s|%s|%s|%s\\n" '
+        '"$PLAIN_VAR" "$SINGLE_QUOTED" "$DOUBLE_QUOTED" "$EXPORTED_KEY" "$UNQUOTED_SPACE"'
+    )
+    proc = subprocess.run(
+        ["/bin/bash", "-c", script, "_", str(env_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        proc.stdout.strip()
+        == "hello|ops_dummy_value|with spaces|42|A3-FAKE not_a_command_xyz"
+    )
+    assert "line 8" in proc.stderr
+    assert "A3-BARE-MALFORMED-SECRET-TOKEN" not in proc.stderr

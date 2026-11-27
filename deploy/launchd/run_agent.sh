@@ -2,12 +2,9 @@
 set -euo pipefail
 cd /Users/spencer/repos/mcp-server
 
-if [ -f "$HOME/.config/mcp-stack/gateway.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$HOME/.config/mcp-stack/gateway.env"
-  set +a
-fi
+# shellcheck source=/Users/spencer/repos/mcp-server/deploy/launchd/load_env_safe.sh
+source /Users/spencer/repos/mcp-server/deploy/launchd/load_env_safe.sh
+load_env_safe "$HOME/.config/mcp-stack/gateway.env"
 
 export MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://localhost:5002}"
 export MLFLOW_TRACING_ENABLED="${MLFLOW_TRACING_ENABLED:-true}"

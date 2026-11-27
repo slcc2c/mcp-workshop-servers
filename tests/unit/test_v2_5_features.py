@@ -17,11 +17,14 @@ from mcp_stack.agent_server import create_agent_server_app
 from mcp_stack.core.config import ClientPolicy, UpstreamServerConfig
 from mcp_stack.core.secrets import CommandResult, SecretResolver
 from mcp_stack.evals import (
+    DEFAULT_JUDGE_MODEL,
+    build_agent_tool_use_grounding_judge,
     build_native_clarity_judge,
     compare_eval_runs,
     get_eval_run_detail,
     is_typesafe_judge_model,
     list_eval_datasets,
+    normalize_judge_model_uri,
 )
 from mcp_stack.gateway.activity import ActivityBus
 from mcp_stack.gateway.app import build_gateway_app
@@ -469,3 +472,14 @@ def test_secret_resolver_dual_mode_diagnostics_and_activity_bus(
     assert ev["detail"]["authorization"] == "<redacted>"
     assert len(bus.recent(limit=5)) == 1
     assert len(bus.metrics_series(buckets=4)) == 4
+
+
+def test_default_cross_family_judge_and_agent_grounding_scorer(monkeypatch) -> None:
+    monkeypatch.delenv("MCP_EVAL_OLLAMA_MODEL", raising=False)
+    assert DEFAULT_JUDGE_MODEL == "ollama:/gemma4:31b"
+    assert normalize_judge_model_uri(None) == "ollama_chat:/gemma4:31b"
+
+    grounding_judge = build_agent_tool_use_grounding_judge()
+    assert grounding_judge.name == "agent_tool_use_grounding_judge"
+    assert "{{ trace }}" in grounding_judge.instructions
+    assert grounding_judge.model == "ollama_chat:/gemma4:31b"

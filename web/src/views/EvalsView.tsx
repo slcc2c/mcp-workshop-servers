@@ -42,7 +42,7 @@ export function EvalsView({
   const [showLauncher, setShowLauncher] = useState(false);
   const [evalMode, setEvalMode] = useState<"golden" | "traces" | "agent">("golden");
   const [withJudge, setWithJudge] = useState(false);
-  const [judgeModel, setJudgeModel] = useState("typesafe:/");
+  const [judgeModel, setJudgeModel] = useState("ollama:/gemma4:31b");
   const [evalProfile, setEvalProfile] = useState("core");
   const [evalDatasetName, setEvalDatasetName] = useState("");
   const [running, setRunning] = useState(false);
@@ -239,15 +239,22 @@ export function EvalsView({
                 aria-label="Judge model URI"
                 value={judgeModel}
                 onChange={(e) => setJudgeModel(e.target.value)}
-                placeholder="typesafe:/ or openai:/gpt-4o-mini"
+                placeholder="ollama:/gemma4:31b, openai:/gpt-4o-mini, or typesafe:/jev-latest"
                 className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[12px] font-mono min-w-[260px]"
               />
               <button
                 type="button"
-                onClick={() => setJudgeModel("typesafe:/")}
+                onClick={() => setJudgeModel("ollama:/gemma4:31b")}
                 className="px-2 py-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[11px] font-mono cursor-pointer"
               >
-                typesafe:/
+                ollama:/gemma4:31b
+              </button>
+              <button
+                type="button"
+                onClick={() => setJudgeModel("ollama:/gpt-oss:120b")}
+                className="px-2 py-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[11px] font-mono cursor-pointer"
+              >
+                ollama:/gpt-oss:120b
               </button>
               <button
                 type="button"
@@ -256,8 +263,18 @@ export function EvalsView({
               >
                 openai:/gpt-4o-mini
               </button>
+              <button
+                type="button"
+                onClick={() => setJudgeModel("typesafe:/jev-latest")}
+                className="px-2 py-1 rounded-md border border-[var(--border-hairline)] bg-[var(--bg-subtle)] text-[11px] font-mono cursor-pointer"
+              >
+                typesafe:/jev-latest
+              </button>
               {judgeModel.startsWith("typesafe:/") && (
                 <StatusBadge label="model_api=decisions" tone="accent" />
+              )}
+              {judgeModel.startsWith("ollama:/") && (
+                <StatusBadge label="local {{ trace }}" tone="ok" />
               )}
             </div>
           )}

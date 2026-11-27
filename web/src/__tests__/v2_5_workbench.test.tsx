@@ -288,6 +288,14 @@ describe("v2.5 Control Plane Workbench", () => {
         expect(screen.getByTestId("eval-compare-deltas")).toBeInTheDocument();
       });
       expect(screen.getByText("+0.10")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: /Run Evaluation/i }));
+      fireEvent.click(screen.getByLabelText(/Enable LLM \/ TypeSafe Judge/i));
+      const judgeInput = screen.getByLabelText("Judge model URI") as HTMLInputElement;
+      expect(judgeInput.value).toBe("ollama:/gemma4:31b");
+      expect(screen.getByRole("button", { name: "ollama:/gpt-oss:120b" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "openai:/gpt-4o-mini" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "typesafe:/jev-latest" })).toBeInTheDocument();
     } finally {
       vi.unstubAllGlobals();
     }
