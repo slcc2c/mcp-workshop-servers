@@ -30,10 +30,13 @@ from mcp_stack.client_configs import (
 from mcp_stack.core.config import load_settings
 from mcp_stack.core.logging import configure_logging
 from mcp_stack.evals import (
+    AGENT_DATASET_NAME,
     GOLDEN_DATASET_NAME,
     register_experiment_scorers,
+    run_agent_dataset_evaluation,
     run_golden_benchmark,
     run_trace_evaluation,
+    sync_agent_dataset,
     sync_golden_dataset,
 )
 from mcp_stack.gateway.app import build_gateway_app, build_server_instance
@@ -602,7 +605,7 @@ def eval_run(
     judge_model: str | None = typer.Option(
         None,
         "--judge-model",
-        help="Optional judge model URI (default: ollama:/gemma4:31b)",
+        help="Optional judge model URI (default: gateway:/mcp-workshop-judge-v1)",
     ),
 ) -> None:
     """Evaluate recent gateway traces with mlflow.genai.evaluate() and @scorers."""
@@ -657,7 +660,7 @@ def eval_benchmark(
     judge_model: str | None = typer.Option(
         None,
         "--judge-model",
-        help="Optional judge model URI (default: ollama:/gemma4:31b)",
+        help="Optional judge model URI (default: gateway:/mcp-workshop-judge-v1)",
     ),
 ) -> None:
     """Run the executable golden dataset benchmark via mlflow.genai.evaluate()."""
@@ -668,6 +671,60 @@ def eval_benchmark(
         experiment_name=experiment,
         dataset_name=dataset_name,
         latency_sla_ms=latency_sla_ms,
+        with_llm_judge=with_llm_judge,
+        judge_model=judge_model,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@eval_app.command("sync-agent-dataset")
+def eval_sync_agent_dataset(
+    experiment: str | None = typer.Option(None, "--experiment", help="MLflow experiment name"),
+    dataset_name: str = typer.Option(
+        AGENT_DATASET_NAME, "--dataset", help="MLflow GenAI agent evaluation dataset name"
+    ),
+) -> None:
+    """Create or update the strictly read-only ResponsesAgent evaluation dataset in MLflow."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = sync_agent_dataset(settings, experiment_name=experiment, dataset_name=dataset_name)
+    typer.echo(json.dumps(res, indent=2))
+
+
+@eval_app.command("agent")
+def eval_agent(
+    experiment: str | None = typer.Option(None, "--experiment", help="MLflow experiment name"),
+    dataset_name: str = typer.Option(
+        AGENT_DATASET_NAME, "--dataset", help="MLflow GenAI agent evaluation dataset name"
+    ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="Optional gateway profile override for all rows"
+    ),
+    model: str | None = typer.Option(None, "--model", help="Optional agent LLM model override"),
+    latency_sla_ms: float = typer.Option(
+        45000.0, "--latency-sla-ms", help="Agent trace latency threshold ms"
+    ),
+    run_name: str | None = typer.Option(None, "--run-name", help="Optional MLflow eval run name"),
+    with_llm_judge: bool = typer.Option(
+        False, "--with-llm-judge", help="Include local Ollama / MLflow judge scorers"
+    ),
+    judge_model: str | None = typer.Option(
+        None,
+        "--judge-model",
+        help="Optional judge model URI (default: gateway:/mcp-workshop-judge-v1)",
+    ),
+) -> None:
+    """Run mlflow.genai.evaluate() against the co-hosted ResponsesAgent endpoint."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = run_agent_dataset_evaluation(
+        settings,
+        experiment_name=experiment,
+        dataset_name=dataset_name,
+        profile=profile,
+        model=model,
+        latency_sla_ms=latency_sla_ms,
+        run_name=run_name,
         with_llm_judge=with_llm_judge,
         judge_model=judge_model,
     )

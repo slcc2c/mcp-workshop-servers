@@ -292,8 +292,8 @@ describe("v2.5 Control Plane Workbench", () => {
       fireEvent.click(screen.getByRole("button", { name: /Run Evaluation/i }));
       fireEvent.click(screen.getByLabelText(/Enable LLM \/ TypeSafe Judge/i));
       const judgeInput = screen.getByLabelText("Judge model URI") as HTMLInputElement;
-      expect(judgeInput.value).toBe("ollama:/gemma4:31b");
-      expect(screen.getByRole("button", { name: "ollama:/gpt-oss:120b" })).toBeInTheDocument();
+      expect(judgeInput.value).toBe("gateway:/mcp-workshop-judge-v1");
+      expect(screen.getByRole("button", { name: "ollama:/gemma4-64k:latest" })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "openai:/gpt-4o-mini" })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "typesafe:/jev-latest" })).toBeInTheDocument();
     } finally {
@@ -346,18 +346,35 @@ describe("v2.5 Control Plane Workbench", () => {
     try {
       const { unmount } = render(
         <ProfilesEditor
-          profiles={[{ name: "core", route: "/profiles/core/mcp", servers: ["gateway"], builtin: true }]}
+          profiles={[
+            {
+              name: "core",
+              route: "/profiles/core/mcp",
+              servers: ["gateway"],
+              builtin: true,
+              estimatedSchemaTokens: 5400,
+              allowTools: ["list_*"],
+            },
+          ]}
           servers={[{ key: "gateway", slug: "gateway", route: "/servers/gateway/mcp", status: "ready", toolCount: 9 }]}
           profileCounts={{ core: 9 }}
           onChanged={onChanged}
         />,
       );
 
+      expect(screen.getByText("~5.4k tok")).toBeInTheDocument();
       fireEvent.change(screen.getByLabelText("Profile name"), { target: { value: "research-ops" } });
+      fireEvent.change(screen.getByLabelText("Allow tool globs"), { target: { value: "list_*, get_*" } });
+      fireEvent.change(screen.getByLabelText("Deny tool globs"), { target: { value: "delete_*" } });
       fireEvent.click(screen.getByRole("button", { name: /Create Profile/i }));
       await waitFor(() => {
         expect(onChanged).toHaveBeenCalled();
       });
+      const postCall = mockFetch.mock.calls.find(
+        (c) => String(c[0]).endsWith("/api/v1/profiles") && (c[1]?.method || "") === "POST",
+      );
+      expect(String(postCall?.[1]?.body || "")).toContain('"allow_tools":["list_*","get_*"]');
+      expect(String(postCall?.[1]?.body || "")).toContain('"deny_tools":["delete_*"]');
       unmount();
 
       render(<UpstreamsView onAfterChange={vi.fn(async () => {})} />);

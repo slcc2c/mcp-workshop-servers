@@ -10,15 +10,25 @@ from typing import Any
 
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
-from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from mcp_stack.client_configs import generate_client_configs
 from mcp_stack.core.auth import caller_client_policy_var, is_server_allowed
 from mcp_stack.core.tracing import last_trace_id_var
 from mcp_stack.evals import _POLICY_REFUSAL_MARKERS
-from mcp_stack.gateway.state import GatewayRuntimeState
+from mcp_stack.gateway.state import GatewayRuntimeState, estimate_tool_schema_tokens
+from mcp_stack.gateway.upstreams import is_tool_allowed
 from mcp_stack.servers.unity_catalog import sync_uc_function_tools
+
+
+def _parse_glob_patterns(raw: Any) -> list[str] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return [p.strip() for p in raw.replace(",", "\n").splitlines() if p.strip()]
+    if isinstance(raw, list):
+        return [str(p).strip() for p in raw if str(p).strip()]
+    return []
 
 
 def build_tools_router(state: GatewayRuntimeState) -> APIRouter:
@@ -34,10 +44,25 @@ def build_tools_router(state: GatewayRuntimeState) -> APIRouter:
 
     @router.get("/api/v1/profiles")
     async def list_profiles() -> dict[str, Any]:
+        per_server_tools = await state.gather_tools_by_server()
+        enriched_profiles: list[dict[str, Any]] = []
+        for prof in state.profile_inventory:
+            prof_name = str(prof.get("name") or "")
+            allow_tools, deny_tools = state.get_profile_tool_filter(prof_name)
+            prof_tools = state.tools_for_profile(prof, per_server_tools)
+            enriched_profiles.append(
+                {
+                    **prof,
+                    "allowTools": allow_tools,
+                    "denyTools": deny_tools,
+                    "toolCount": len(prof_tools),
+                    "estimatedSchemaTokens": estimate_tool_schema_tokens(prof_tools),
+                }
+            )
         return {
             "defaultProfile": settings.gateway.default_client_profile,
             "fullRoute": "/mcp",
-            "profiles": state.profile_inventory,
+            "profiles": enriched_profiles,
             "clientSnippets": generate_client_configs(settings, repo_root=Path.cwd()),
         }
 
@@ -50,8 +75,15 @@ def build_tools_router(state: GatewayRuntimeState) -> APIRouter:
         raw_servers = body.get("servers") or []
         if isinstance(raw_servers, str):
             raw_servers = [s.strip() for s in raw_servers.split(",") if s.strip()]
+        allow_tools = _parse_glob_patterns(body.get("allow_tools", body.get("allowTools")))
+        deny_tools = _parse_glob_patterns(body.get("deny_tools", body.get("denyTools")))
         try:
-            item = await state.upsert_profile(name, list(raw_servers))
+            item = await state.upsert_profile(
+                name,
+                list(raw_servers),
+                allow_tools=allow_tools,
+                deny_tools=deny_tools,
+            )
         except ValueError as exc:
             return JSONResponse(
                 status_code=400,
@@ -68,8 +100,15 @@ def build_tools_router(state: GatewayRuntimeState) -> APIRouter:
         raw_servers = body.get("servers") or []
         if isinstance(raw_servers, str):
             raw_servers = [s.strip() for s in raw_servers.split(",") if s.strip()]
+        allow_tools = _parse_glob_patterns(body.get("allow_tools", body.get("allowTools")))
+        deny_tools = _parse_glob_patterns(body.get("deny_tools", body.get("denyTools")))
         try:
-            item = await state.upsert_profile(name, list(raw_servers))
+            item = await state.upsert_profile(
+                name,
+                list(raw_servers),
+                allow_tools=allow_tools,
+                deny_tools=deny_tools,
+            )
         except ValueError as exc:
             return JSONResponse(
                 status_code=400,
@@ -99,39 +138,35 @@ def build_tools_router(state: GatewayRuntimeState) -> APIRouter:
         profile: str | None = None,
         q: str | None = None,
     ) -> dict[str, Any]:
-        target_slugs = state.target_server_instances()
-
         allowed_by_profile: set[str] | None = None
+        profile_allow: list[str] = []
+        profile_deny: list[str] = []
         if profile:
             prof_entry = next(
                 (p for p in state.profile_inventory if p["name"] == profile),
                 None,
             )
             if prof_entry is None:
-                return {"totalTools": 0, "profileCounts": {}, "tools": []}
+                return {
+                    "totalTools": 0,
+                    "profileCounts": {},
+                    "profileTokenBudgets": {},
+                    "tools": [],
+                }
             allowed_by_profile = set(prof_entry["servers"])
             if prof_entry.get("includesUpstreamMcp"):
                 allowed_by_profile.add("mlflow-upstream")
+            profile_allow, profile_deny = state.get_profile_tool_filter(profile)
 
-        async def _gather_one(slug: str, srv: FastMCP) -> tuple[str, list[dict[str, Any]]]:
-            t_out = (
-                state.federated_cfg_map[slug].timeout_s
-                if slug in state.federated_cfg_map
-                else 2.0
-            )
-            return slug, await state.collect_tools_for_server(slug, srv, timeout_s=t_out)
-
-        gathered = await asyncio.gather(
-            *(_gather_one(slug, srv) for slug, srv in target_slugs.items())
-        )
-        per_server_tools: dict[str, list[dict[str, Any]]] = dict(gathered)
+        per_server_tools = await state.gather_tools_by_server()
 
         profile_counts: dict[str, int] = {}
+        profile_token_budgets: dict[str, int] = {}
         for prof in state.profile_inventory:
-            total = sum(len(per_server_tools.get(s, [])) for s in prof["servers"])
-            if prof.get("includesUpstreamMcp"):
-                total += len(per_server_tools.get("mlflow-upstream", []))
-            profile_counts[str(prof["name"])] = total
+            prof_name = str(prof["name"])
+            prof_tools = state.tools_for_profile(prof, per_server_tools)
+            profile_counts[prof_name] = len(prof_tools)
+            profile_token_budgets[prof_name] = estimate_tool_schema_tokens(prof_tools)
 
         needle = (q or "").strip().lower()
         srv_filter = (server or "").strip().replace("_", "-").lower()
@@ -143,6 +178,10 @@ def build_tools_router(state: GatewayRuntimeState) -> APIRouter:
             if allowed_by_profile is not None and slug not in allowed_by_profile:
                 continue
             for item in items:
+                if profile and not is_tool_allowed(
+                    str(item.get("name") or ""), profile_allow, profile_deny
+                ):
+                    continue
                 if needle:
                     hay = f"{item['name']} {item['description']} {slug}".lower()
                     if needle not in hay:
@@ -152,6 +191,7 @@ def build_tools_router(state: GatewayRuntimeState) -> APIRouter:
         return {
             "totalTools": len(filtered),
             "profileCounts": profile_counts,
+            "profileTokenBudgets": profile_token_budgets,
             "tools": filtered,
         }
 

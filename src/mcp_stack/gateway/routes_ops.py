@@ -27,8 +27,32 @@ def build_ops_router(state: GatewayRuntimeState) -> APIRouter:
     router = APIRouter()
     settings = state.settings
 
+    async def _resolve_mlflow_experiment_id(client: httpx.AsyncClient | None = None) -> str | None:
+        if state.mlflow_experiment_id:
+            return state.mlflow_experiment_id
+        exp_name = settings.mlflow.experiment_name
+        if not exp_name:
+            return None
+        url = f"{settings.mlflow.tracking_uri.rstrip('/')}/api/2.0/mlflow/experiments/get-by-name"
+        try:
+            if client is not None:
+                resp = await client.get(url, params={"experiment_name": exp_name})
+            else:
+                async with httpx.AsyncClient(timeout=1.0) as tmp_client:
+                    resp = await tmp_client.get(url, params={"experiment_name": exp_name})
+            if resp.status_code == 200:
+                exp_obj = resp.json().get("experiment") or {}
+                exp_id = str(exp_obj.get("experiment_id") or "").strip()
+                if exp_id:
+                    state.mlflow_experiment_id = exp_id
+                    return exp_id
+        except Exception:
+            pass
+        return state.mlflow_experiment_id
+
     @router.get("/health")
     async def health() -> dict[str, Any]:
+        exp_id = await _resolve_mlflow_experiment_id()
         return {
             "status": "healthy",
             "version": __version__,
@@ -36,6 +60,8 @@ def build_ops_router(state: GatewayRuntimeState) -> APIRouter:
             "composedRoute": "/mcp",
             "defaultProfile": settings.gateway.default_client_profile,
             "mlflowUiUrl": settings.gateway.mlflow_ui_url or settings.mlflow.tracking_uri,
+            "mlflowExperimentName": settings.mlflow.experiment_name,
+            "mlflowExperimentId": exp_id,
             "servers": state.server_inventory,
             "profiles": state.profile_inventory,
         }
@@ -54,7 +80,9 @@ def build_ops_router(state: GatewayRuntimeState) -> APIRouter:
                     "status_code": r.status_code,
                     "url": settings.mlflow.tracking_uri,
                 }
-                if r.status_code != 200:
+                if r.status_code == 200:
+                    await _resolve_mlflow_experiment_id(client)
+                else:
                     mlflow_check["detail"] = r.text[:200]
                 checks["mlflow_tracking"] = mlflow_check
             except Exception as exc:

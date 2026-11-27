@@ -14,6 +14,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
+class ProfileToolFilter(BaseModel):
+    """Per-profile tool allow/deny glob patterns."""
+
+    allow_tools: list[str] = Field(default_factory=list)
+    deny_tools: list[str] = Field(default_factory=list)
+
+
 class ClientPolicy(BaseModel):
     """Per-client authorization and rate-limit policy."""
 
@@ -115,6 +122,7 @@ class GatewaySettings(BaseModel):
     )
     clients: dict[str, ClientPolicy] = Field(default_factory=dict)
     upstream_servers: dict[str, UpstreamServerConfig] = Field(default_factory=dict)
+    profile_tool_filters: dict[str, ProfileToolFilter] = Field(default_factory=dict)
 
     @property
     def is_loopback(self) -> bool:
@@ -874,12 +882,32 @@ def save_local_upstreams(
 def save_local_profiles(
     path: Path,
     profiles: dict[str, list[str]],
+    profile_tool_filters: dict[str, ProfileToolFilter] | None = None,
 ) -> Path:
-    """Atomically write custom gateway profiles into gitignored local YAML config."""
+    """Atomically write custom gateway profiles and optional tool filters into local YAML."""
     raw, gw_sec = _load_local_gateway_yaml(path)
     gw_sec["profiles"] = {
         k.strip(): [str(m).strip() for m in v if str(m).strip()]
         for k, v in profiles.items()
         if k.strip()
     }
+    if profile_tool_filters is not None:
+        cleaned_filters: dict[str, dict[str, list[str]]] = {}
+        for k, filt in profile_tool_filters.items():
+            clean_k = k.strip()
+            if not clean_k:
+                continue
+            allow = [str(p).strip() for p in filt.allow_tools if str(p).strip()]
+            deny = [str(p).strip() for p in filt.deny_tools if str(p).strip()]
+            entry: dict[str, list[str]] = {}
+            if allow:
+                entry["allow_tools"] = allow
+            if deny:
+                entry["deny_tools"] = deny
+            if entry:
+                cleaned_filters[clean_k] = entry
+        if cleaned_filters:
+            gw_sec["profile_tool_filters"] = cleaned_filters
+        else:
+            gw_sec.pop("profile_tool_filters", None)
     return _atomic_write_yaml(path, raw)

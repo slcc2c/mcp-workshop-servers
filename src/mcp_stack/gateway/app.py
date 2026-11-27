@@ -36,7 +36,11 @@ from mcp_stack.gateway.routes_skills_registry import build_skills_registry_route
 from mcp_stack.gateway.routes_tools import build_tools_router
 from mcp_stack.gateway.routes_upstreams import build_upstreams_router
 from mcp_stack.gateway.state import GatewayRuntimeState, slug_for
-from mcp_stack.gateway.upstreams import build_upstream_proxy, probe_upstream_proxy
+from mcp_stack.gateway.upstreams import (
+    ToolCurationMiddleware,
+    build_upstream_proxy,
+    probe_upstream_proxy,
+)
 from mcp_stack.servers.docker_server import create_docker_server
 from mcp_stack.servers.filesystem import create_filesystem_server
 from mcp_stack.servers.gateway_meta import (
@@ -293,6 +297,9 @@ def build_gateway_app(
         if not clean_profile:
             continue
         p_mcp = FastMCP(f"mcp-profile-{clean_profile}")
+        allow_tools, deny_tools = state.get_profile_tool_filter(clean_profile)
+        if allow_tools or deny_tools:
+            p_mcp.add_middleware(ToolCurationMiddleware(clean_profile, allow_tools, deny_tools))
         resolved_slugs: list[str] = []
         wants_upstream = False
         wants_fed: list[str] = []
@@ -320,6 +327,8 @@ def build_gateway_app(
                 "servers": resolved_slugs,
                 "includesUpstreamMcp": wants_upstream,
                 "builtin": clean_profile in {"discover", "core", "data", "ops", "macos"},
+                "allowTools": allow_tools,
+                "denyTools": deny_tools,
             }
         )
 

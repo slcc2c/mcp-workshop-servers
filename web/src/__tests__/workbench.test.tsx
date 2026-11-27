@@ -220,6 +220,23 @@ describe("Control Plane Workbench renderers", () => {
     ).toBe("https://mlflow.slcc2c.com");
   });
 
+  it("builds MLflow experiment, run, and trace deep-link URLs cleanly", async () => {
+    const { buildMlflowExperimentUrl } = await import("../lib/urls");
+    expect(buildMlflowExperimentUrl("http://localhost:5002", null)).toBe("http://localhost:5002");
+    expect(buildMlflowExperimentUrl("http://localhost:5002", "52")).toBe(
+      "http://localhost:5002/#/experiments/52",
+    );
+    expect(buildMlflowExperimentUrl("http://localhost:5002", "52", { section: "traces" })).toBe(
+      "http://localhost:5002/#/experiments/52/traces",
+    );
+    expect(
+      buildMlflowExperimentUrl("http://localhost:5002", "52", {
+        section: "runs",
+        runId: "abc-123",
+      }),
+    ).toBe("http://localhost:5002/#/experiments/52/runs/abc-123");
+  });
+
   it("supports keyboard ArrowDown + Enter on saved Presets in CommandPalette", () => {
     const onSelectPreset = vi.fn();
     const onClose = vi.fn();
