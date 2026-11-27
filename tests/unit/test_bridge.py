@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -116,9 +117,14 @@ def test_run_stdio_bridge_wires_proxy_and_cli_fails_closed(tmp_path: Path) -> No
     mock_proxy.run.assert_called_once_with(transport="stdio", show_banner=False)
 
     runner = CliRunner()
-    help_res = runner.invoke(app, ["bridge", "--help"])
+    help_res = runner.invoke(
+        app,
+        ["bridge", "--help"],
+        env={"NO_COLOR": "1", "TERM": "dumb"},
+    )
     assert help_res.exit_code == 0
-    assert "--token-env-var" in help_res.output
+    plain_help = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", help_res.output)
+    assert "--token-env-var" in plain_help
 
     missing_res = runner.invoke(
         app,
