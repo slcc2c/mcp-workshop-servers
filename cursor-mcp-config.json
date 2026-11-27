@@ -5,9 +5,6 @@
       "headers": {
         "Authorization": "Bearer ${env:MCP_CURSOR_AUTH_TOKEN}"
       }
-    },
-    "mlflow": {
-      "url": "http://localhost:9012/mcp"
     }
   }
 }

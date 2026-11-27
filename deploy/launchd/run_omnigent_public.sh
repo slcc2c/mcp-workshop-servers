@@ -13,7 +13,7 @@ source "$ENV_FILE"
 set +a
 
 export OMNIGENT_BASE_URL=http://127.0.0.1:6767
-export OMNIGENT_PUBLIC_URL=https://mac-studio.angora-arctic.ts.net:8446
+export OMNIGENT_PUBLIC_URL=https://omnigent.slcc2c.com
 export OMNIGENT_ALLOW_MUTATIONS=true
 export MLFLOW_TRACKING_URI=http://localhost:5002
 export MLFLOW_TRACING_ENABLED=true

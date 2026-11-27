@@ -6,7 +6,7 @@ _MCP_ENV_FILE="/Users/spencer/repos/mcp-server/.env"
 if [ -f "$_MCP_ENV_FILE" ]; then
     while IFS='=' read -r key val; do
         case "$key" in
-            MCP_CLAUDE_AUTH_TOKEN|MCP_CURSOR_AUTH_TOKEN|MCP_CODEX_AUTH_TOKEN|MCP_OPENAI_AUTH_TOKEN|MCP_DEFAULT_AUTH_TOKEN)
+            MCP_ANTIGRAVITY_AUTH_TOKEN|MCP_GEMINI_AUTH_TOKEN|MCP_CLAUDE_AUTH_TOKEN|MCP_CURSOR_AUTH_TOKEN|MCP_CODEX_AUTH_TOKEN|MCP_OMNIGENT_AUTH_TOKEN|MCP_OPENAI_AUTH_TOKEN|MCP_DEFAULT_AUTH_TOKEN)
                 val="${val#\"}"
                 val="${val%\"}"
                 val="${val#\'}"

@@ -50,11 +50,35 @@ def test_client_configs_use_env_var_bearer_tokens_never_raw_secrets(
 
     rendered = generate_client_configs(settings, tmp_path)
     claude_cfg = json.loads(rendered["claude-code"])
+    desktop_cfg = json.loads(rendered["claude-desktop"])
     cursor_cfg = json.loads(rendered["cursor"])
+    antigravity_cfg = json.loads(rendered["antigravity"])
 
     assert claude_cfg["mcpServers"]["mcp-workshop-gateway"]["headers"] == {
         "Authorization": "Bearer ${MCP_CLAUDE_AUTH_TOKEN}"
     }
+    assert list(desktop_cfg["mcpServers"]) == ["mcp-workshop-gateway"]
+    assert desktop_cfg["mcpServers"]["mcp-workshop-gateway"]["command"] == str(
+        tmp_path.resolve() / ".venv/bin/mcp-stack"
+    )
+    assert desktop_cfg["mcpServers"]["mcp-workshop-gateway"]["args"] == [
+        "bridge",
+        "--profile",
+        "core",
+        "--token-env-var",
+        "MCP_CLAUDE_AUTH_TOKEN",
+    ]
+    assert list(antigravity_cfg["mcpServers"]) == ["mcp-workshop-gateway"]
+    assert antigravity_cfg["mcpServers"]["mcp-workshop-gateway"]["command"] == str(
+        tmp_path.resolve() / ".venv/bin/mcp-stack"
+    )
+    assert antigravity_cfg["mcpServers"]["mcp-workshop-gateway"]["args"] == [
+        "bridge",
+        "--profile",
+        "core",
+        "--token-env-var",
+        "MCP_ANTIGRAVITY_AUTH_TOKEN",
+    ]
     assert cursor_cfg["mcpServers"]["mcp-workshop-gateway"]["headers"] == {
         "Authorization": "Bearer ${env:MCP_CURSOR_AUTH_TOKEN}"
     }

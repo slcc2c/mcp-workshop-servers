@@ -70,6 +70,7 @@ def test_redirect_uri_allowlist() -> None:
     assert is_allowed_redirect_uri("https://claude.ai/api/mcp/auth_callback")
     assert is_allowed_redirect_uri("https://claude.com/api/mcp/auth_callback")
     assert is_allowed_redirect_uri("https://chatgpt.com/connector_platform_oauth_redirect")
+    assert is_allowed_redirect_uri("https://chatgpt.com/connector/oauth/MI-XEb-30pCy")
     assert is_allowed_redirect_uri("https://platform.openai.com/apps-manage/oauth")
     assert is_allowed_redirect_uri("https://chat.openai.com/aip/g-123/oauth/callback")
     assert is_allowed_redirect_uri("https://antigravity.google.com/oauth/callback")
@@ -120,6 +121,59 @@ async def test_provider_blocks_disallowed_redirects_and_emails(tmp_path: Path) -
         ),
     )
     assert await provider.get_client("rogue-cli") is None
+
+    # Simulate FastMCP CIMD clients (redirect_uris=None on ProxyDCRClient, URIs on cimd_document).
+    from fastmcp.server.auth.cimd import CIMDDocument
+    from fastmcp.server.auth.oauth_proxy.models import ProxyDCRClient
+
+    claude_cimd = ProxyDCRClient(
+        client_id="https://claude.ai/oauth/mcp-oauth-client-metadata",
+        client_secret=None,
+        redirect_uris=None,
+        cimd_document=CIMDDocument(
+            client_id="https://claude.ai/oauth/mcp-oauth-client-metadata",
+            redirect_uris=["https://claude.ai/api/mcp/auth_callback"],
+        ),
+    )
+    chatgpt_cimd = ProxyDCRClient(
+        client_id="https://chatgpt.com/oauth/MI-XEb-30pCy/client.json",
+        client_secret=None,
+        redirect_uris=None,
+        cimd_document=CIMDDocument(
+            client_id="https://chatgpt.com/oauth/MI-XEb-30pCy/client.json",
+            redirect_uris=["https://chatgpt.com/connector/oauth/MI-XEb-30pCy"],
+        ),
+    )
+    evil_cimd = ProxyDCRClient(
+        client_id="https://evil.example/client.json",
+        client_secret=None,
+        redirect_uris=None,
+        cimd_document=CIMDDocument(
+            client_id="https://evil.example/client.json",
+            redirect_uris=["https://evil.example/cb"],
+        ),
+    )
+
+    class FakeCimdManager:
+        def __init__(self, docs: dict[str, ProxyDCRClient]) -> None:
+            self._docs = docs
+
+        def is_cimd_client_id(self, cid: str) -> bool:
+            return cid in self._docs
+
+        async def get_client(self, cid: str) -> ProxyDCRClient | None:
+            return self._docs.get(cid)
+
+    provider._cimd_manager = FakeCimdManager(
+        {
+            claude_cimd.client_id: claude_cimd,
+            chatgpt_cimd.client_id: chatgpt_cimd,
+            evil_cimd.client_id: evil_cimd,
+        }
+    )
+    assert await provider.get_client(claude_cimd.client_id) is not None
+    assert await provider.get_client(chatgpt_cimd.client_id) is not None
+    assert await provider.get_client(evil_cimd.client_id) is None
 
     # Verify owner email check inside wrapped verifier proxy.
     class FakeVerifier:
