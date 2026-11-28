@@ -5,6 +5,8 @@ cd /Users/spencer/repos/mcp-server
 # shellcheck source=/Users/spencer/repos/mcp-server/deploy/launchd/load_env_safe.sh
 source /Users/spencer/repos/mcp-server/deploy/launchd/load_env_safe.sh
 load_env_safe "$HOME/.config/mcp-stack/gateway.env"
+export OP_ENABLED=true
+export OP_MODE=service-account
 
 export MCP_AUTH_ENABLED=true
 export MCP_GATEWAY_PUBLIC_URL="https://mcp.slcc2c.com"
@@ -14,9 +16,11 @@ export MCP_UI_TRUST_FORWARD_AUTH=true
 export MCP_UI_ALLOWED_EMAILS="${MCP_UI_ALLOWED_EMAILS:-spork76@gmail.com,spencer@slcc2c.com}"
 export MLFLOW_TRACKING_URI=http://localhost:5002
 export MLFLOW_MCP_URL=http://127.0.0.1:9012/mcp
-export UC_BASE_URL=http://localhost:8082
+export UC_BASE_URL="${UC_BASE_URL:-http://100.85.39.109:8082}"
 export UC_ALLOW_MUTATIONS=false
-export MLFLOW_ALLOW_MUTATIONS=false
+export MLFLOW_ALLOW_MUTATIONS="${MLFLOW_ALLOW_MUTATIONS:-true}"
+export MEMORY_BACKEND="${MEMORY_BACKEND:-omnigent}"
+export OMNIGENT_ALLOW_MUTATIONS="${OMNIGENT_ALLOW_MUTATIONS:-true}"
 export UC_FUNCTION_ALLOWLIST="unity.default,workshop.default"
 export UC_EXECUTION_MODE=sandbox
 export EXECUTOR_MAX_MEMORY_LIMIT=4096

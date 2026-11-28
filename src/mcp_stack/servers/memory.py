@@ -6,19 +6,22 @@ import asyncio
 import csv
 import io
 import json
+import re
 import sqlite3
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.core.logging import get_logger
+from mcp_stack.core.secrets import SecretResolver
 from mcp_stack.core.tracing import MLflowTracingMiddleware
 
 MemoryType = Literal["fact", "preference", "experience", "goal", "context"]
@@ -613,16 +616,335 @@ class MemoryStore:
         }
 
 
+def score_omnigent_memory_entry(entry: dict[str, Any], query: str) -> int:
+    """Score an Omnigent memory entry against a plain keyword query."""
+    q_low = query.strip().lower()
+    if not q_low:
+        return 0
+    path = str(entry.get("path") or "").lower()
+    desc = str(entry.get("description") or "").lower()
+    content = str(entry.get("content") or "").lower()
+    score = 0
+    if q_low in path or q_low in desc:
+        score += 5
+    if q_low in content:
+        score += 3
+    tokens = [tok for tok in q_low.split() if tok]
+    for tok in tokens:
+        if tok in path or tok in desc:
+            score += 2
+        if tok in content:
+            score += 1
+    return score
+
+
+class OmnigentMemoryAdapter:
+    """HTTP adapter routing Memory MCP tools to Omnigent /v1/memory as the unified store."""
+
+    def __init__(
+        self,
+        settings: MCPStackSettings,
+        *,
+        secret_resolver: SecretResolver | None = None,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self._settings = settings
+        self._resolver = secret_resolver or SecretResolver(settings.secrets)
+        self._transport = transport
+
+    def initialize(self) -> None:
+        return
+
+    @staticmethod
+    def _norm_path(raw: str) -> str:
+        clean = "/" + raw.strip().lstrip("/")
+        return clean if clean != "/" else "/notes/default"
+
+    @staticmethod
+    def _slugify(text: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:48]
+        return slug or uuid.uuid4().hex[:8]
+
+    def _request(
+        self,
+        method: str,
+        api_path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        base = self._settings.omnigent.base_url.rstrip("/")
+        headers: dict[str, str] = {"Accept": "application/json"}
+        if json_body is not None:
+            headers["Content-Type"] = "application/json"
+        if method.upper() != "GET":
+            headers["Origin"] = base
+        token = self._resolver.resolve(self._settings.omnigent.token)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        client_kw: dict[str, Any] = {
+            "timeout": float(self._settings.omnigent.timeout_seconds),
+            "headers": headers,
+        }
+        if self._transport is not None:
+            client_kw["transport"] = self._transport
+        try:
+            with httpx.Client(**client_kw) as client:
+                resp = client.request(
+                    method,
+                    f"{base}/{api_path.lstrip('/')}",
+                    params=params,
+                    json=json_body,
+                )
+        except httpx.HTTPError as exc:
+            raise ToolError(
+                f"[OMNIGENT_MEMORY_UNAVAILABLE] Omnigent /v1/memory error ({base}): {exc}"
+            ) from exc
+        if resp.status_code == 404:
+            raise KeyError(api_path)
+        if resp.status_code >= 400:
+            detail = resp.text[:240].strip()
+            raise ToolError(
+                f"[OMNIGENT_MEMORY_ERROR] Omnigent {method} {api_path} "
+                f"HTTP {resp.status_code}: {detail}"
+            )
+        data = resp.json() if resp.content else {}
+        return data if isinstance(data, dict) else {"data": data}
+
+    def store(
+        self,
+        content: str,
+        type: MemoryType = "fact",
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        related_to: list[str] | None = None,
+    ) -> dict[str, Any]:
+        meta = dict(metadata or {})
+        raw_path = str(meta.get("path") or "").strip()
+        if not raw_path:
+            prefix = next(
+                (t.strip("/") for t in (tags or []) if t.strip().startswith("/")),
+                f"notes/{type}",
+            )
+            raw_path = f"/{prefix.strip('/')}/{self._slugify(content[:48])}"
+        path = self._norm_path(raw_path)
+        desc = meta.get("description")
+        payload: dict[str, Any] = {
+            "path": path,
+            "content": content,
+            "description": str(desc) if desc is not None else None,
+        }
+        res = self._request("PUT", "/v1/memory/entry", json_body=payload)
+        return {
+            "id": res.get("path", path),
+            "path": res.get("path", path),
+            "description": res.get("description"),
+            "stored": True,
+            "backend": "omnigent",
+        }
+
+    def _client_scan_search(
+        self, query: str, prefix: str | None, limit: int
+    ) -> dict[str, Any]:
+        params = {"prefix": prefix} if prefix else None
+        listing = self._request("GET", "/v1/memory/entries", params=params).get("entries") or []
+        scored: list[tuple[int, str, dict[str, Any]]] = []
+        for item in listing:
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            try:
+                ent = self._request("GET", "/v1/memory/entry", params={"path": path})
+            except KeyError:
+                continue
+            score = score_omnigent_memory_entry(ent, query)
+            if score <= 0:
+                continue
+            scored.append(
+                (
+                    score,
+                    path,
+                    {
+                        "id": ent.get("path", path),
+                        "path": ent.get("path", path),
+                        "content": ent.get("content", ""),
+                        "description": ent.get("description"),
+                        "score": score,
+                        "updated_at": ent.get("updated_at"),
+                    },
+                )
+            )
+        scored.sort(key=lambda row: (-row[0], row[1]))
+        hits = [row[2] for row in scored[:limit]]
+        return {
+            "count": len(hits),
+            "entries": hits,
+            "backend": "omnigent",
+            "searchMode": "client_scan",
+        }
+
+    def search(
+        self,
+        query: str = "",
+        type: MemoryType | None = None,
+        tags: list[str] | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        clean_q = query.strip()
+        prefix = next((t.strip() for t in (tags or []) if t.strip().startswith("/")), None)
+        if clean_q:
+            clamped_limit = max(1, min(limit, 50))
+            body: dict[str, Any] = {"query": clean_q, "limit": clamped_limit}
+            if prefix:
+                body["path_prefix"] = prefix
+            try:
+                res = self._request("POST", "/v1/memory/search", json_body=body)
+            except KeyError:
+                return self._client_scan_search(clean_q, prefix, clamped_limit)
+            hits = []
+            for h in res.get("hits") or []:
+                ent = h.get("entry") or {}
+                hits.append(
+                    {
+                        "id": ent.get("path"),
+                        "path": ent.get("path"),
+                        "content": ent.get("content"),
+                        "description": ent.get("description"),
+                        "score": h.get("score"),
+                        "updated_at": ent.get("updated_at"),
+                    }
+                )
+            return {"count": len(hits), "entries": hits, "backend": "omnigent"}
+
+        params = {"prefix": prefix} if prefix else None
+        res = self._request("GET", "/v1/memory/entries", params=params)
+        raw_entries = list(res.get("entries") or [])[: max(1, min(limit, 100))]
+        entries = [
+            {
+                "id": e.get("path"),
+                "path": e.get("path"),
+                "description": e.get("description"),
+                "updated_at": e.get("updated_at"),
+            }
+            for e in raw_entries
+        ]
+        return {"count": len(entries), "entries": entries, "backend": "omnigent"}
+
+    def get(self, id: str) -> dict[str, Any]:
+        path = self._norm_path(id)
+        try:
+            res = self._request("GET", "/v1/memory/entry", params={"path": path})
+        except KeyError:
+            raise ToolError(f"Memory entry not found at path '{path}'") from None
+        return {
+            "id": res.get("path", path),
+            "path": res.get("path", path),
+            "content": res.get("content", ""),
+            "description": res.get("description"),
+            "created_at": res.get("created_at"),
+            "updated_at": res.get("updated_at"),
+            "backend": "omnigent",
+        }
+
+    def update(
+        self,
+        id: str,
+        content: str | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        add_relations: list[str] | None = None,
+        remove_relations: list[str] | None = None,
+    ) -> dict[str, Any]:
+        path = self._norm_path(id)
+        current = self.get(path)
+        new_content = content if content is not None else str(current.get("content") or "")
+        desc = (metadata or {}).get("description", current.get("description"))
+        res = self._request(
+            "PUT",
+            "/v1/memory/entry",
+            json_body={"path": path, "content": new_content, "description": desc},
+        )
+        return {
+            "id": res.get("path", path),
+            "path": res.get("path", path),
+            "updated": True,
+            "backend": "omnigent",
+        }
+
+    def delete(self, id: str) -> dict[str, Any]:
+        path = self._norm_path(id)
+        try:
+            res = self._request("DELETE", "/v1/memory/entry", params={"path": path})
+            deleted = bool(res.get("deleted", True))
+        except KeyError:
+            deleted = False
+        return {"id": path, "path": path, "deleted": deleted, "backend": "omnigent"}
+
+    def list_tags(self) -> list[dict[str, Any]]:
+        res = self._request("GET", "/v1/memory/entries")
+        counts: Counter[str] = Counter()
+        for e in res.get("entries") or []:
+            parts = str(e.get("path") or "").strip("/").split("/")
+            ns = "/" + "/".join(parts[:2]) if len(parts) >= 2 else "/" + parts[0]
+            counts[ns] += 1
+        return [{"tag": ns, "count": cnt} for ns, cnt in sorted(counts.items())]
+
+    def get_related(self, id: str, depth: int = 1) -> dict[str, Any]:
+        path = self._norm_path(id)
+        parent = path.rsplit("/", 1)[0] or "/"
+        res = self._request("GET", "/v1/memory/entries", params={"prefix": parent})
+        siblings = [
+            {"id": e.get("path"), "path": e.get("path"), "description": e.get("description")}
+            for e in (res.get("entries") or [])
+            if e.get("path") != path
+        ]
+        return {"id": path, "related": siblings, "backend": "omnigent"}
+
+    def export(
+        self,
+        *,
+        format: Literal["json", "csv"] = "json",
+        uc_volume_path: str | None = None,
+        default_volume: str | None = None,
+    ) -> dict[str, Any]:
+        listing = self._request("GET", "/v1/memory/entries").get("entries") or []
+        full = [self.get(str(item["path"])) for item in listing if item.get("path")]
+        if format == "csv":
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=["path", "description", "content"])
+            writer.writeheader()
+            for row in full:
+                writer.writerow(
+                    {
+                        "path": row.get("path", ""),
+                        "description": row.get("description") or "",
+                        "content": row.get("content", ""),
+                    }
+                )
+            return {"count": len(full), "format": "csv", "csv": buf.getvalue()}
+        return {"count": len(full), "format": "json", "data": full}
+
+    def import_snapshot_payload(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise ToolError("Bulk snapshot import is not supported on omnigent backend.")
+
+    def import_snapshot(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise ToolError("Bulk snapshot import is not supported on omnigent backend.")
+
+
 def create_memory_server(
     settings: MCPStackSettings,
     *,
-    store: MemoryStore | None = None,
+    store: MemoryStore | OmnigentMemoryAdapter | None = None,
     uc_adapter: Any = None,
 ) -> FastMCP:
-    """Create the SQLite + FTS5 Memory MCP server."""
-    mem_store = store or MemoryStore(
-        db_path=settings.memory.db_path,
-        legacy_json_path=settings.memory.legacy_json_path,
+    """Create the unified Memory MCP server (Omnigent /v1/memory or local SQLite+FTS5)."""
+    mem_store: MemoryStore | OmnigentMemoryAdapter = store or (
+        OmnigentMemoryAdapter(settings)
+        if settings.memory.backend == "omnigent"
+        else MemoryStore(
+            db_path=settings.memory.db_path,
+            legacy_json_path=settings.memory.legacy_json_path,
+        )
     )
     mem_store.initialize()
 

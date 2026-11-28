@@ -13,6 +13,7 @@ from mcp_stack import __version__
 from mcp_stack.core.config import MCPStackSettings
 from mcp_stack.core.secrets import SecretResolver
 from mcp_stack.core.tracing import MLflowTracingMiddleware
+from mcp_stack.servers.memory import score_omnigent_memory_entry
 
 
 def _extract_item_text(item: dict[str, Any]) -> str:
@@ -157,8 +158,9 @@ def create_omnigent_server(
         payload = await _omni_request("GET", "/v1/hosts")
         hosts = payload.get("hosts") or payload.get("data") or []
         for host in hosts:
-            if host.get("status") == "online" and host.get("id"):
-                return str(host["id"])
+            host_id = host.get("id") or host.get("host_id")
+            if host.get("status") == "online" and host_id:
+                return str(host_id)
         raise ToolError("No online Omnigent host found and OMNIGENT_DEFAULT_HOST_ID is unset.")
 
     async def _create_session_internal(
@@ -171,6 +173,7 @@ def create_omnigent_server(
         workspace: str | None = None,
         model_override: str | None = None,
         workflow_id: str | None = None,
+        smart_routing: bool = True,
     ) -> dict[str, Any]:
         proj_id: str | None = None
         proj_cfg: dict[str, Any] = {}
@@ -196,6 +199,11 @@ def create_omnigent_server(
             payload["title"] = title
         if model_override:
             payload["model_override"] = model_override
+        elif smart_routing:
+            payload["cost_control_mode_override"] = "on"
+            payload["subagent_routing_override"] = "off"
+            if prompt.strip():
+                payload["smart_routing_message"] = prompt
         if workflow_id:
             payload["workflow_id"] = workflow_id
 
@@ -230,7 +238,11 @@ def create_omnigent_server(
 
         hosts = hosts_payload.get("hosts") or hosts_payload.get("data") or []
         online_hosts = [
-            {"id": h.get("id"), "name": h.get("name"), "status": h.get("status")}
+            {
+                "id": h.get("id") or h.get("host_id"),
+                "name": h.get("name"),
+                "status": h.get("status"),
+            }
             for h in hosts
             if h.get("status") == "online"
         ]
@@ -242,6 +254,8 @@ def create_omnigent_server(
             "ok": health.get("status") == "ok" and len(online_hosts) > 0,
             "serverVersion": info.get("server_version"),
             "singleUser": bool(info.get("single_user", False)),
+            "smartRoutingEnabled": bool(info.get("smart_routing_enabled", False)),
+            "smartRoutingSources": info.get("smart_routing_sources") or {},
             "onlineHosts": online_hosts,
             "unreadInboxCount": inbox.get("unread_count", 0),
             "automationsTotal": len(tasks),
@@ -252,26 +266,75 @@ def create_omnigent_server(
             "mutationsEnabled": settings.omnigent.allow_mutations,
         }
 
+    def _compact_project_row(row: dict[str, Any], *, created: bool | None = None) -> dict[str, Any]:
+        cfg = row.get("config") or {}
+        out: dict[str, Any] = {
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "workspace": cfg.get("workspace"),
+            "agentId": cfg.get("agent_id"),
+            "hostId": cfg.get("host_id"),
+            "useWorktree": cfg.get("use_worktree"),
+            "baseBranch": cfg.get("base_branch"),
+            "icon": cfg.get("icon"),
+        }
+        if created is not None:
+            out["created"] = created
+        return out
+
     @mcp.tool()
     async def omnigent_list_projects() -> list[dict[str, Any]]:
         """List Omnigent projects with their workspace and worktree defaults."""
         rows = (await _omni_request("GET", "/v1/projects")).get("data", [])
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            cfg = row.get("config") or {}
-            out.append(
-                {
-                    "id": row.get("id"),
-                    "name": row.get("name"),
-                    "workspace": cfg.get("workspace"),
-                    "agentId": cfg.get("agent_id"),
-                    "hostId": cfg.get("host_id"),
-                    "useWorktree": cfg.get("use_worktree"),
-                    "baseBranch": cfg.get("base_branch"),
-                    "icon": cfg.get("icon"),
-                }
-            )
-        return out
+        return [_compact_project_row(row) for row in rows]
+
+    @mcp.tool()
+    async def omnigent_create_project(
+        name: str,
+        workspace: str,
+        host_id: str | None = None,
+        agent_id: str | None = None,
+        icon: str | None = None,
+        use_worktree: bool = False,
+        base_branch: str | None = None,
+    ) -> dict[str, Any]:
+        """Create an Omnigent project for a repo or playground workspace (case-insensitive)."""
+        _require_mutations("create a project")
+        clean_name = name.strip()
+        if not clean_name:
+            raise ToolError("Project name must not be empty.")
+        clean_workspace = workspace.strip()
+        if not clean_workspace:
+            raise ToolError("Project workspace must not be empty.")
+
+        rows = (await _omni_request("GET", "/v1/projects")).get("data", [])
+        lowered = clean_name.lower()
+        existing = next(
+            (r for r in rows if str(r.get("name", "")).strip().lower() == lowered),
+            None,
+        )
+        if existing is not None:
+            return _compact_project_row(existing, created=False)
+
+        resolved_host = host_id or await _resolve_default_host_id()
+        resolved_agent = agent_id or await _resolve_default_agent_id()
+        config: dict[str, Any] = {
+            "host_id": resolved_host,
+            "workspace": clean_workspace,
+            "agent_id": resolved_agent,
+            "use_worktree": use_worktree,
+        }
+        if icon is not None:
+            config["icon"] = icon
+        if base_branch is not None:
+            config["base_branch"] = base_branch
+
+        created = await _omni_request(
+            "POST",
+            "/v1/projects",
+            json_body={"name": clean_name, "config": config},
+        )
+        return _compact_project_row(created, created=True)
 
     @mcp.tool()
     async def omnigent_list_sessions(
@@ -415,8 +478,20 @@ def create_omnigent_server(
         workspace: str | None = None,
         model_override: str | None = None,
         workflow_id: str | None = None,
+        smart_routing: bool = True,
     ) -> dict[str, Any]:
-        """Start a new Omnigent session, inheriting defaults from an optional project name or ID."""
+        """Start a new Omnigent session, inheriting defaults from an optional project name or ID.
+
+        Guidelines for callers:
+        - For a new repo or playground, call `omnigent_create_project` first (or pass an
+          explicit `workspace` directory such as `/Users/spencer/repos/<repo-name>`); do NOT
+          attach unrelated coding sessions to `Ops & Digests` (reserved for scheduled digests/ops).
+        - Leave `model_override` unset so Smart Routing (`smart_routing=True`) selects the
+          top-level model automatically (while sub-agents keep their native subscription
+          defaults) instead of defaulting straight to Fable.
+        - Use `omnigent_update_session` to move, rename, archive, or update Smart Routing on
+          an existing session.
+        """
         _require_mutations("start a session")
         return await _create_session_internal(
             prompt=prompt,
@@ -427,7 +502,56 @@ def create_omnigent_server(
             workspace=workspace,
             model_override=model_override,
             workflow_id=workflow_id,
+            smart_routing=smart_routing,
         )
+
+    @mcp.tool()
+    async def omnigent_update_session(
+        session_id: str,
+        project: str | None = None,
+        title: str | None = None,
+        archived: bool | None = None,
+        smart_routing: bool | None = None,
+        model_override: str | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing Omnigent session (project, title, archive, or model/Smart Routing)."""
+        _require_mutations("update a session")
+        body: dict[str, Any] = {}
+        if project is not None:
+            proj = await _resolve_project(project)
+            body["project_id"] = proj["id"]
+        if title is not None:
+            body["title"] = title
+        if archived is not None:
+            body["archived"] = archived
+        if model_override is not None:
+            body["model_override"] = model_override
+        if smart_routing is True:
+            body["cost_control_mode_override"] = "on"
+            body["subagent_routing_override"] = "off"
+        elif smart_routing is False:
+            body["cost_control_mode_override"] = "off"
+            body["subagent_routing_override"] = "off"
+        if not body:
+            raise ToolError("Provide at least one field to update.")
+
+        updated = await _omni_request(
+            "PATCH",
+            f"/v1/sessions/{session_id}",
+            json_body=body,
+        )
+        sid = str(updated.get("id", session_id))
+        return {
+            "id": sid,
+            "title": updated.get("title"),
+            "projectId": updated.get("project_id"),
+            "workspace": updated.get("workspace"),
+            "archived": bool(updated.get("archived", False)),
+            "costControlMode": updated.get("cost_control_mode_override"),
+            "subagentRouting": updated.get("subagent_routing_override"),
+            "modelOverride": updated.get("model_override"),
+            "sessionUrl": _session_url(sid),
+        }
 
     @mcp.tool()
     async def omnigent_send_message(session_id: str, message: str) -> dict[str, Any]:
@@ -455,6 +579,7 @@ def create_omnigent_server(
         project: str | None = None,
         title: str | None = None,
         model_override: str | None = None,
+        smart_routing: bool = True,
     ) -> dict[str, Any]:
         """Launch a saved Omnigent workflow by exact ID or case-insensitive name."""
         _require_mutations("run a workflow")
@@ -483,6 +608,7 @@ def create_omnigent_server(
             title=title,
             model_override=model_override,
             workflow_id=wf_id,
+            smart_routing=smart_routing,
         )
         return {
             **created,
@@ -530,5 +656,86 @@ def create_omnigent_server(
             "resolved": True,
             "response": resp,
         }
+
+    @mcp.tool()
+    async def omnigent_memory_list(path_prefix: str = "") -> dict[str, Any]:
+        """List entries in Omnigent unified memory (/v1/memory)."""
+        clean_prefix = ("/" + path_prefix.strip().lstrip("/")) if path_prefix.strip() else ""
+        params = {"prefix": clean_prefix} if clean_prefix else None
+        resp = await _omni_request("GET", "/v1/memory/entries", params=params)
+        entries = resp.get("entries") if isinstance(resp.get("entries"), list) else []
+        return {"count": len(entries), "entries": entries}
+
+    @mcp.tool()
+    async def omnigent_memory_get(path: str) -> dict[str, Any]:
+        """Read a single Omnigent unified memory entry by path (e.g. /feedback/workflow-rules)."""
+        clean = "/" + path.strip().lstrip("/")
+        return await _omni_request("GET", "/v1/memory/entry", params={"path": clean})
+
+    @mcp.tool()
+    async def omnigent_memory_search(
+        query: str, path_prefix: str = "", limit: int = 10
+    ) -> dict[str, Any]:
+        """Search Omnigent unified memory by keyword query and optional path prefix."""
+        clean_q = query.strip()
+        clamped = max(1, min(limit, 50))
+        clean_prefix = ("/" + path_prefix.strip().lstrip("/")) if path_prefix.strip() else ""
+        body: dict[str, Any] = {"query": clean_q, "limit": clamped}
+        if clean_prefix:
+            body["path_prefix"] = clean_prefix
+        try:
+            return await _omni_request("POST", "/v1/memory/search", json_body=body)
+        except ToolError as exc:
+            msg = str(exc).lower()
+            if "(404)" not in msg and "not available" not in msg:
+                raise
+
+        list_params = {"prefix": clean_prefix} if clean_prefix else None
+        listing_resp = await _omni_request("GET", "/v1/memory/entries", params=list_params)
+        raw_entries = listing_resp.get("entries")
+        entries = raw_entries if isinstance(raw_entries, list) else []
+        scored: list[tuple[int, str, dict[str, Any]]] = []
+        for item in entries:
+            item_path = str(item.get("path") or "")
+            if not item_path:
+                continue
+            try:
+                ent = await _omni_request("GET", "/v1/memory/entry", params={"path": item_path})
+            except ToolError as get_exc:
+                if "(404)" in str(get_exc):
+                    continue
+                raise
+            score = score_omnigent_memory_entry(ent, clean_q)
+            if score > 0:
+                scored.append((score, item_path, ent))
+        scored.sort(key=lambda row: (-row[0], row[1]))
+        return {
+            "hits": [{"entry": row[2], "score": row[0]} for row in scored[:clamped]],
+            "searchMode": "client_scan",
+        }
+
+    @mcp.tool()
+    async def omnigent_memory_write(
+        path: str, content: str, description: str = ""
+    ) -> dict[str, Any]:
+        """Create or update an Omnigent unified memory entry."""
+        _require_mutations("write unified memory")
+        clean = "/" + path.strip().lstrip("/")
+        return await _omni_request(
+            "PUT",
+            "/v1/memory/entry",
+            json_body={
+                "path": clean,
+                "content": content,
+                "description": description.strip() or None,
+            },
+        )
+
+    @mcp.tool()
+    async def omnigent_memory_delete(path: str) -> dict[str, Any]:
+        """Delete an Omnigent unified memory entry by path."""
+        _require_mutations("delete unified memory")
+        clean = "/" + path.strip().lstrip("/")
+        return await _omni_request("DELETE", "/v1/memory/entry", params={"path": clean})
 
     return mcp
