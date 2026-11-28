@@ -609,6 +609,8 @@ export interface SkillRegistryListResponse {
   serverVersion?: string | null;
   requiredVersion?: string;
   reason?: string | null;
+  mutationsEnabled?: boolean;
+  organizations?: string[];
   skills: SkillRegistryItem[];
 }
 
