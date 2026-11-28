@@ -36,7 +36,15 @@ def _mock_read_routes(router: respx.MockRouter) -> None:
         return_value=httpx.Response(200, json={"status": "ok"})
     )
     router.get("http://omni.test/v1/info").mock(
-        return_value=httpx.Response(200, json={"server_version": "0.23.0", "single_user": True})
+        return_value=httpx.Response(
+            200,
+            json={
+                "server_version": "0.23.0",
+                "single_user": True,
+                "smart_routing_enabled": True,
+                "smart_routing_sources": {"external": False, "oss": True},
+            },
+        )
     )
     router.get("http://omni.test/v1/hosts").mock(
         return_value=httpx.Response(
@@ -220,6 +228,8 @@ async def test_omnigent_read_tools_and_mutation_gate(make_settings) -> None:
                 status = json.loads(raw_status.content[0].text)
                 assert status["ok"] is True
                 assert status["serverVersion"] == "0.23.0"
+                assert status["smartRoutingEnabled"] is True
+                assert status["smartRoutingSources"] == {"external": False, "oss": True}
                 assert status["automationsActive"] == 1
                 assert status["automationsPaused"] == 1
                 assert status["mutationsEnabled"] is False
@@ -265,7 +275,9 @@ async def test_omnigent_read_tools_and_mutation_gate(make_settings) -> None:
                 assert len(inbox["pendingApprovalSessions"]) == 1
 
                 for tool_name, args in [
+                    ("omnigent_create_project", {"name": "demo", "workspace": "/repos/demo"}),
                     ("omnigent_start_session", {"prompt": "hi"}),
+                    ("omnigent_update_session", {"session_id": "sess_1", "archived": True}),
                     ("omnigent_send_message", {"session_id": "sess_1", "message": "hi"}),
                     ("omnigent_run_workflow", {"workflow": "polly-implement-and-cross-review"}),
                     ("omnigent_mark_inbox_item", {"item_id": "inbox_1"}),
@@ -316,6 +328,36 @@ async def test_omnigent_mutation_tools_when_enabled(make_settings) -> None:
         elicit_route = router.post(
             "http://omni.test/v1/sessions/sess_1/elicitations/el_1/resolve"
         ).mock(return_value=httpx.Response(202, json={"ok": True}))
+        project_route = router.post("http://omni.test/v1/projects").mock(
+            return_value=httpx.Response(
+                201,
+                json={
+                    "id": "proj_demo",
+                    "name": "demo-app",
+                    "config": {
+                        "host_id": "host_1",
+                        "workspace": "/repos/demo-app",
+                        "agent_id": "agent_polly",
+                        "use_worktree": False,
+                    },
+                },
+            )
+        )
+        patch_sess_route = router.patch("http://omni.test/v1/sessions/sess_1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "sess_1",
+                    "title": "Renamed Work",
+                    "project_id": "proj_printer",
+                    "workspace": "/repos/printer",
+                    "archived": True,
+                    "cost_control_mode_override": "on",
+                    "subagent_routing_override": "off",
+                    "model_override": None,
+                },
+            )
+        )
 
         async with httpx.AsyncClient() as http_cli:
             mcp = create_omnigent_server(settings, http_client=http_cli)
@@ -337,6 +379,9 @@ async def test_omnigent_mutation_tools_when_enabled(make_settings) -> None:
                 assert sent_body["project_id"] == "proj_printer"
                 assert sent_body["workspace"] == "/repos/printer"
                 assert sent_body["agent_id"] == "agent_polly"
+                assert sent_body["cost_control_mode_override"] == "on"
+                assert sent_body["subagent_routing_override"] == "off"
+                assert sent_body["smart_routing_message"] == "Check status"
 
                 wf_started = json.loads(
                     (
@@ -354,7 +399,39 @@ async def test_omnigent_mutation_tools_when_enabled(make_settings) -> None:
                 wf_body = json.loads(start_route.calls[1].request.content)
                 assert wf_body["workflow_id"] == "wf_1"
                 assert "initial_input" not in wf_body
-                assert new_msg_route.call_count == 2
+                assert wf_body["cost_control_mode_override"] == "on"
+                assert wf_body["subagent_routing_override"] == "off"
+                assert "Fix issue #12" in wf_body["smart_routing_message"]
+
+                await client.call_tool(
+                    "omnigent_start_session",
+                    {
+                        "prompt": "Pinned model",
+                        "project": "printer",
+                        "model_override": "claude-opus-5",
+                    },
+                )
+                pinned_body = json.loads(start_route.calls[2].request.content)
+                assert pinned_body["model_override"] == "claude-opus-5"
+                assert "cost_control_mode_override" not in pinned_body
+                assert "subagent_routing_override" not in pinned_body
+                assert "smart_routing_message" not in pinned_body
+
+                await client.call_tool(
+                    "omnigent_start_session",
+                    {
+                        "prompt": "No smart routing",
+                        "project": "printer",
+                        "smart_routing": False,
+                    },
+                )
+                unrouted_body = json.loads(start_route.calls[3].request.content)
+                assert "model_override" not in unrouted_body
+                assert "cost_control_mode_override" not in unrouted_body
+                assert "subagent_routing_override" not in unrouted_body
+                assert "smart_routing_message" not in unrouted_body
+
+                assert new_msg_route.call_count == 4
                 first_event = json.loads(new_msg_route.calls[0].request.content)
                 assert first_event["data"]["content"][0]["text"] == "Check status"
                 wf_event = json.loads(new_msg_route.calls[1].request.content)
@@ -396,6 +473,70 @@ async def test_omnigent_mutation_tools_when_enabled(make_settings) -> None:
                 assert resolved["resolved"] is True
                 assert elicit_route.call_count == 1
 
+                existing_proj = json.loads(
+                    (
+                        await client.call_tool(
+                            "omnigent_create_project",
+                            {"name": "Printer", "workspace": "/repos/printer"},
+                        )
+                    ).content[0].text
+                )
+                assert existing_proj["id"] == "proj_printer"
+                assert existing_proj["created"] is False
+                assert project_route.call_count == 0
+
+                created_proj = json.loads(
+                    (
+                        await client.call_tool(
+                            "omnigent_create_project",
+                            {"name": "demo-app", "workspace": "/repos/demo-app"},
+                        )
+                    ).content[0].text
+                )
+                assert created_proj["id"] == "proj_demo"
+                assert created_proj["created"] is True
+                assert project_route.call_count == 1
+                proj_body = json.loads(project_route.calls[0].request.content)
+                assert proj_body == {
+                    "name": "demo-app",
+                    "config": {
+                        "host_id": "host_1",
+                        "workspace": "/repos/demo-app",
+                        "agent_id": "agent_polly",
+                        "use_worktree": False,
+                    },
+                }
+
+                updated_sess = json.loads(
+                    (
+                        await client.call_tool(
+                            "omnigent_update_session",
+                            {
+                                "session_id": "sess_1",
+                                "project": "printer",
+                                "title": "Renamed Work",
+                                "archived": True,
+                                "smart_routing": True,
+                            },
+                        )
+                    ).content[0].text
+                )
+                assert updated_sess["id"] == "sess_1"
+                assert updated_sess["projectId"] == "proj_printer"
+                assert updated_sess["archived"] is True
+                assert updated_sess["costControlMode"] == "on"
+                assert updated_sess["subagentRouting"] == "off"
+                assert updated_sess["sessionUrl"] == "https://studio.ts.net:8446/c/sess_1"
+                assert patch_sess_route.call_count == 1
+                patch_body = json.loads(patch_sess_route.calls[0].request.content)
+                assert patch_body == {
+                    "project_id": "proj_printer",
+                    "title": "Renamed Work",
+                    "archived": True,
+                    "cost_control_mode_override": "on",
+                    "subagent_routing_override": "off",
+                }
+
 
 async def test_gateway_mounts_omnigent_and_ops_profile(make_settings) -> None:
     settings = make_settings()
@@ -412,6 +553,8 @@ async def test_gateway_mounts_omnigent_and_ops_profile(make_settings) -> None:
         ) as omni_cli:
             names = {t.name for t in await omni_cli.list_tools()}
             assert "omnigent_get_status" in names
+            assert "omnigent_create_project" in names
+            assert "omnigent_update_session" in names
             assert "omnigent_resolve_approval" in names
 
         async with Client(
