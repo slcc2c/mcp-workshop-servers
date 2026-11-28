@@ -75,6 +75,8 @@ def test_tool_curation_globs_and_middleware(make_settings) -> None:
     proxy, info = build_upstream_proxy("linear", cfg, settings)
     assert proxy is not None
     assert info["connectionStatus"] == "configured"
+    client_factory = proxy.client_factory  # type: ignore[attr-defined]
+    assert client_factory().transport.forward_incoming_headers is False
 
 
 async def test_discover_describe_call_and_dynamic_profile_crud(

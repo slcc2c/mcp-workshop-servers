@@ -7,10 +7,6 @@
         "Authorization": "Bearer ${MCP_CLAUDE_AUTH_TOKEN}"
       }
     },
-    "mlflow": {
-      "type": "http",
-      "url": "http://localhost:9012/mcp"
-    },
     "mcp-photos": {
       "command": "uv",
       "args": [

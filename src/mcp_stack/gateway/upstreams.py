@@ -167,7 +167,14 @@ def _format_auth_required_detail(
 ) -> tuple[str, str]:
     if reasons:
         code, message = reasons[0]
-        if code in {"timeout", "locked", "cli_missing", "provider_disabled", "vault_denied"}:
+        if code in {
+            "timeout",
+            "locked",
+            "cli_missing",
+            "provider_disabled",
+            "vault_denied",
+            "service_account_missing",
+        }:
             return code, f"{message} (click Probe once resolved)"
         return code, f"{message} ({', '.join(missing_items)})"
     return "missing", f"Configure {', '.join(missing_items)} to activate {slug}"
@@ -267,6 +274,11 @@ def build_upstream_proxy(
         )
 
     proxy = create_proxy(transport, name=slug)
+    if isinstance(transport, StreamableHttpTransport):
+        # Do not forward inbound gateway bearer tokens to external HTTP upstreams:
+        # avoids leaking MCP_*_AUTH_TOKEN and prevents duplicate Authorization headers
+        # when upstream config defines Title-Case "Authorization".
+        transport.forward_incoming_headers = False
     if cfg.allow_tools or cfg.deny_tools:
         proxy.add_middleware(ToolCurationMiddleware(slug, cfg.allow_tools, cfg.deny_tools))
     proxy.add_middleware(MLflowTracingMiddleware(settings, slug))

@@ -18,6 +18,7 @@ import typer
 import uvicorn
 
 from mcp_stack import __version__
+from mcp_stack.bridge import run_stdio_bridge
 from mcp_stack.client_configs import (
     audit_client_configs,
     discover_live_tool_catalog,
@@ -226,6 +227,53 @@ def serve(
             host=bind_host,
             port=bind_port,
         )
+
+
+@app.command("bridge")
+def bridge(
+    profile: str | None = typer.Option(
+        None, "--profile", help="Gateway profile slug (default: core)"
+    ),
+    server: str | None = typer.Option(
+        None,
+        "--server",
+        help="Federated/built-in server slug (e.g. printer, music-brain, omnigent)",
+    ),
+    base_url: str = typer.Option(
+        "http://127.0.0.1:8090", "--base-url", help="Gateway base URL"
+    ),
+    url: str | None = typer.Option(
+        None, "--url", help="Explicit Streamable HTTP MCP URL"
+    ),
+    token_env_var: str = typer.Option(
+        "MCP_CLAUDE_AUTH_TOKEN",
+        "--token-env-var",
+        help="Env var name holding the client Bearer token",
+    ),
+    env_file: Path | None = typer.Option(
+        None, "--env-file", help="Optional .env file override"
+    ),
+    allow_unauthenticated: bool = typer.Option(
+        False,
+        "--allow-unauthenticated",
+        help="Allow connecting without a Bearer token",
+    ),
+) -> None:
+    """Proxy stdio MCP requests to an authenticated Streamable HTTP gateway route."""
+    configure_logging("WARNING")
+    try:
+        run_stdio_bridge(
+            profile=profile,
+            server=server,
+            base_url=base_url,
+            explicit_url=url,
+            token_env_var=token_env_var,
+            env_file=env_file,
+            allow_unauthenticated=allow_unauthenticated,
+        )
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from None
 
 
 def _create_reload_app():
@@ -452,6 +500,11 @@ def config_install(
         "--sync-atelier-template",
         help="Mirror generated Omnigent registry into ~/repos/atelier/config/omnigent/",
     ),
+    extra_server: list[str] = typer.Option(
+        [],
+        "--extra-server",
+        help="Additional gateway server slug(s) to wire (e.g. omnigent)",
+    ),
     repo_root: Path = typer.Option(Path("."), "--repo-root", help="Repository root path"),
 ) -> None:
     """Safely install env-var Bearer/stdio/registry entries into local host client configs."""
@@ -478,6 +531,7 @@ def config_install(
         prune_duplicates=prune_duplicates,
         tool_catalog=tool_catalog,
         sync_atelier_template=atelier_tpl,
+        extra_servers=extra_server or None,
     )
     typer.echo(json.dumps(res, indent=2))
 

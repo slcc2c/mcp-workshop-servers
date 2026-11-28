@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import plistlib
 import re
 import shutil
 import time
@@ -22,6 +23,80 @@ from mcp_stack.core.config import MCPStackSettings
 _OMNIGENT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
 _NATIVE_CLIENT_SERVERS = frozenset({"computer-use", "node_repl"})
 _PRINTER_CEL_REQUIRED_TOOLS = ("print", "print_note", "print_picture", "reprint_ticket")
+_LEGACY_CLAUDE_DESKTOP_STDIO_SLUGS = frozenset(
+    {
+        "unity-catalog",
+        "mlflow",
+        "memory",
+        "filesystem",
+        "github",
+        "docker",
+        "postgresql",
+        "redis",
+        "mongodb",
+        "neo4j",
+        "kubernetes",
+        "jupyter",
+        "photos",
+        "xcodebuild",
+    }
+)
+_LEGACY_CLAUDE_DESKTOP_STDIO_KEYS = frozenset(
+    f"mcp-{slug}" for slug in _LEGACY_CLAUDE_DESKTOP_STDIO_SLUGS
+)
+
+
+def _stdio_bridge_entry(
+    settings: MCPStackSettings,
+    repo_root: Path,
+    *,
+    token_env_var: str,
+    profile: str | None = None,
+    server: str | None = None,
+) -> dict[str, Any]:
+    """Build a self-contained `mcp-stack bridge` stdio entry for local GUI clients."""
+    mcp_stack_bin = str(repo_root.resolve() / ".venv/bin/mcp-stack")
+    is_default_base = (
+        settings.gateway.host == "127.0.0.1" and settings.gateway.port == 8090
+    )
+    if server is not None:
+        slug = server.strip().replace("_", "-").lower()
+        if is_default_base:
+            args = ["bridge", "--server", slug, "--token-env-var", token_env_var]
+        else:
+            args = [
+                "bridge",
+                "--url",
+                f"{_gateway_base_url(settings)}/servers/{slug}/mcp",
+                "--token-env-var",
+                token_env_var,
+            ]
+    else:
+        selected = (
+            profile if profile is not None else settings.gateway.default_client_profile
+        ).strip()
+        if selected and selected != "full" and is_default_base:
+            args = ["bridge", "--profile", selected, "--token-env-var", token_env_var]
+        else:
+            gw_url = _gateway_mcp_url(settings, profile=profile)
+            args = ["bridge", "--url", gw_url, "--token-env-var", token_env_var]
+
+    if not settings.gateway.effective_auth_enabled:
+        args.append("--allow-unauthenticated")
+
+    return {
+        "command": mcp_stack_bin,
+        "args": args,
+    }
+
+
+def _is_legacy_claude_desktop_stdio_entry(name: str, entry: dict[str, Any]) -> bool:
+    """Return True for deprecated standalone mcp-<slug> stdio entries."""
+    norm = name.strip().replace("_", "-").lower()
+    if norm not in _LEGACY_CLAUDE_DESKTOP_STDIO_KEYS:
+        return False
+    target = _extract_mcp_target(entry)
+    return "mcp-stack" in target and "serve" in target and "stdio" in target
 
 
 def _gateway_base_url(settings: MCPStackSettings) -> str:
@@ -378,46 +453,16 @@ def generate_client_configs(
     }
     claude_code_payload: dict[str, Any] = {"mcpServers": claude_servers}
 
-    stdio_servers = [
-        "unity-catalog",
-        "mlflow",
-        "memory",
-        "filesystem",
-        "github",
-        "docker",
-        "postgresql",
-        "redis",
-        "mongodb",
-        "neo4j",
-        "kubernetes",
-        "jupyter",
-        "photos",
-        "xcodebuild",
-    ]
-    claude_desktop_servers: dict[str, Any] = {}
-    for slug in stdio_servers:
-        entry: dict[str, Any] = {
-            "command": "uv",
-            "args": [
-                "--directory",
-                root_str,
-                "run",
-                "mcp-stack",
-                "serve",
-                slug,
-                "--transport",
-                "stdio",
-            ],
+    claude_desktop_payload = {
+        "mcpServers": {
+            "mcp-workshop-gateway": _stdio_bridge_entry(
+                settings,
+                repo_root,
+                token_env_var="MCP_CLAUDE_AUTH_TOKEN",
+                profile=profile,
+            ),
         }
-        if slug == "photos":
-            entry["env"] = {
-                "PHOTOS_EXPORT_ROOT": str(
-                    settings.photos.export_root or "/Users/spencer/Exports/photos-mcp"
-                )
-            }
-        claude_desktop_servers[f"mcp-{slug}"] = entry
-
-    claude_desktop_payload = {"mcpServers": claude_desktop_servers}
+    }
 
     cursor_gateway_entry: dict[str, Any] = {
         "url": gw_url,
@@ -467,9 +512,15 @@ def generate_client_configs(
     )
     codex_toml = "\n".join(codex_parts)
 
-    antigravity_entry: dict[str, Any] = {"url": gw_url}
     if auth_enabled:
-        antigravity_entry["headers"] = {"Authorization": "Bearer ${MCP_ANTIGRAVITY_AUTH_TOKEN}"}
+        antigravity_entry: dict[str, Any] = _stdio_bridge_entry(
+            settings,
+            repo_root,
+            token_env_var="MCP_ANTIGRAVITY_AUTH_TOKEN",
+            profile=profile,
+        )
+    else:
+        antigravity_entry = {"url": gw_url}
     ag_servers: dict[str, Any] = {"mcp-workshop-gateway": antigravity_entry}
     if include_direct_mlflow:
         ag_servers["mlflow"] = {"url": settings.mlflow.mcp_url}
@@ -526,6 +577,24 @@ def write_client_configs(
         dest.write_text(rendered[key], encoding="utf-8")
         written.append(dest)
     return written
+
+
+def _omnigent_local_host_lacks_cipher(home: Path) -> bool:
+    """Return True when a local Omnigent host plist exists with no KMS/Vault cipher configured."""
+    plist_path = home / "Library/LaunchAgents/ai.omnigent.host.plist"
+    if not plist_path.is_file():
+        return False
+    env_vars: dict[str, Any] = {}
+    try:
+        data = plistlib.loads(plist_path.read_bytes())
+        if isinstance(data, dict) and isinstance(data.get("EnvironmentVariables"), dict):
+            env_vars = data["EnvironmentVariables"]
+    except Exception:
+        return True
+    for key in ("OMNIGENT_CREDENTIAL_KMS_KEY_ID", "OMNIGENT_CREDENTIAL_VAULT_KEY"):
+        if str(env_vars.get(key) or "").strip() or str(os.environ.get(key) or "").strip():
+            return False
+    return True
 
 
 def _backup_file(path: Path, stamp: str) -> str | None:
@@ -593,12 +662,22 @@ def _is_shadowed_entry(
     base = _gateway_base_url(settings)
     if target.startswith(base):
         return False, "gateway-routed"
+    if (
+        ("mcp-stack" in target and " bridge " in f" {target} ")
+        or "mcp-gateway-stdio-bridge.py" in target
+    ):
+        return False, "gateway-routed"
     if norm in managed_slugs:
         return True, f"server slug '{norm}' is managed by mcp-server gateway"
     if target.rstrip("/") in known_targets or str(entry.get("command") or "") in known_targets:
         return True, f"target '{target}' is already federated in mcp-server gateway"
     if norm == "agent-memory" and "agent_memory_mcp.py" in target:
         return True, "repo-local agent-memory shadows gateway 'printer-agent-memory'"
+    if _is_legacy_claude_desktop_stdio_entry(name, entry):
+        return (
+            True,
+            f"standalone stdio server '{norm}' should route via 'mcp-workshop-gateway'",
+        )
     return False, "custom"
 
 
@@ -673,6 +752,10 @@ def audit_client_configs(
     # 2. JSON-based clients
     json_clients = [
         ("claude-code", home / ".claude.json"),
+        (
+            "claude-desktop",
+            home / "Library/Application Support/Claude/claude_desktop_config.json",
+        ),
         ("cursor", home / ".cursor/mcp.json"),
         ("antigravity", home / ".gemini/config/mcp_config.json"),
         (
@@ -919,6 +1002,12 @@ def _upsert_codex_gateway_section(
     return updated
 
 
+def _is_bridge_entry(entry: dict[str, Any]) -> bool:
+    """Return True when an MCP client entry invokes `mcp-stack bridge`."""
+    target = _extract_mcp_target(entry)
+    return "mcp-stack" in target and " bridge " in f" {target} "
+
+
 def install_client_configs(
     settings: MCPStackSettings,
     repo_root: Path,
@@ -930,6 +1019,7 @@ def install_client_configs(
     prune_duplicates: bool = False,
     tool_catalog: dict[str, list[str]] | None = None,
     sync_atelier_template: Path | None = None,
+    extra_servers: list[str] | None = None,
 ) -> dict[str, Any]:
     """Non-destructively merge gateway/stdio MCP entries into live host client configs."""
     home = (home_dir or Path.home()).resolve()
@@ -958,6 +1048,11 @@ def install_client_configs(
         if v.enabled
         and (tool_catalog is None or k.strip().replace("_", "-").lower() in tool_catalog)
     }
+    normalized_extras = [
+        s.strip().replace("_", "-").lower()
+        for s in (extra_servers or [])
+        if s.strip()
+    ]
 
     results: dict[str, Any] = {}
     for client_name in clients:
@@ -1057,6 +1152,42 @@ def install_client_configs(
             src_cd = json.loads(rendered["claude-desktop"])["mcpServers"]
             for name_k, val in src_cd.items():
                 servers[name_k] = val
+            pruned_cd: list[str] = []
+            retargeted_cd: list[str] = []
+            added_cd: list[str] = []
+            if prune_duplicates:
+                for srv_key in list(servers.keys()):
+                    srv_val = servers[srv_key]
+                    if not isinstance(srv_val, dict):
+                        continue
+                    if _is_legacy_claude_desktop_stdio_entry(srv_key, srv_val):
+                        del servers[srv_key]
+                        pruned_cd.append(srv_key)
+                        continue
+                    norm_key = srv_key.strip().replace("_", "-").lower()
+                    if norm_key in profile_members:
+                        shadowed, _ = _is_shadowed_entry(
+                            srv_key, srv_val, settings, managed_slugs, known_targets
+                        )
+                        if shadowed:
+                            del servers[srv_key]
+                            pruned_cd.append(srv_key)
+                    elif norm_key in live_upstreams and not _is_bridge_entry(srv_val):
+                        servers[srv_key] = _stdio_bridge_entry(
+                            settings,
+                            repo_root,
+                            token_env_var="MCP_CLAUDE_AUTH_TOKEN",
+                            server=norm_key,
+                        )
+                        retargeted_cd.append(srv_key)
+            for slug in normalized_extras:
+                servers[slug] = _stdio_bridge_entry(
+                    settings,
+                    repo_root,
+                    token_env_var="MCP_CLAUDE_AUTH_TOKEN",
+                    server=slug,
+                )
+                added_cd.append(slug)
             doc["mcpServers"] = servers
             backup = None
             if not dry_run:
@@ -1066,15 +1197,102 @@ def install_client_configs(
             results["claude-desktop"] = {
                 "path": str(target),
                 "backup": backup,
+                "pruned": pruned_cd,
+                "retargeted": retargeted_cd,
+                "added": added_cd,
                 "status": "dry_run" if dry_run else "updated",
-                "entries": sorted(src_cd.keys()),
+                "entries": sorted(servers.keys()),
             }
         elif key == "antigravity":
             target = home / ".gemini/config/mcp_config.json"
+            migrated_target = (
+                home / ".gemini/config/plugins/migrated-settings/mcp_config.json"
+            )
             doc, _ = _safe_load_json_dict(target)
             servers = dict(doc.get("mcpServers") or {})
             src_ag = json.loads(rendered["antigravity"])["mcpServers"]
             servers["mcp-workshop-gateway"] = src_ag["mcp-workshop-gateway"]
+
+            def _ag_server_entry(server_slug: str) -> dict[str, Any]:
+                if auth_enabled:
+                    return _stdio_bridge_entry(
+                        settings,
+                        repo_root,
+                        token_env_var="MCP_ANTIGRAVITY_AUTH_TOKEN",
+                        server=server_slug,
+                    )
+                return {"url": f"{_gateway_base_url(settings)}/servers/{server_slug}/mcp"}
+
+            pruned_ag: list[str] = []
+            retargeted_ag: list[str] = []
+            added_ag: list[str] = []
+            migrated_pruned: list[str] = []
+            migrated_backup: str | None = None
+
+            if prune_duplicates:
+                for srv_key in list(servers.keys()):
+                    srv_val = servers[srv_key]
+                    if not isinstance(srv_val, dict):
+                        continue
+                    norm_key = srv_key.strip().replace("_", "-").lower()
+                    if norm_key in profile_members:
+                        shadowed, _ = _is_shadowed_entry(
+                            srv_key, srv_val, settings, managed_slugs, known_targets
+                        )
+                        if shadowed:
+                            del servers[srv_key]
+                            pruned_ag.append(srv_key)
+                    elif norm_key in live_upstreams:
+                        desired_entry = _ag_server_entry(norm_key)
+                        if servers[srv_key] != desired_entry:
+                            servers[srv_key] = desired_entry
+                            retargeted_ag.append(srv_key)
+
+                if migrated_target.exists():
+                    migrated_doc, _ = _safe_load_json_dict(migrated_target)
+                    migrated_servers = dict(migrated_doc.get("mcpServers") or {})
+                    for srv_key in list(migrated_servers.keys()):
+                        srv_val = migrated_servers[srv_key]
+                        if not isinstance(srv_val, dict):
+                            continue
+                        norm_key = srv_key.strip().replace("_", "-").lower()
+                        shadowed, _ = _is_shadowed_entry(
+                            srv_key, srv_val, settings, managed_slugs, known_targets
+                        )
+                        if not shadowed:
+                            continue
+                        if norm_key in profile_members:
+                            del migrated_servers[srv_key]
+                            migrated_pruned.append(srv_key)
+                        elif norm_key in live_upstreams:
+                            del migrated_servers[srv_key]
+                            migrated_pruned.append(srv_key)
+                            existing_primary = servers.get(norm_key)
+                            existing_shadowed = isinstance(existing_primary, dict) and (
+                                _is_shadowed_entry(
+                                    norm_key,
+                                    existing_primary,
+                                    settings,
+                                    managed_slugs,
+                                    known_targets,
+                                )[0]
+                            )
+                            if norm_key not in servers or existing_shadowed:
+                                servers[norm_key] = _ag_server_entry(norm_key)
+                                if norm_key not in retargeted_ag:
+                                    retargeted_ag.append(norm_key)
+
+                    if migrated_pruned and not dry_run:
+                        migrated_doc["mcpServers"] = migrated_servers
+                        migrated_backup = _backup_file(migrated_target, stamp)
+                        migrated_target.write_text(
+                            json.dumps(migrated_doc, indent=2) + "\n", encoding="utf-8"
+                        )
+
+            for slug in normalized_extras:
+                servers[slug] = _ag_server_entry(slug)
+                added_ag.append(slug)
+
             doc["mcpServers"] = servers
             backup = None
             if not dry_run:
@@ -1084,6 +1302,11 @@ def install_client_configs(
             results["antigravity"] = {
                 "path": str(target),
                 "backup": backup,
+                "pruned": pruned_ag,
+                "retargeted": retargeted_ag,
+                "added": added_ag,
+                "migratedPruned": migrated_pruned,
+                "migratedBackup": migrated_backup,
                 "status": "dry_run" if dry_run else "updated",
             }
         elif key == "gemini-cli":
@@ -1164,6 +1387,25 @@ def install_client_configs(
                     "Generated Omnigent mcp_registry.yaml failed validation: "
                     + "; ".join(schema_errors)
                 )
+            if (
+                any(str(s.get("auth") or "") in {"bearer", "oauth"} for s in merged_services)
+                and _omnigent_local_host_lacks_cipher(home)
+            ):
+                warnings.append(
+                    "Skipped writing ~/.omnigent/mcp_registry.yaml with auth=bearer/oauth: "
+                    "local ai.omnigent.host.plist has neither OMNIGENT_CREDENTIAL_KMS_KEY_ID "
+                    "nor OMNIGENT_CREDENTIAL_VAULT_KEY configured "
+                    "(omnigent >=0.23 fails startup without a cipher)."
+                )
+                results["omnigent"] = {
+                    "path": str(target),
+                    "backup": None,
+                    "managedServices": managed_ids,
+                    "preservedCustom": len(preserved_custom),
+                    "warnings": warnings,
+                    "status": "skipped_missing_cipher",
+                }
+                continue
             final_yaml = yaml.safe_dump({"services": merged_services}, sort_keys=False)
             backup = None
             if not dry_run:
@@ -1257,13 +1499,14 @@ async def verify_client_connection(
             }
 
     t0 = time.monotonic()
+    out: dict[str, Any]
     try:
         transport = StreamableHttpTransport(gw_url, headers=headers or None)
         async with Client(transport, timeout=timeout_s) as mcp_cli:
             tools = await mcp_cli.list_tools()
             init_res = getattr(mcp_cli, "initialize_result", None)
             proto = getattr(init_res, "protocolVersion", None) if init_res else None
-            out: dict[str, Any] = {
+            out = {
                 "ok": True,
                 "client": clean_client,
                 "profile": selected_profile,
@@ -1277,7 +1520,6 @@ async def verify_client_connection(
                 out["omnigentRegistry"] = omnigent_check
                 if not omnigent_check["schemaValid"]:
                     out["ok"] = False
-            return out
     except Exception as exc:
         out_err: dict[str, Any] = {
             "ok": False,
@@ -1291,6 +1533,42 @@ async def verify_client_connection(
         if omnigent_check is not None:
             out_err["omnigentRegistry"] = omnigent_check
         return out_err
+
+    if clean_client in {"antigravity", "claude-desktop"}:
+        from fastmcp.client.transports import StdioTransport
+
+        repo_root = Path(__file__).resolve().parents[2]
+        token_env_var = _CLIENT_TOKEN_ENV.get(clean_client, "MCP_CLAUDE_AUTH_TOKEN")
+        bridge_entry = _stdio_bridge_entry(
+            settings,
+            repo_root,
+            token_env_var=token_env_var,
+            profile=profile,
+        )
+        stripped_env = {
+            k: v
+            for k, v in os.environ.items()
+            if not (k.startswith("MCP_") and k.endswith("_AUTH_TOKEN")) and k != "AUTH_TOKEN"
+        }
+        bt0 = time.monotonic()
+        try:
+            stdio_transport = StdioTransport(
+                command=bridge_entry["command"],
+                args=bridge_entry["args"],
+                env=stripped_env,
+            )
+            async with Client(stdio_transport, timeout=timeout_s) as bridge_cli:
+                bridge_tools = await bridge_cli.list_tools()
+            out["bridgeOk"] = True
+            out["bridgeToolCount"] = len(bridge_tools)
+            out["bridgeLatencyMs"] = round((time.monotonic() - bt0) * 1000.0, 2)
+        except Exception as exc:
+            out["bridgeOk"] = False
+            out["bridgeError"] = str(exc)
+            out["bridgeLatencyMs"] = round((time.monotonic() - bt0) * 1000.0, 2)
+            out["ok"] = False
+
+    return out
 
 
 _HOOK_START = "# >>> mcp-workshop-stack tokens >>>"

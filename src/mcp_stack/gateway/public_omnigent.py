@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import threading
@@ -211,9 +212,23 @@ def is_allowed_redirect_uri(uri: Any) -> bool:
         return True
     if bare in CHATGPT_EXACT_CALLBACK_URIS:
         return True
+    if host == "chatgpt.com" and parsed.path.startswith("/connector/oauth/"):
+        return True
     if host == "chat.openai.com" and parsed.path.startswith("/aip/"):
         return True
     return _is_google_host(host)
+
+
+def _extract_client_redirect_uris(client: Any) -> list[str]:
+    """Extract declared redirect URIs from a DCR client or FastMCP CIMD proxy client."""
+    direct = getattr(client, "redirect_uris", None)
+    if direct:
+        return [str(u) for u in direct]
+    cimd_doc = getattr(client, "cimd_document", None)
+    doc_uris = getattr(cimd_doc, "redirect_uris", None) if cimd_doc is not None else None
+    if doc_uris:
+        return [str(u) for u in doc_uris]
+    return []
 
 
 def _is_allowed_origin(origin: str, public_host: str) -> bool:
@@ -360,8 +375,16 @@ class OmnigentGoogleProvider(GoogleProvider):
         client = await super().get_client(client_id)
         if client is None:
             return None
-        uris = list(client.redirect_uris or [])
+        uris = _extract_client_redirect_uris(client)
         if not uris or not all(is_allowed_redirect_uri(u) for u in uris):
+            self._refusals.record(
+                reason="disallowed_client_redirect_uri",
+                status=400,
+                ip="authorize",
+                method="GET",
+                path="/authorize",
+                detail=f"client_id={str(client_id)[:80]} uris={[str(u)[:80] for u in uris]}",
+            )
             return None
         return client
 
@@ -596,6 +619,9 @@ def build_public_omnigent_app(
     client_storage: Any | None = None,
 ) -> ASGIApp:
     """Build the hardened Google OAuth 2.1 Omnigent MCP ASGI application."""
+    # Prevent httpx/httpcore INFO logs from writing Google tokeninfo query strings to stderr.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     effective_settings = settings.model_copy(
         update={
             "omnigent": settings.omnigent.model_copy(update={"allow_mutations": True}),
