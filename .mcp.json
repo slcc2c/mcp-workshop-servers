@@ -6,22 +6,6 @@
       "headers": {
         "Authorization": "Bearer ${MCP_CLAUDE_AUTH_TOKEN}"
       }
-    },
-    "mcp-photos": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/Users/spencer/repos/mcp-server",
-        "run",
-        "mcp-stack",
-        "serve",
-        "photos",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "PHOTOS_EXPORT_ROOT": "/Users/spencer/Exports/photos-mcp"
-      }
     }
   }
 }

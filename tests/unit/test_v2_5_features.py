@@ -457,6 +457,7 @@ def test_secret_resolver_dual_mode_diagnostics_and_activity_bus(
     assert "unlock 1Password" in str(exc_info.value)
 
     diag = resolver.diagnostics()
+    assert diag["configuredMode"] == "service-account"
     assert diag["mode"] == "service-account"
     assert diag["serviceAccountConfigured"] is True
     assert diag["lastErrorCode"] == "timeout"

@@ -63,9 +63,12 @@ def test_secret_resolver_literal_and_env(monkeypatch: pytest.MonkeyPatch) -> Non
         resolver.resolve("env:MISSING_VAR")
 
 
-def test_secret_resolver_1password_vault_allowlist_and_ttl() -> None:
+def test_secret_resolver_1password_vault_allowlist_and_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[list[str]] = []
     now = 100.0
+    monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "ops_test_token")
 
     def fake_runner(args: list[str]) -> CommandResult:
         calls.append(args)
@@ -74,7 +77,6 @@ def test_secret_resolver_1password_vault_allowlist_and_ttl() -> None:
     resolver = SecretResolver(
         SecretsSettings(
             onepassword_enabled=True,
-            onepassword_mode="desktop-cli",
             onepassword_allowed_vaults=["AI"],
             cache_ttl_seconds=300,
         ),
@@ -101,11 +103,11 @@ def test_secret_resolver_1password_vault_allowlist_and_ttl() -> None:
     assert len(calls) == 2
 
 
-def test_secret_resolver_refuses_desktop_fallback_without_service_account_token(
+def test_secret_resolver_fails_closed_without_service_account_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
     calls: list[list[str]] = []
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
 
     def fake_runner(args: list[str]) -> CommandResult:
         calls.append(args)
@@ -123,4 +125,49 @@ def test_secret_resolver_refuses_desktop_fallback_without_service_account_token(
         resolver.resolve("op://AI/GitHub/token")
     assert exc_info.value.reason_code == "service_account_missing"
     assert calls == []
-    assert resolver.diagnostics()["configuredMode"] == "service-account"
+    diag = resolver.diagnostics()
+    assert diag["configuredMode"] == "service-account"
+    assert diag["mode"] == "service-account-missing"
+    assert diag["lastErrorCode"] == "service_account_missing"
+
+
+def test_secret_resolver_explicit_desktop_cli_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+
+    def fake_runner(args: list[str]) -> CommandResult:
+        calls.append(args)
+        return CommandResult(returncode=0, stdout="desktop-val\n", stderr="")
+
+    resolver = SecretResolver(
+        SecretsSettings(
+            onepassword_enabled=True,
+            onepassword_mode="desktop-cli",
+            onepassword_allowed_vaults=["AI"],
+        ),
+        runner=fake_runner,
+    )
+    assert resolver.onepassword_mode() == "desktop-cli"
+    assert resolver.resolve("op://AI/GitHub/token") == "desktop-val"
+    assert calls == [["op", "read", "op://AI/GitHub/token"]]
+
+
+def test_load_settings_parses_op_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg = tmp_path / "services.yaml"
+    cfg.write_text("gateway:\n  port: 8090\n", encoding="utf-8")
+
+    monkeypatch.delenv("OP_MODE", raising=False)
+    default_settings = load_settings(config_file=cfg, load_dotenv=False)
+    assert default_settings.secrets.onepassword_mode == "service-account"
+
+    monkeypatch.setenv("OP_MODE", "desktop-cli")
+    desktop_settings = load_settings(config_file=cfg, load_dotenv=False)
+    assert desktop_settings.secrets.onepassword_mode == "desktop-cli"
+
+    monkeypatch.setenv("OP_MODE", "bogus")
+    with pytest.raises(ValueError, match="Invalid OP_MODE"):
+        load_settings(config_file=cfg, load_dotenv=False)

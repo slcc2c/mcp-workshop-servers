@@ -285,6 +285,7 @@ services:
   - mini_list_jobs
   - mini_resume_job
   - mini_start_job
+  - omnigent_create_project
   - omnigent_get_session
   - omnigent_get_status
   - omnigent_list_automations
@@ -293,7 +294,13 @@ services:
   - omnigent_list_sessions
   - omnigent_list_workflows
   - omnigent_mark_inbox_item
+  - omnigent_memory_delete
+  - omnigent_memory_get
+  - omnigent_memory_list
+  - omnigent_memory_search
+  - omnigent_memory_write
   - omnigent_resolve_approval
   - omnigent_run_workflow
   - omnigent_send_message
   - omnigent_start_session
+  - omnigent_update_session
