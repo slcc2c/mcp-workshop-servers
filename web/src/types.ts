@@ -703,6 +703,7 @@ export interface EvalRunCompareResponse {
 
 export interface SecretsHealthResponse {
   onepasswordEnabled: boolean;
+  configuredMode?: string;
   mode: string;
   serviceAccountConfigured: boolean;
   cliPath: string;
@@ -722,8 +723,11 @@ export interface SecretsHealthResponse {
 }
 
 export interface OpsMetricsBucket {
-  ts: string;
-  totalCalls: number;
+  ts?: string;
+  timestampMs?: number;
+  label?: string;
+  count?: number;
+  totalCalls?: number;
   errorCount: number;
   errorRate: number;
   p50Ms: number;
@@ -732,8 +736,9 @@ export interface OpsMetricsBucket {
 
 export interface OpsMetricsSeriesResponse {
   bucketSeconds: number;
-  buckets: OpsMetricsBucket[];
-  totalRecorded: number;
+  buckets?: OpsMetricsBucket[];
+  series?: OpsMetricsBucket[];
+  totalRecorded?: number;
 }
 
 export interface ActivityEvent {

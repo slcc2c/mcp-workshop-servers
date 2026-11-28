@@ -70,3 +70,5 @@ external/XcodeBuildMCP/
 config/gateway.local.yaml
 src/mcp_stack/gateway/static/
 web/node_modules/
+mlflow.db
+.env.bak-*

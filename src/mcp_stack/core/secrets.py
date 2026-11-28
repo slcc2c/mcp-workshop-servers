@@ -42,31 +42,33 @@ class CommandResult:
 CommandRunner = Callable[[list[str]], CommandResult]
 
 
-def _sanitized_op_env() -> dict[str, str]:
-    env: dict[str, str] = {}
-    for key in (
+def _sanitized_op_env(*, include_account: bool = True) -> dict[str, str]:
+    keys = [
         "PATH",
         "HOME",
         "USER",
         "LOGNAME",
         "TMPDIR",
         "OP_SERVICE_ACCOUNT_TOKEN",
-        "OP_ACCOUNT",
         "OP_CONFIG_DIR",
         "XDG_CONFIG_HOME",
-    ):
+    ]
+    if include_account:
+        keys.append("OP_ACCOUNT")
+    env: dict[str, str] = {}
+    for key in keys:
         val = os.getenv(key)
         if val:
             env[key] = val
     return env
 
 
-def _default_runner(args: list[str]) -> CommandResult:
+def _default_runner(args: list[str], *, include_account: bool = False) -> CommandResult:
     try:
         proc = subprocess.run(
             args,
             shell=False,
-            env=_sanitized_op_env(),
+            env=_sanitized_op_env(include_account=include_account),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -125,6 +127,7 @@ class SecretResolver:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
+        self._custom_runner = runner
         self._runner = runner or _default_runner
         self._clock = clock
         self._cache: dict[str, tuple[str, float]] = {}
@@ -133,12 +136,14 @@ class SecretResolver:
         self._last_success_at: str | None = None
 
     def onepassword_mode(self) -> str:
-        """Return active 1Password mode: service-account, desktop-cli, or disabled."""
+        """Return active 1Password mode."""
         if not self._settings.onepassword_enabled:
             return "disabled"
         if os.getenv("OP_SERVICE_ACCOUNT_TOKEN", "").strip():
             return "service-account"
-        return "desktop-cli"
+        if self._settings.onepassword_mode == "desktop-cli":
+            return "desktop-cli"
+        return "service-account-missing"
 
     def resolve(self, raw: str | SecretStr | None) -> str | None:
         """Resolve a configured secret string synchronously."""
@@ -197,8 +202,21 @@ class SecretResolver:
             if now < expires_at:
                 return cached_val
 
+        mode = self.onepassword_mode()
+        if mode == "service-account-missing":
+            msg = (
+                "OP_SERVICE_ACCOUNT_TOKEN is not set; refusing interactive 1Password Desktop CLI "
+                "fallback (use the gateway daemon or set OP_MODE=desktop-cli explicitly)"
+            )
+            self._record_error("service_account_missing", msg)
+            raise SecretAccessDeniedError(msg, reason_code="service_account_missing")
+
+        cmd = [self._settings.onepassword_cli, "read", ref]
         try:
-            result = self._runner([self._settings.onepassword_cli, "read", ref])
+            if self._custom_runner is not None:
+                result = self._custom_runner(cmd)
+            else:
+                result = _default_runner(cmd, include_account=(mode == "desktop-cli"))
         except subprocess.TimeoutExpired as exc:
             code, msg = _classify_op_error(124, str(exc) or "timed out")
             self._record_error(code, msg)
@@ -244,6 +262,7 @@ class SecretResolver:
         live_cache = sum(1 for _val, exp in self._cache.values() if now < exp)
         return {
             "onepasswordEnabled": self._settings.onepassword_enabled,
+            "configuredMode": self._settings.onepassword_mode,
             "mode": self.onepassword_mode(),
             "serviceAccountConfigured": bool(os.getenv("OP_SERVICE_ACCOUNT_TOKEN", "").strip()),
             "cliPath": cli_cmd,

@@ -861,6 +861,8 @@ def create_gateway_meta_server(
         import mlflow.genai
 
         mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+        if settings.mlflow.experiment_name:
+            mlflow.set_experiment(settings.mlflow.experiment_name)
         pv = mlflow.genai.register_prompt(
             name=name.strip(),
             template=template,

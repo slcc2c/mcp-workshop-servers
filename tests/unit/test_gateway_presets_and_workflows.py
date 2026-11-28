@@ -251,6 +251,7 @@ async def test_presets_rest_and_mcp_resource_plus_trace_id(
 def test_resolve_secret_mapping_prefixed_onepassword_with_spaces(make_settings) -> None:
     settings = make_settings()
     settings.secrets.onepassword_enabled = True
+    settings.secrets.onepassword_mode = "desktop-cli"
     settings.secrets.onepassword_allowed_vaults = ["Server-Configurations"]
 
     def _ok_runner(args: list[str]) -> CommandResult:

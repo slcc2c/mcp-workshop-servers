@@ -176,6 +176,12 @@ export function OverviewView({
     }
   }
 
+  const latencyBuckets = metricsSeries?.buckets ?? metricsSeries?.series ?? [];
+  const authReqUpstreams = secretsHealth?.authRequiredUpstreams ?? [];
+  const totalRecordedCalls =
+    metricsSeries?.totalRecorded ??
+    latencyBuckets.reduce((acc, b) => acc + (b.totalCalls ?? b.count ?? 0), 0);
+
   return (
     <div className="space-y-5">
       {isRegression && (
@@ -426,7 +432,8 @@ export function OverviewView({
               <StatusBadge
                 label={secretsHealth?.mode || "env"}
                 tone={
-                  secretsHealth?.lastErrorCode
+                  secretsHealth?.lastErrorCode ||
+                  secretsHealth?.mode === "service-account-missing"
                     ? "warn"
                     : secretsHealth?.onepasswordEnabled
                       ? "ok"
@@ -447,11 +454,11 @@ export function OverviewView({
                     {secretsHealth.lastError}
                   </div>
                 )}
-                {secretsHealth.authRequiredUpstreams.length > 0 && (
+                {authReqUpstreams.length > 0 && (
                   <div className="pt-1 flex items-center justify-between gap-2 flex-wrap">
                     <span className="text-[var(--warn)]">
-                      {secretsHealth.authRequiredUpstreams.length} auth_required upstream(s):{" "}
-                      {secretsHealth.authRequiredUpstreams.map((u) => u.slug).join(", ")}
+                      {authReqUpstreams.length} auth_required upstream(s):{" "}
+                      {authReqUpstreams.map((u) => u.slug).join(", ")}
                     </span>
                     <button
                       type="button"
@@ -480,22 +487,22 @@ export function OverviewView({
             <div className="flex items-center justify-between gap-2">
               <div className="text-[13.5px] font-semibold">Gateway Latency & Errors</div>
               <span className="font-mono text-[11px] text-[var(--text-muted)]">
-                {metricsSeries?.totalRecorded ?? 0} tool calls
+                {totalRecordedCalls} tool calls
               </span>
             </div>
-            <LatencySparkline buckets={metricsSeries?.buckets || []} />
-            {metricsSeries && metricsSeries.buckets.length > 0 && (
+            <LatencySparkline buckets={latencyBuckets} />
+            {latencyBuckets.length > 0 && (
               <div className="flex items-center gap-4 text-[11.5px] font-mono text-[var(--text-secondary)]">
                 <span>
-                  Latest P50: {metricsSeries.buckets[metricsSeries.buckets.length - 1].p50Ms} ms
+                  Latest P50: {latencyBuckets[latencyBuckets.length - 1].p50Ms ?? 0} ms
                 </span>
                 <span>
-                  P95: {metricsSeries.buckets[metricsSeries.buckets.length - 1].p95Ms} ms
+                  P95: {latencyBuckets[latencyBuckets.length - 1].p95Ms ?? 0} ms
                 </span>
                 <span>
                   Err:{" "}
                   {(
-                    metricsSeries.buckets[metricsSeries.buckets.length - 1].errorRate * 100
+                    (latencyBuckets[latencyBuckets.length - 1].errorRate ?? 0) * 100
                   ).toFixed(1)}
                   %
                 </span>

@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -63,6 +64,11 @@ def _append_log(log_path: Path, event: dict[str, Any]) -> None:
         fh.write(json.dumps(event) + "\n")
 
 
+def _is_loopback_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").strip().lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
 def _default_probe(settings: MCPStackSettings) -> dict[str, dict[str, Any]]:
     uid = os.getuid()
     results: dict[str, dict[str, Any]] = {}
@@ -92,33 +98,62 @@ def _default_probe(settings: MCPStackSettings) -> dict[str, dict[str, Any]]:
         "detail": "" if ml_ok else f"launchctl={ml_info.get('state')} probe={ml_probe}",
     }
 
-    # 3. LaunchAgent mcp-workshop-gateway
+    # 3. LaunchAgent mcp-workshop-gateway (liveness via /health; readiness tracked separately)
     gw_info = _launchctl_info(uid, GATEWAY_LABEL)
     gw_ok = False
     gw_detail = ""
+    base_gw_url = f"http://{settings.gateway.host}:{settings.gateway.port}"
     try:
-        r = httpx.get(
-            f"http://{settings.gateway.host}:{settings.gateway.port}/ready",
-            timeout=2.5,
-        )
+        r = httpx.get(f"{base_gw_url}/health", timeout=2.5)
         body = r.json()
         gw_ok = (
             bool(gw_info.get("loaded"))
             and r.status_code == 200
-            and body.get("status") == "ready"
+            and body.get("status") == "healthy"
         )
         if not gw_ok:
-            gw_detail = f"launchctl={gw_info.get('state')} ready={body.get('status')}"
+            gw_detail = f"launchctl={gw_info.get('state')} health={body.get('status')}"
     except Exception as exc:
         gw_detail = f"launchctl={gw_info.get('state')} err={exc}"
-    results["gateway"] = {"healthy": gw_ok, "detail": gw_detail}
+
+    ready_status = "error"
+    ready_detail = ""
+    try:
+        rr = httpx.get(f"{base_gw_url}/ready", timeout=2.5)
+        rbody = rr.json() if rr.status_code == 200 else {}
+        ready_status = str(rbody.get("status") or f"http_{rr.status_code}")
+    except Exception as exc:
+        ready_detail = str(exc)[:180]
+
+    gw_result: dict[str, Any] = {
+        "healthy": gw_ok,
+        "detail": gw_detail,
+        "ready_status": ready_status,
+    }
+    if ready_detail:
+        gw_result["ready_detail"] = ready_detail
+    results["gateway"] = gw_result
 
     return results
 
 
-def _default_recover(component: str) -> dict[str, Any]:
+def _default_recover(
+    component: str,
+    *,
+    settings: MCPStackSettings | None = None,
+) -> dict[str, Any]:
     uid = os.getuid()
     if component == "unity_catalog":
+        if settings is not None and not _is_loopback_url(settings.unity_catalog.base_url):
+            return {
+                "command": "skipped (remote unity_catalog)",
+                "ok": False,
+                "skipped": True,
+                "detail": (
+                    f"Remote UC endpoint {settings.unity_catalog.base_url} "
+                    "is not managed via local docker start"
+                ),
+            }
         proc = subprocess.run(
             ["docker", "start", "mcp-unity-catalog"],
             capture_output=True,
@@ -341,7 +376,7 @@ def run_watchdog_once(
     components_state: dict[str, dict[str, Any]] = state.setdefault("components", {})
 
     probe_impl = probe_fn or _default_probe
-    recover_impl = recover_fn or _default_recover
+    recover_impl = recover_fn or (lambda comp: _default_recover(comp, settings=settings))
     probes = probe_impl(settings)
 
     actions: dict[str, str] = {}
@@ -377,10 +412,15 @@ def run_watchdog_once(
                 rec = recover_impl(name)
                 recovery_details[name] = rec
                 comp["last_recovery_ts"] = now
-                actions[name] = "restarted" if rec.get("ok") else "recovery_failed"
+                if rec.get("skipped"):
+                    actions[name] = "remote_unhealthy"
+                else:
+                    actions[name] = "restarted" if rec.get("ok") else "recovery_failed"
 
         comp["healthy"] = bool(check.get("healthy"))
         comp["last_checked_at"] = iso_now
+        if "ready_status" in check:
+            comp["ready_status"] = check["ready_status"]
         components_state[name] = comp
 
     state["last_run_at"] = iso_now
