@@ -222,3 +222,85 @@ def test_disabled_plugins_filtered_and_repo_dual_skills_deduped(tmp_path: Path) 
     assert link.is_symlink()
     assert str(link.readlink()) == "../../.agents/skills/grill-me"
     assert Path(dedupe["manifestFile"]).exists()
+
+
+def test_claude_synced_pdf_no_false_collision_and_unify_claude_only_and_remote_offline(
+    tmp_path: Path,
+) -> None:
+    from mcp_stack.skills import dedupe_repo_dual_skills, sync_skills_to_remote_host
+
+    home, mpath = _setup_fixture_home(tmp_path)
+    # Remove target/repo grilling; add vendor-only pdf in claude-synced + codex-plugin
+    (home / ".codex/skills/grilling").rename(home / ".agents/skills/grilling-moved")
+    (home / "repos/sample_repo/.agents/skills/grill-me").rename(
+        home / ".agents/skills/grill-me-moved"
+    )
+    (home / "repos/sample_repo/.claude/skills/grill-me").rename(
+        home / ".agents/skills/grill-me-moved2"
+    )
+    _write_skill(home / ".claude/skills/synced/bucket-1", "pdf", "cloud pdf")
+    codex_pdf = home / ".codex/plugins/cache/openai-primary-runtime/pdf/1.0/skills/pdf"
+    _write_skill(codex_pdf.parent, "pdf", "codex runtime pdf")
+
+    # Add Claude-only repo skill (vault-ops) + repo override of canonical alpha-skill
+    _write_skill(home / "repos/sample_repo/.claude/skills", "vault-ops", "claude only vault ops")
+    _write_skill(home / "repos/sample_repo/.agents/skills", "alpha-skill", "repo override alpha")
+
+    # Re-write manifest adding pdf to plugin_owned_skills and an unpopulated mlflow-registry source
+    mpath.write_text(
+        """
+version: 1
+quarantine_root: ~/.local/share/mcp-stack/skill-quarantine
+sources:
+  atelier-personal:
+    path: ~/repos/atelier/templates/agents/skills
+    kind: canonical-repo
+    owner: personal
+    atelier_managed: [agent-coordination]
+    skills: [alpha-skill]
+  mlflow-web:
+    path: ~/.local/share/mcp-stack/registry-skills/web
+    kind: mlflow-registry
+    owner: web
+    include_all: true
+targets:
+  claude-code:
+    dir: ~/.claude/skills
+    sources: [atelier-personal, mlflow-web]
+    ignore_names: [synced]
+plugin_owned_skills: [pdf, grilling, grill-me]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    manifest = load_skills_manifest(mpath)
+    report = audit_skills(manifest, home_dir=home, repos_root=home / "repos")
+    assert report["summary"]["collisions"] == 0
+    assert report["summary"]["repoOverrides"] == 1
+    assert report["repoOverrides"][0]["skill"] == "alpha-skill"
+
+    # Unify Claude-only repo skill into .agents/skills/vault-ops + relative symlink
+    unify = dedupe_repo_dual_skills(
+        home / "repos",
+        repo_names=["sample_repo"],
+        quarantine_root=home / ".local/share/mcp-stack/skill-quarantine",
+        dry_run=False,
+        home_dir=home,
+        unify_claude_only=True,
+    )
+    assert unify["unifiedClaudeOnlyCount"] == 1
+    assert (home / "repos/sample_repo/.agents/skills/vault-ops/SKILL.md").is_file()
+    vlink = home / "repos/sample_repo/.claude/skills/vault-ops"
+    assert vlink.is_symlink()
+    assert str(vlink.readlink()) == "../../.agents/skills/vault-ops"
+
+    # Offline Mac mini fallback returns cleanly without raising
+    remote_res = sync_skills_to_remote_host(
+        manifest,
+        ssh_host="unreachable-host.invalid",
+        ssh_bin="/usr/bin/false",
+        dry_run=False,
+        home_dir=home,
+    )
+    assert remote_res["status"] == "offline_skipped"
+    assert remote_res["fallback"] == "remote_keeps_last_verified"

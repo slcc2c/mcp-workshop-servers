@@ -7,6 +7,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,11 +26,21 @@ class SkillSourceSpec(BaseModel):
     """Canonical source directory containing owned SKILL.md folders."""
 
     path: str
-    kind: Literal["canonical-repo", "domain-repo", "vendor-plugin"] = "canonical-repo"
+    kind: Literal["canonical-repo", "domain-repo", "vendor-plugin", "mlflow-registry"] = (
+        "canonical-repo"
+    )
     owner: str = "personal"
     include_all: bool = False
     skills: list[str] = Field(default_factory=list)
     atelier_managed: list[str] = Field(default_factory=list)
+
+
+_SOURCE_PRECEDENCE_RANK: dict[str, int] = {
+    "canonical-repo": 0,
+    "domain-repo": 1,
+    "mlflow-registry": 2,
+    "vendor-plugin": 3,
+}
 
 
 class SkillTargetSpec(BaseModel):
@@ -157,14 +169,21 @@ def _collect_canonical_skills(
     manifest: SkillsManifest,
     home: Path,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Build canonical skill map keyed by skill directory name."""
+    """Build canonical skill map keyed by skill directory name with deterministic precedence."""
     canonical: dict[str, dict[str, Any]] = {}
     missing_sources: list[str] = []
 
-    for src_id, spec in manifest.sources.items():
+    ordered_sources = sorted(
+        enumerate(manifest.sources.items()),
+        key=lambda item: (_SOURCE_PRECEDENCE_RANK.get(item[1][1].kind, 99), item[0]),
+    )
+
+    for _, (src_id, spec) in ordered_sources:
         src_dir = _expand_user_path(spec.path, home)
         if not src_dir.exists():
-            missing_sources.append(f"{src_id}: {src_dir}")
+            # An unpopulated mlflow-registry cache dir is valid before first web skill install.
+            if spec.kind != "mlflow-registry" or not spec.include_all:
+                missing_sources.append(f"{src_id}: {src_dir}")
             continue
         if spec.include_all:
             names = sorted(
@@ -181,6 +200,15 @@ def _collect_canonical_skills(
             if not (skill_path / "SKILL.md").exists():
                 missing_sources.append(f"{src_id}/{name}: missing SKILL.md at {skill_path}")
                 continue
+            if name in canonical:
+                existing = canonical[name]
+                overridden = list(existing.get("overriddenSources") or [])
+                overridden.append(src_id)
+                existing["overriddenSources"] = overridden
+                missing_sources.append(
+                    f"{src_id}/{name}: shadowed by '{existing['sourceId']}'"
+                )
+                continue
             meta = parse_skill_frontmatter(skill_path / "SKILL.md")
             canonical[name] = {
                 "name": name,
@@ -193,6 +221,7 @@ def _collect_canonical_skills(
                 "resolvedPath": str(skill_path.resolve()),
                 "hash": hash_skill_dir(skill_path),
                 "atelierManaged": name in atelier_set,
+                "overriddenSources": [],
             }
     return canonical, missing_sources
 
@@ -537,7 +566,10 @@ def audit_skills(
                         "path": re_item["path"],
                     }
                 )
-        if len(occurrences) > 1 or any(o["layer"].startswith("target:") for o in occurrences):
+        if any(
+            o["layer"].startswith(("target:", "canonical:", "repo:"))
+            for o in occurrences
+        ):
             collisions.append(
                 {
                     "group": pskill,
@@ -614,6 +646,24 @@ def audit_skills(
         if len(items) > 1 and not any(x["isSymlink"] for x in items)
     ]
 
+    # Informational repo-local overrides of canonical global skills
+    repo_overrides: list[dict[str, Any]] = []
+    seen_override_keys: set[tuple[str, str]] = set()
+    for re_item in repo_entries:
+        sk_name = str(re_item["skill"])
+        if sk_name in canonical and (re_item["repo"], sk_name) not in seen_override_keys:
+            seen_override_keys.add((re_item["repo"], sk_name))
+            repo_overrides.append(
+                {
+                    "repo": re_item["repo"],
+                    "skill": sk_name,
+                    "subpath": re_item["subpath"],
+                    "path": re_item["path"],
+                    "overridesSource": canonical[sk_name]["sourceId"],
+                    "precedence": "repo-local > personal > web > plugin",
+                }
+            )
+
     skills_matrix = [
         {
             **cmeta,
@@ -644,6 +694,7 @@ def audit_skills(
             "collisions": len(collisions),
             "legacyItems": len(legacy_items),
             "repoDualCopies": len(repo_dual_copies),
+            "repoOverrides": len(repo_overrides),
             "pluginSkills": len(plugin_entries),
         },
         "sourceWarnings": source_warnings,
@@ -653,6 +704,7 @@ def audit_skills(
         "collisions": collisions,
         "legacyItems": legacy_items,
         "repoDualCopies": repo_dual_copies,
+        "repoOverrides": repo_overrides,
         "pluginSkills": plugin_entries,
     }
 
@@ -982,6 +1034,7 @@ def dedupe_repo_dual_skills(
     quarantine_root: Path | None = None,
     dry_run: bool = True,
     home_dir: Path | None = None,
+    unify_claude_only: bool = False,
 ) -> dict[str, Any]:
     """Quarantine identical .claude/skills/<name> copies and link to ../../.agents/skills/<name>."""
     home = (home_dir or Path.home()).resolve()
@@ -997,6 +1050,7 @@ def dedupe_repo_dual_skills(
     wanted = set(repo_names) if repo_names else None
     actions: list[dict[str, Any]] = []
     skipped_diverged: list[dict[str, Any]] = []
+    unified_claude_only: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
 
     if r_root.exists() and r_root.is_dir():
@@ -1049,6 +1103,43 @@ def dedupe_repo_dual_skills(
                         "relativeTarget": rel_target,
                     }
                 )
+            if unify_claude_only:
+                for claude_entry in sorted(claude_dir.iterdir()):
+                    if (
+                        claude_entry.name.startswith(".")
+                        or claude_entry.name.startswith("_")
+                        or claude_entry.is_symlink()
+                        or not (claude_entry / "SKILL.md").exists()
+                    ):
+                        continue
+                    agent_dest = agents_dir / claude_entry.name
+                    if agent_dest.exists() or agent_dest.is_symlink():
+                        continue
+                    rel_target = os.path.relpath(agent_dest, claude_entry.parent)
+                    if not dry_run:
+                        shutil.copytree(
+                            claude_entry,
+                            agent_dest,
+                            ignore=shutil.ignore_patterns(".DS_Store", "__pycache__"),
+                        )
+                        _quarantine_item(
+                            claude_entry,
+                            batch_dir,
+                            f"repos/{repo.name}/claude-only",
+                            "repo_claude_only_unify",
+                            records,
+                            dry_run=False,
+                        )
+                        claude_entry.symlink_to(rel_target)
+                    unified_claude_only.append(
+                        {
+                            "repo": repo.name,
+                            "skill": claude_entry.name,
+                            "agentsPath": str(agent_dest),
+                            "claudePath": str(claude_entry),
+                            "relativeTarget": rel_target,
+                        }
+                    )
 
     manifest_file: Path | None = None
     if not dry_run and records:
@@ -1064,7 +1155,219 @@ def dedupe_repo_dual_skills(
         "quarantineBatch": str(batch_dir) if (not dry_run and records) else None,
         "manifestFile": str(manifest_file) if manifest_file else None,
         "dedupedCount": len(actions),
+        "unifiedClaudeOnlyCount": len(unified_claude_only),
         "skippedDivergedCount": len(skipped_diverged),
         "actions": actions,
+        "unifiedClaudeOnly": unified_claude_only,
         "skippedDiverged": skipped_diverged,
+    }
+
+
+def quarantine_paths(
+    paths: list[Path],
+    *,
+    quarantine_root: Path,
+    reason: str,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Move arbitrary clutter files/dirs into a timestamped quarantine batch with manifest.json."""
+    q_base = quarantine_root.expanduser()
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    batch_dir = q_base / f"{stamp}-cleanup"
+    records: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    missing: list[str] = []
+
+    for p in paths:
+        cand = p.expanduser()
+        if not cand.exists() and not cand.is_symlink():
+            missing.append(str(cand))
+            continue
+        act = _quarantine_item(
+            cand,
+            batch_dir,
+            "explicit",
+            reason,
+            records,
+            dry_run=dry_run,
+        )
+        actions.append(act)
+
+    manifest_file: Path | None = None
+    if not dry_run and records:
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        manifest_file = batch_dir / "manifest.json"
+        manifest_file.write_text(
+            json.dumps({"createdAt": stamp, "records": records}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    return {
+        "dryRun": dry_run,
+        "quarantineBatch": str(batch_dir) if (not dry_run and records) else None,
+        "manifestFile": str(manifest_file) if manifest_file else None,
+        "quarantinedCount": len(actions),
+        "missing": missing,
+        "actions": actions,
+    }
+
+
+def sync_skills_to_remote_host(
+    manifest: SkillsManifest,
+    *,
+    ssh_host: str = "spencers-mac-mini",
+    ssh_bin: str = "ssh",
+    rsync_bin: str = "rsync",
+    ssh_timeout_s: float = 5.0,
+    dry_run: bool = True,
+    home_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Push canonical + MLflow-materialized skills to remote host with offline fallback."""
+    home = (home_dir or Path.home()).resolve()
+    canonical, warnings = _collect_canonical_skills(manifest, home)
+    export_items: dict[str, dict[str, Any]] = {}
+    for tid in ("claude-code", "codex"):
+        tspec = manifest.targets.get(tid)
+        if tspec is None:
+            continue
+        for sid in tspec.sources:
+            for cname, cmeta in canonical.items():
+                if cmeta["sourceId"] == sid and cname not in export_items:
+                    export_items[cname] = cmeta
+
+    try:
+        probe = subprocess.run(
+            [
+                ssh_bin,
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                f"ConnectTimeout={max(1, int(ssh_timeout_s))}",
+                ssh_host,
+                "true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=ssh_timeout_s + 5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "status": "offline_skipped",
+            "host": ssh_host,
+            "dryRun": dry_run,
+            "skillCount": len(export_items),
+            "fallback": "remote_keeps_last_verified",
+            "detail": str(exc),
+        }
+
+    if probe.returncode != 0:
+        return {
+            "status": "offline_skipped",
+            "host": ssh_host,
+            "dryRun": dry_run,
+            "skillCount": len(export_items),
+            "fallback": "remote_keeps_last_verified",
+            "detail": (probe.stderr or probe.stdout or f"exit {probe.returncode}").strip(),
+        }
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "host": ssh_host,
+            "dryRun": True,
+            "skillCount": len(export_items),
+            "skills": sorted(export_items.keys()),
+            "sourceWarnings": warnings,
+        }
+
+    remote_bundle = "~/.local/share/mcp-stack/registry-skills/synced-bundle"
+    with tempfile.TemporaryDirectory(prefix="mcp-skill-remote-") as tmp:
+        stage_dir = Path(tmp) / "bundle"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        for cname, cmeta in sorted(export_items.items()):
+            src = Path(cmeta["resolvedPath"])
+            if src.is_dir():
+                shutil.copytree(
+                    src,
+                    stage_dir / cname,
+                    ignore=shutil.ignore_patterns(".DS_Store", "__pycache__", ".git"),
+                )
+
+        subprocess.run(
+            [ssh_bin, ssh_host, f"mkdir -p {remote_bundle} ~/.claude/skills ~/.codex/skills"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        subprocess.run(
+            [
+                rsync_bin,
+                "-az",
+                "--delete",
+                "--delay-updates",
+                f"{stage_dir}/",
+                f"{ssh_host}:{remote_bundle}/",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    remote_py = """
+import json
+from pathlib import Path
+
+bundle = Path.home() / ".local/share/mcp-stack/registry-skills/synced-bundle"
+skills = sorted(p.name for p in bundle.iterdir() if p.is_dir() and (p / "SKILL.md").is_file())
+linked = {}
+for target in (Path.home() / ".claude/skills", Path.home() / ".codex/skills"):
+    target.mkdir(parents=True, exist_ok=True)
+    # Remove stale symlinks pointing into our registry-skills bundle
+    for entry in list(target.iterdir()):
+        if entry.is_symlink():
+            try:
+                raw_dest = str(entry.readlink())
+            except OSError:
+                continue
+            if "registry-skills/synced-bundle" in raw_dest and entry.name not in skills:
+                entry.unlink()
+    cnt = 0
+    for name in skills:
+        dest = target / name
+        src = bundle / name
+        if dest.is_symlink():
+            try:
+                if dest.resolve() == src.resolve():
+                    cnt += 1
+                    continue
+            except OSError:
+                pass
+            dest.unlink()
+        elif dest.exists():
+            continue
+        dest.symlink_to(src)
+        cnt += 1
+    linked[str(target)] = cnt
+print(json.dumps({"skills": len(skills), "targets": linked}))
+""".strip()
+
+    res = subprocess.run(
+        [ssh_bin, ssh_host, "/usr/bin/python3", "-"],
+        input=remote_py,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    remote_summary = json.loads(res.stdout.strip() or "{}")
+    return {
+        "status": "synced",
+        "host": ssh_host,
+        "dryRun": False,
+        "skillCount": len(export_items),
+        "remoteSummary": remote_summary,
+        "sourceWarnings": warnings,
     }

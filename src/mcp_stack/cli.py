@@ -65,14 +65,23 @@ from mcp_stack.service import (
     rotate_service_logs,
     tail_service_logs,
 )
+from mcp_stack.skill_registry import (
+    absorb_skills_dir,
+    import_web_skill,
+    publish_local_skills_to_mlflow,
+    restore_registry_from_lockfile,
+    upgrade_web_skills,
+)
 from mcp_stack.skills import (
     audit_skills,
     dedupe_repo_dual_skills,
     load_skills_manifest,
     promote_skill,
+    quarantine_paths,
     resolve_manifest_path,
     rollback_quarantine,
     sync_skills,
+    sync_skills_to_remote_host,
 )
 from mcp_stack.uc_bootstrap import bootstrap_oss_unity_catalog
 from mcp_stack.watchdog import collect_passive_drift_summary, run_watchdog_once
@@ -1091,6 +1100,11 @@ def skills_rollback(
 @skills_app.command("dedupe-repos")
 def skills_dedupe_repos(
     repo: list[str] = typer.Option([], "--repo", help="Specific repo directory name(s)"),
+    unify_claude_only: bool = typer.Option(
+        False,
+        "--unify-claude-only",
+        help="Also move Claude-only .claude/skills/<name> into .agents/skills and symlink",
+    ),
     apply: bool = typer.Option(
         False, "--apply", help="Quarantine identical .claude/skills copies & create symlinks"
     ),
@@ -1112,7 +1126,155 @@ def skills_dedupe_repos(
         repo_names=repo or None,
         quarantine_root=q_root,
         dry_run=not apply,
+        unify_claude_only=unify_claude_only,
     )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("publish-mlflow")
+def skills_publish_mlflow(
+    include_repos: bool = typer.Option(
+        True, "--include-repos/--no-include-repos", help="Also publish repo-local skills"
+    ),
+    force_prod: bool = typer.Option(
+        False, "--force-prod", help="Promote even dirty working-tree skills to @production"
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Register versions into MLflow 3.18"),
+    repos_root: Path | None = typer.Option(None, "--repos-root", help="Repos root path"),
+) -> None:
+    """Publish manifest canonical & repo-local skills into MLflow 3.18 Skill Registry."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = publish_local_skills_to_mlflow(
+        settings,
+        include_repos=include_repos,
+        force_prod=force_prod,
+        dry_run=not apply,
+        repos_root=repos_root,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("add")
+def skills_add(
+    source: str = typer.Argument(..., help="GitHub URL, ZIP URL/path, OCI URI, or local skill dir"),
+    org: str = typer.Option("web", "--org", help="MLflow Skill Registry organization"),
+    name: str | None = typer.Option(None, "--name", help="Optional skill name override"),
+    skill: list[str] = typer.Option([], "--skill", help="Subset of skill names for Git import"),
+    allow_shadow: bool = typer.Option(
+        False, "--allow-shadow", help="Allow shadowing a personal canonical skill"
+    ),
+    no_sync: bool = typer.Option(False, "--no-sync", help="Skip projecting harness symlinks"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview without mutating MLflow or disk"
+    ),
+) -> None:
+    """Install a web/third-party skill once into MLflow 3.18, lockfile, cache, and harnesses."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = import_web_skill(
+        settings,
+        source=source,
+        organization=org,
+        skill_names=skill or None,
+        name=name,
+        allow_shadow=allow_shadow,
+        sync_harnesses=not no_sync,
+        dry_run=dry_run,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("absorb")
+def skills_absorb(
+    source_dir: Path = typer.Argument(..., help="Directory of skill folders to absorb"),
+    org: str = typer.Option("web", "--org", help="Target MLflow organization"),
+    apply: bool = typer.Option(
+        False, "--apply", help="Import & materialize skills (default dry-run)"
+    ),
+) -> None:
+    """Absorb unmanaged third-party skills into MLflow @production, lockfile, and harnesses."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = absorb_skills_dir(
+        settings,
+        source_dir,
+        organization=org,
+        dry_run=not apply,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("upgrade")
+def skills_upgrade(
+    name: list[str] = typer.Option([], "--name", help="Specific locked web skill name(s)"),
+    apply: bool = typer.Option(False, "--apply", help="Apply remote upgrades (default dry-run)"),
+) -> None:
+    """Re-fetch remote MLflow web skills from web-skills-lock.yaml."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = upgrade_web_skills(
+        settings,
+        names=name or None,
+        dry_run=not apply,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("restore-registry")
+def skills_restore_registry(
+    apply: bool = typer.Option(False, "--apply", help="Rebuild MLflow registry (default dry-run)"),
+) -> None:
+    """Rebuild MLflow 3.18 Skill Registry from skills-manifest.yaml + web-skills-lock.yaml."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    res = restore_registry_from_lockfile(settings, dry_run=not apply)
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("sync-remote")
+def skills_sync_remote(
+    host: str = typer.Option(
+        "", "--host", help="SSH host (defaults to settings.mac_mini.ssh_host)"
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Push bundle via rsync/SSH (default dry-run)"
+    ),
+    manifest: Path | None = typer.Option(None, "--manifest", help="Optional skills manifest path"),
+) -> None:
+    """Sync materialized + shared @production skills to Mac mini with offline fallback."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    mpath = resolve_manifest_path(manifest, configured=settings.skills.manifest_path)
+    loaded = load_skills_manifest(mpath)
+    res = sync_skills_to_remote_host(
+        loaded,
+        ssh_host=host.strip() or settings.mac_mini.ssh_host,
+        ssh_bin=settings.mac_mini.ssh_bin,
+        ssh_timeout_s=settings.mac_mini.ssh_timeout_s,
+        dry_run=not apply,
+    )
+    typer.echo(json.dumps(res, indent=2))
+
+
+@skills_app.command("quarantine")
+def skills_quarantine(
+    paths: list[Path] = typer.Argument(..., help="Paths to move into recoverable quarantine"),
+    reason: str = typer.Option("manual_cleanup", "--reason", help="Quarantine audit reason"),
+    apply: bool = typer.Option(False, "--apply", help="Move paths to quarantine (default dry-run)"),
+    manifest: Path | None = typer.Option(None, "--manifest", help="Optional skills manifest path"),
+) -> None:
+    """Move arbitrary clutter files/dirs to recoverable quarantine with manifest.json."""
+    settings = load_settings()
+    configure_logging("WARNING")
+    q_root = settings.skills.quarantine_dir
+    try:
+        mpath = resolve_manifest_path(manifest, configured=settings.skills.manifest_path)
+        if mpath.exists():
+            q_root = Path(load_skills_manifest(mpath).quarantine_root)
+    except Exception:
+        pass
+    res = quarantine_paths(paths, quarantine_root=q_root, reason=reason, dry_run=not apply)
     typer.echo(json.dumps(res, indent=2))
 
 

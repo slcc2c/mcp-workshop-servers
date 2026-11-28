@@ -15,13 +15,16 @@ export function SkillRegistryPanel() {
   const [skills, setSkills] = useState<SkillRegistryItem[]>([]);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [orgFilter, setOrgFilter] = useState("");
+  const [organizations, setOrganizations] = useState<string[]>([]);
   const [selected, setSelected] = useState<SkillRegistryDetailResponse | null>(null);
   const [showPublish, setShowPublish] = useState(false);
   const [publishSource, setPublishSource] = useState("");
   const [publishName, setPublishName] = useState("");
-  const [publishOrg, setPublishOrg] = useState("");
-  const [publishStatus, setPublishStatus] = useState("draft");
+  const [publishOrg, setPublishOrg] = useState("web");
+  const [publishStatus, setPublishStatus] = useState("active");
   const [aliasInput, setAliasInput] = useState("production");
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
@@ -31,17 +34,19 @@ export function SkillRegistryPanel() {
       const res = await api.mlflowSkills({
         ...(query.trim() ? { q: query.trim() } : {}),
         ...(statusFilter ? { status: statusFilter } : {}),
+        ...(orgFilter ? { organization: orgFilter } : {}),
       });
       setSupported(res.supported);
       setServerVersion(res.serverVersion ?? null);
       setRequiredVersion(res.requiredVersion || "3.18.0");
+      setOrganizations(res.organizations || []);
       setSkills(res.skills || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  }, [query, statusFilter]);
+  }, [query, statusFilter, orgFilter]);
 
   useEffect(() => {
     loadList();
@@ -60,22 +65,41 @@ export function SkillRegistryPanel() {
     }
   };
 
-  const handlePublish = async () => {
+  const handleImportWeb = async () => {
     if (!publishSource.trim()) return;
     setError(null);
+    setInfoMsg(null);
     try {
-      await api.publishMlflowSkill({
+      const res = await api.importWebSkill({
         source: publishSource.trim(),
+        organization: publishOrg.trim() || "web",
         ...(publishName.trim() ? { name: publishName.trim() } : {}),
-        ...(publishOrg.trim() ? { organization: publishOrg.trim() } : {}),
-        status: publishStatus,
+        syncHarnesses: true,
       });
+      setInfoMsg(`Installed ${res.importedCount} web skill(s) into MLflow & harnesses.`);
       setShowPublish(false);
       setPublishSource("");
       setPublishName("");
       await loadList();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handlePublishAll = async () => {
+    setError(null);
+    setInfoMsg(null);
+    setLoading(true);
+    try {
+      const res = await api.publishAllMlflowSkills({ includeRepos: true, dryRun: false });
+      setInfoMsg(
+        `Published ${res.publishedCount} local skill(s) (${res.unchangedCount} unchanged, ${res.errorCount} errors).`,
+      );
+      await loadList();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -138,12 +162,21 @@ export function SkillRegistryPanel() {
             </button>
             <button
               type="button"
+              onClick={handlePublishAll}
+              disabled={!supported || loading}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] disabled:opacity-50 text-[12px] cursor-pointer"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              Publish Local Skills
+            </button>
+            <button
+              type="button"
               onClick={() => setShowPublish((v) => !v)}
               disabled={!supported}
               className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-[var(--accent)] hover:brightness-110 disabled:opacity-50 text-white text-[12px] font-semibold cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
-              Register Skill
+              Install Web Skill
             </button>
           </div>
         </div>
@@ -156,6 +189,19 @@ export function SkillRegistryPanel() {
             placeholder="Search MLflow skills..."
             className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[12.5px] min-w-[200px]"
           />
+          <select
+            aria-label="Filter registry skill organization"
+            value={orgFilter}
+            onChange={(e) => setOrgFilter(e.target.value)}
+            className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[12px]"
+          >
+            <option value="">All orgs</option>
+            {organizations.map((org) => (
+              <option key={org} value={org}>
+                {org}
+              </option>
+            ))}
+          </select>
           <select
             aria-label="Filter registry skill status"
             value={statusFilter}
@@ -176,7 +222,7 @@ export function SkillRegistryPanel() {
                 type="text"
                 value={publishSource}
                 onChange={(e) => setPublishSource(e.target.value)}
-                placeholder="Git URL or local skill directory"
+                placeholder="GitHub URL, ZIP URL, or local skill dir"
                 className="md:col-span-2 rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[12px] font-mono"
               />
               <input
@@ -190,7 +236,7 @@ export function SkillRegistryPanel() {
                 type="text"
                 value={publishOrg}
                 onChange={(e) => setPublishOrg(e.target.value)}
-                placeholder="Organization (optional)"
+                placeholder="Organization (default: web)"
                 className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1.5 text-[12px] font-mono"
               />
             </div>
@@ -200,18 +246,50 @@ export function SkillRegistryPanel() {
                 onChange={(e) => setPublishStatus(e.target.value)}
                 className="rounded-lg border border-[var(--border-hairline)] bg-[var(--code-bg)] px-2.5 py-1 text-[12px]"
               >
-                <option value="draft">draft</option>
                 <option value="active">active</option>
+                <option value="draft">draft</option>
               </select>
               <button
                 type="button"
-                onClick={handlePublish}
+                onClick={handleImportWeb}
                 className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-[var(--accent)] text-white text-[12px] font-semibold cursor-pointer"
               >
                 <Upload className="w-3.5 h-3.5" />
-                Register
+                Install Web Skill (URL)
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!publishSource.trim()) return;
+                  setError(null);
+                  setInfoMsg(null);
+                  try {
+                    await api.publishMlflowSkill({
+                      source: publishSource.trim(),
+                      ...(publishName.trim() ? { name: publishName.trim() } : {}),
+                      ...(publishOrg.trim() ? { organization: publishOrg.trim() } : {}),
+                      status: publishStatus,
+                    });
+                    setInfoMsg("Registered skill in MLflow.");
+                    setShowPublish(false);
+                    setPublishSource("");
+                    setPublishName("");
+                    await loadList();
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--border-hairline)] bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] text-[12px] cursor-pointer"
+              >
+                Register Only
               </button>
             </div>
+          </div>
+        )}
+
+        {infoMsg && (
+          <div className="rounded-lg bg-[var(--accent-soft)] px-3 py-2 text-[12px] text-[var(--text-primary)]">
+            {infoMsg}
           </div>
         )}
 
