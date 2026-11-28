@@ -74,6 +74,7 @@ def test_secret_resolver_1password_vault_allowlist_and_ttl() -> None:
     resolver = SecretResolver(
         SecretsSettings(
             onepassword_enabled=True,
+            onepassword_mode="desktop-cli",
             onepassword_allowed_vaults=["AI"],
             cache_ttl_seconds=300,
         ),
@@ -98,3 +99,28 @@ def test_secret_resolver_1password_vault_allowlist_and_ttl() -> None:
     now = 500.0
     assert resolver.resolve("op://AI/GitHub/token") == "op-secret-val"
     assert len(calls) == 2
+
+
+def test_secret_resolver_refuses_desktop_fallback_without_service_account_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+    calls: list[list[str]] = []
+
+    def fake_runner(args: list[str]) -> CommandResult:
+        calls.append(args)
+        return CommandResult(returncode=0, stdout="should-not-run\n", stderr="")
+
+    resolver = SecretResolver(
+        SecretsSettings(
+            onepassword_enabled=True,
+            onepassword_allowed_vaults=["AI"],
+        ),
+        runner=fake_runner,
+    )
+    assert resolver.onepassword_mode() == "service-account-missing"
+    with pytest.raises(SecretAccessDeniedError) as exc_info:
+        resolver.resolve("op://AI/GitHub/token")
+    assert exc_info.value.reason_code == "service_account_missing"
+    assert calls == []
+    assert resolver.diagnostics()["configuredMode"] == "service-account"

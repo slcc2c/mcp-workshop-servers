@@ -783,6 +783,8 @@ def build_mlflow_router(state: GatewayRuntimeState) -> APIRouter:
             import mlflow.genai
 
             mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            if settings.mlflow.experiment_name:
+                mlflow.set_experiment(settings.mlflow.experiment_name)
             if version_or_alias.isdigit():
                 pv = mlflow.genai.load_prompt(name, version=int(version_or_alias))
             else:
@@ -931,6 +933,8 @@ def build_mlflow_router(state: GatewayRuntimeState) -> APIRouter:
             import mlflow.genai
 
             mlflow.set_tracking_uri(settings.mlflow.tracking_uri)
+            if settings.mlflow.experiment_name:
+                mlflow.set_experiment(settings.mlflow.experiment_name)
             pv = mlflow.genai.register_prompt(
                 name=name,
                 template=template,

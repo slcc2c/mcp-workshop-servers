@@ -1,0 +1,3 @@
+# Host MLflow (:5002) explicitly configures --allowed-hosts host.docker.internal:5002.
+[per-file-ignores]
+"docker-compose.yml" = ["docker-host-header-mismatch"]

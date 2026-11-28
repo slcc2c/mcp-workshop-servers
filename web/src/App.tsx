@@ -499,7 +499,7 @@ export function App() {
       onSelectTab={navigateTab}
       theme={theme}
       onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-      version={health?.version || "2.5.0"}
+      version={health?.version || "2.6.0"}
       readyStatus={ready?.status || "checking"}
       auth={auth}
       autoRefreshMs={autoRefreshMs}

@@ -8,7 +8,12 @@ from pathlib import Path
 import httpx
 
 from mcp_stack.client_configs import install_shell_hook
-from mcp_stack.watchdog import _default_eval_regression_probe, run_watchdog_once
+from mcp_stack.watchdog import (
+    _default_eval_regression_probe,
+    _default_probe,
+    _default_recover,
+    run_watchdog_once,
+)
 
 
 def test_watchdog_two_failure_threshold_cooldown_and_recovery(
@@ -196,3 +201,125 @@ def test_watchdog_eval_regression_detection_and_fail_open(
     assert probed["status"] == "regression"
     assert probed["min_score"] == 0.5
     assert probed["failing_metrics"] == {"tool_execution_success/mean": 0.5}
+
+
+def test_default_probe_decouples_gateway_health_from_ready_status(
+    make_settings, monkeypatch
+) -> None:
+    import mcp_stack.watchdog as wd
+
+    settings = make_settings()
+    settings.unity_catalog.base_url = "http://100.85.39.109:8082"
+
+    loaded_state = {"loaded": True, "state": "running", "pid": 1234}
+    monkeypatch.setattr(wd, "_launchctl_info", lambda _uid, _label: dict(loaded_state))
+
+    async def fake_probe_mcp(_url: str, timeout: float = 2.5):
+        return {"reachable": True}
+
+    monkeypatch.setattr(wd, "probe_mcp_http_endpoint", fake_probe_mcp)
+
+    health_payload = {"status": "healthy"}
+    health_code = 200
+    ready_payload = {"status": "degraded"}
+
+    def fake_get(url: str, params=None, timeout: float = 2.5):
+        if url.endswith("/health"):
+            return httpx.Response(health_code, json=health_payload)
+        if url.endswith("/ready"):
+            return httpx.Response(200, json=ready_payload)
+        return httpx.Response(200, json={"catalogs": []})
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    res = _default_probe(settings)
+    assert res["gateway"]["healthy"] is True
+    assert res["gateway"]["ready_status"] == "degraded"
+
+    # Real /health failure or unloaded launchd marks gateway unhealthy
+    health_code = 503
+    health_payload = {"status": "unhealthy"}
+    res_fail = _default_probe(settings)
+    assert res_fail["gateway"]["healthy"] is False
+
+    health_code = 200
+    health_payload = {"status": "healthy"}
+    loaded_state["loaded"] = False
+    res_unloaded = _default_probe(settings)
+    assert res_unloaded["gateway"]["healthy"] is False
+
+
+def test_default_recover_gates_docker_start_to_loopback_urls(
+    make_settings, tmp_path: Path, monkeypatch
+) -> None:
+    import mcp_stack.watchdog as wd
+
+    settings = make_settings()
+    settings.unity_catalog.base_url = "http://100.85.39.109:8082"
+
+    docker_calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        docker_calls.append(list(cmd))
+
+        class Proc:
+            returncode = 0
+            stdout = "mcp-unity-catalog"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr(wd.subprocess, "run", fake_run)
+
+    remote_rec = _default_recover("unity_catalog", settings=settings)
+    assert remote_rec["skipped"] is True
+    assert remote_rec["ok"] is False
+    assert docker_calls == []
+
+    # Loopback UC triggers local docker start
+    settings.unity_catalog.base_url = "http://localhost:8082"
+    local_rec = _default_recover("unity_catalog", settings=settings)
+    assert local_rec["ok"] is True
+    assert docker_calls == [["docker", "start", "mcp-unity-catalog"]]
+
+    # run_watchdog_once records remote_unhealthy and respects cooldown when skipped
+    settings.unity_catalog.base_url = "http://100.85.39.109:8082"
+    state_path = tmp_path / "state/watchdog.json"
+    log_path = tmp_path / "logs/watchdog.log"
+    now = 2000.0
+
+    def unhealthy_uc(_s):
+        return {
+            "unity_catalog": {"healthy": False, "detail": "timeout"},
+            "mlflow_mcp": {"healthy": True, "detail": ""},
+            "gateway": {"healthy": True, "detail": "", "ready_status": "degraded"},
+        }
+
+    run_watchdog_once(
+        settings,
+        state_path=state_path,
+        log_path=log_path,
+        probe_fn=unhealthy_uc,
+        clock=lambda: now,
+    )
+    now += 60.0
+    r2 = run_watchdog_once(
+        settings,
+        state_path=state_path,
+        log_path=log_path,
+        probe_fn=unhealthy_uc,
+        clock=lambda: now,
+    )
+    assert r2["actions"]["unity_catalog"] == "remote_unhealthy"
+    assert r2["components"]["gateway"]["ready_status"] == "degraded"
+    assert docker_calls == [["docker", "start", "mcp-unity-catalog"]]
+
+    now += 60.0
+    r3 = run_watchdog_once(
+        settings,
+        state_path=state_path,
+        log_path=log_path,
+        probe_fn=unhealthy_uc,
+        clock=lambda: now,
+    )
+    assert r3["actions"]["unity_catalog"] == "cooldown_active"

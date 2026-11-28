@@ -342,6 +342,7 @@ class SecretsSettings(BaseModel):
     """Secret resolution & optional 1Password CLI configuration."""
 
     onepassword_enabled: bool = False
+    onepassword_mode: Literal["service-account", "desktop-cli"] = "service-account"
     onepassword_cli: str = "op"
     onepassword_allowed_vaults: list[str] = Field(
         default_factory=lambda: ["AI", "Server-Configurations"]
@@ -743,6 +744,14 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
 
     if (b := _parse_bool(os.getenv("OP_ENABLED"))) is not None:
         env_overrides["secrets"]["onepassword_enabled"] = b
+    if val := os.getenv("OP_MODE"):
+        normalized_mode = val.strip().lower()
+        if normalized_mode in {"service-account", "desktop-cli"}:
+            env_overrides["secrets"]["onepassword_mode"] = normalized_mode
+        else:
+            raise ValueError(
+                f"Invalid OP_MODE '{val}'; expected 'service-account' or 'desktop-cli'"
+            )
     if val := os.getenv("OP_CLI_PATH"):
         env_overrides["secrets"]["onepassword_cli"] = val
     if (items := _split_csv(os.getenv("OP_ALLOWED_VAULTS"))) is not None:
