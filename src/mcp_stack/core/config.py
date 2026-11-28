@@ -186,8 +186,9 @@ class UnityCatalogSettings(BaseModel):
 
 
 class MemorySettings(BaseModel):
-    """SQLite + FTS5 memory server configuration."""
+    """Memory MCP server configuration (SQLite + FTS5 or unified Omnigent /v1/memory)."""
 
+    backend: Literal["sqlite", "omnigent"] = "sqlite"
     db_path: Path = Path("data/memory.db")
     legacy_json_path: Path = Path("data/memory.json")
     uc_export_volume: str | None = None
@@ -612,6 +613,8 @@ def load_settings(config_file: Path | None = None, *, load_dotenv: bool = True) 
     if (kv := _parse_kv_map(os.getenv("UC_VOLUME_LOCAL_PREFIX_MAP"))) is not None:
         env_overrides["unity_catalog"]["volume_local_prefix_map"] = kv
 
+    if val := os.getenv("MEMORY_BACKEND"):
+        env_overrides["memory"]["backend"] = val.strip().lower()
     if val := os.getenv("MEMORY_DB_PATH"):
         env_overrides["memory"]["db_path"] = Path(val)
     if val := os.getenv("MEMORY_LEGACY_JSON_PATH"):
