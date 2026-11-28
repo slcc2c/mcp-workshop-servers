@@ -10,7 +10,7 @@ import shutil
 import sys
 import webbrowser
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -164,6 +164,7 @@ def serve(
                 reload=True,
                 loop="asyncio",
                 log_config=None,
+                timeout_graceful_shutdown=5,
             )
         else:
             gw_app = build_gateway_app(settings)
@@ -173,6 +174,7 @@ def serve(
                 port=bind_port,
                 loop="asyncio",
                 log_config=None,
+                timeout_graceful_shutdown=5,
             )
         return
 
@@ -188,6 +190,7 @@ def serve(
             port=bind_port,
             loop="asyncio",
             log_config=None,
+            timeout_graceful_shutdown=5,
         )
         return
 
@@ -221,6 +224,7 @@ def serve(
             port=bind_port,
             loop="asyncio",
             log_config=None,
+            timeout_graceful_shutdown=5,
         )
         return
 
@@ -935,13 +939,76 @@ def upstream_list() -> None:
     typer.echo(json.dumps({"upstreams": items}, indent=2))
 
 
+def _probe_upstreams_via_gateway(settings: Any) -> list[dict[str, Any]] | None:
+    """Query and probe upstreams through the running gateway HTTP API, or return None offline."""
+    host = settings.gateway.host.strip()
+    if host in {"", "0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    base = f"http://{host}:{settings.gateway.port}".rstrip("/")
+    token = next(iter(settings.gateway.clients.keys()), "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        with httpx.Client(timeout=3.0, headers=headers) as client:
+            resp = client.get(f"{base}/api/v1/upstreams")
+            if resp.status_code != 200:
+                return None
+            items = resp.json().get("upstreams")
+            if not isinstance(items, list):
+                return None
+            probed: list[dict[str, Any]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                slug = str(item.get("slug") or "").strip()
+                status = str(item.get("status") or item.get("connectionStatus") or "")
+                enabled = item.get("enabled", status != "disabled")
+                if not slug or not enabled or status == "disabled":
+                    probed.append(item)
+                    continue
+                cfg = next(
+                    (
+                        v
+                        for k, v in settings.gateway.upstream_servers.items()
+                        if k.strip().replace("_", "-").lower() == slug
+                    ),
+                    None,
+                )
+                probe_timeout = max((cfg.timeout_s if cfg else 5.0) + 5.0, 15.0)
+                try:
+                    p_resp = client.post(
+                        f"{base}/api/v1/upstreams/{slug}/probe", timeout=probe_timeout
+                    )
+                    if p_resp.status_code == 200:
+                        upstream = p_resp.json().get("upstream")
+                        if isinstance(upstream, dict):
+                            probed.append(upstream)
+                            continue
+                except httpx.HTTPError:
+                    pass
+                probed.append(item)
+            return probed
+    except httpx.HTTPError:
+        return None
+
+
 @upstream_app.command("probe")
-def upstream_probe() -> None:
+def upstream_probe(
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help="Probe upstreams directly in this process instead of via the running gateway",
+    ),
+) -> None:
     """Probe live reachability and tool counts for configured external MCP servers."""
     settings = load_settings()
     configure_logging("WARNING")
+    if not local:
+        gateway_res = _probe_upstreams_via_gateway(settings)
+        if gateway_res is not None:
+            typer.echo(json.dumps({"source": "gateway", "upstreams": gateway_res}, indent=2))
+            return
     res = asyncio.run(probe_all_upstreams(settings))
-    typer.echo(json.dumps({"upstreams": res}, indent=2))
+    typer.echo(json.dumps({"source": "local", "upstreams": res}, indent=2))
 
 
 @upstream_app.command("add")

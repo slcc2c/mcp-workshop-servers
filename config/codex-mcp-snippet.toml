@@ -1,8 +1,3 @@
 [mcp_servers.mcp_workshop_gateway]
 url = "http://127.0.0.1:8090/profiles/core/mcp"
 bearer_token_env_var = "MCP_CODEX_AUTH_TOKEN"
-
-[mcp_servers.mcp_photos]
-command = "uv"
-args = ["--directory", "/Users/spencer/repos/mcp-server", "run", "mcp-stack", "serve", "photos", "--transport", "stdio"]
-env = { PHOTOS_EXPORT_ROOT = "/Users/spencer/Exports/photos-mcp" }

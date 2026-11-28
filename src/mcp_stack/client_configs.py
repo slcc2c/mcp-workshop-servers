@@ -411,7 +411,6 @@ def generate_client_configs(
     tool_catalog: dict[str, list[str]] | None = None,
 ) -> dict[str, str]:
     """Render configuration payloads for supported MCP clients."""
-    root_str = str(repo_root.resolve())
     gw_url = _gateway_mcp_url(settings, profile=profile)
     auth_enabled = settings.gateway.effective_auth_enabled
     include_direct_mlflow = not _profile_includes_mlflow(settings, profile)
@@ -433,24 +432,6 @@ def generate_client_configs(
             "type": "http",
             "url": settings.mlflow.mcp_url,
         }
-    claude_servers["mcp-photos"] = {
-        "command": "uv",
-        "args": [
-            "--directory",
-            root_str,
-            "run",
-            "mcp-stack",
-            "serve",
-            "photos",
-            "--transport",
-            "stdio",
-        ],
-        "env": {
-            "PHOTOS_EXPORT_ROOT": str(
-                settings.photos.export_root or "/Users/spencer/Exports/photos-mcp"
-            ),
-        },
-    }
     claude_code_payload: dict[str, Any] = {"mcpServers": claude_servers}
 
     claude_desktop_payload = {
@@ -479,9 +460,6 @@ def generate_client_configs(
         cursor_servers["mlflow"] = {"url": settings.mlflow.mcp_url}
     cursor_payload = {"mcpServers": cursor_servers}
 
-    photos_export = str(
-        settings.photos.export_root or "/Users/spencer/Exports/photos-mcp"
-    )
     codex_gateway_lines = [
         "[mcp_servers.mcp_workshop_gateway]",
         f'url = "{gw_url}"',
@@ -498,18 +476,6 @@ def generate_client_configs(
                 "",
             ]
         )
-    codex_parts.extend(
-        [
-            "[mcp_servers.mcp_photos]",
-            'command = "uv"',
-            (
-                f'args = ["--directory", "{root_str}", "run", "mcp-stack", '
-                '"serve", "photos", "--transport", "stdio"]'
-            ),
-            f'env = {{ PHOTOS_EXPORT_ROOT = "{photos_export}" }}',
-            "",
-        ]
-    )
     codex_toml = "\n".join(codex_parts)
 
     if auth_enabled:

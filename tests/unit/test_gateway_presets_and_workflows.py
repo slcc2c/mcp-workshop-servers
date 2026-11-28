@@ -248,11 +248,35 @@ async def test_presets_rest_and_mcp_resource_plus_trace_id(
     assert last_trace_id_var.get() is None
 
 
-def test_resolve_secret_mapping_prefixed_onepassword_with_spaces(make_settings) -> None:
+def test_resolve_secret_mapping_prefixed_onepassword_with_spaces(
+    make_settings, monkeypatch
+) -> None:
+    from mcp_stack.gateway.upstreams import resolve_secret_mapping_with_reasons
+
     settings = make_settings()
     settings.secrets.onepassword_enabled = True
-    settings.secrets.onepassword_mode = "desktop-cli"
     settings.secrets.onepassword_allowed_vaults = ["Server-Configurations"]
+
+    ref = "Bearer op://Server-Configurations/Linear API Key/credential"
+
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+    blocked_calls: list[list[str]] = []
+
+    def _blocked_runner(args: list[str]) -> CommandResult:
+        blocked_calls.append(args)
+        return CommandResult(returncode=0, stdout="should-not-run\n", stderr="")
+
+    blocked_resolver = SecretResolver(settings.secrets, runner=_blocked_runner)
+    resolved_blocked, missing_blocked, reasons_blocked = resolve_secret_mapping_with_reasons(
+        {"Authorization": SecretStr(ref)},
+        blocked_resolver,
+    )
+    assert resolved_blocked == {}
+    assert missing_blocked == ["op://Server-Configurations/Linear API Key/credential"]
+    assert reasons_blocked and reasons_blocked[0][0] == "service_account_missing"
+    assert blocked_calls == []
+
+    monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "ops_test_token")
 
     def _ok_runner(args: list[str]) -> CommandResult:
         assert args == [
@@ -262,7 +286,6 @@ def test_resolve_secret_mapping_prefixed_onepassword_with_spaces(make_settings) 
         ]
         return CommandResult(returncode=0, stdout="lin_demo_token_abc\n", stderr="")
 
-    ref = "Bearer op://Server-Configurations/Linear API Key/credential"
     ok_resolver = SecretResolver(settings.secrets, runner=_ok_runner)
     resolved, missing = resolve_secret_mapping(
         {"Authorization": SecretStr(ref)},
